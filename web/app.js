@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 const progress = createProgress(text => { $('progress').textContent = text; });
 let socket, state = 'closed', connected = false, context, media, source, worklet, micEpoch = 0;
 let speechAvailable = true;
+let emailAvailable = false;
 let cliSearchEnabled = false;
 let downloadToken = '', jobTimer;
 const answers = new Map();
@@ -34,6 +35,13 @@ function renderJobs(jobs) {
           link.href = url; link.download = `conversation-${job.id}.md`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch { notice('下载失败，请重新连接后重试。'); }
       }; row.append(button);
+      if (emailAvailable) {
+        const mail = document.createElement('button');
+        const names = { sending: '邮件发送中', accepted: '邮件已提交', failed: '邮件发送失败', unknown: '发送结果待核实' };
+        mail.textContent = names[job.mail_state] ?? '发到固定邮箱'; mail.disabled = !!job.mail_state;
+        mail.onclick = () => { if (window.confirm('将这份 MD 文件发送到你配置的固定邮箱？')) { mail.disabled = true; send({ type: 'jobs.email', id: job.id }); } };
+        row.append(mail);
+      }
     } else if (['queued', 'running'].includes(job.state)) {
       const button = document.createElement('button'); button.textContent = '取消任务';
       button.onclick = () => send({ type: 'jobs.cancel', id: job.id }); row.append(button);
@@ -67,6 +75,7 @@ $('connect').onclick = () => {
     const e = JSON.parse(data);
     progress.event(e);
     if (e.type === 'ready') {
+      emailAvailable = e.capabilities?.email === true;
       downloadToken = token; clearInterval(jobTimer);
       send({ type: 'jobs.list' }); jobTimer = setInterval(() => send({ type: 'jobs.list' }), 3000);
       connected = true; $('token').value = ''; notice('已连接。点击开启麦克风，或发送文字。');

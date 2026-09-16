@@ -10,6 +10,7 @@ import { createDialogueProvider } from './dialogue-provider.js';
 import { LiveTranscriber } from './live-transcriber.js';
 import { TurnDetector } from './vad.js';
 import { JobStore } from './job-store.js';
+import { createMailSender, type MailSender } from './mail.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
@@ -18,6 +19,7 @@ export function createConversationServer(options: {
   models?: { intent: string; reply: string };
   capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean };
   jobs?: JobStore;
+  mail?: MailSender;
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
   const files: Record<string, [string, string]> = {
@@ -134,10 +136,22 @@ export function createConversationServer(options: {
           if (msg.type !== 'hello' || given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Auth');
           if (owner && owner !== client) { send({ type: 'error', code: 'BUSY' }); client.close(); return; }
           owner = client; authenticated = true; clearTimeout(authTimer);
-          send({ type: 'ready', session_id: id, models: options.models, capabilities: options.capabilities }); send({ type: 'state', state: conversation.state }); return;
+          send({ type: 'ready', session_id: id, models: options.models, capabilities: { ...options.capabilities, email: !!options.mail } }); send({ type: 'state', state: conversation.state }); return;
         }
         lastActivity = Date.now();
         switch (msg.type) {
+          case 'jobs.email':
+            if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
+            if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid mail request');
+            send({ type: 'notice', text: '正在处理邮件请求；收件人为服务器配置的固定邮箱。' });
+            void options.jobs.email(msg.id, options.mail).then(result => {
+              send({ type: 'notice', text: result === 'accepted' ? '邮件已由发送服务器接受，请检查收件箱或垃圾邮件。'
+                : result === 'sending' ? '邮件发送中，请勿重复提交。'
+                : result === 'failed' ? '邮件发送失败；文件仍已保存。请检查发件配置。'
+                : '邮件发送结果不确定，请先检查邮箱；为避免重复，不会自动重发。' });
+              send({ type: 'jobs.list', jobs: options.jobs!.list() });
+            }).catch(() => send({ type: 'notice', text: '暂时无法发送：请确认文件已完成、没有其他发送任务，且未达到每日 20 次上限。' }));
+            break;
           case 'jobs.list': send({ type: 'jobs.list', jobs: options.jobs?.list() ?? [] }); break;
           case 'jobs.export':
             if (!options.jobs) { send({ type: 'notice', text: '文件存储未启用。' }); break; }
@@ -200,11 +214,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const key = process.env.OPENAI_API_KEY, token = process.env.G2_CLIENT_TOKEN;
   if (!token) throw new Error('Set G2_CLIENT_TOKEN in .env');
   const hybrid = createDialogueProvider();
+  const mail = createMailSender();
   const dataDirectory = resolve(process.env.EVEN_DATA_DIR ?? '.local');
   const jobs = await JobStore.create(dataDirectory);
   const save = fileSaver(resolve(dataDirectory, 'conversations'));
   const app = createConversationServer({ token, ...hybrid,
-    jobs,
+    jobs, mail,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key },
     transcriber: delta => {
       if (!key) throw new Error('Speech requires OPENAI_API_KEY');
