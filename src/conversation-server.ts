@@ -11,6 +11,7 @@ import { LiveTranscriber } from './live-transcriber.js';
 import { TurnDetector } from './vad.js';
 import { JobStore } from './job-store.js';
 import { createMailSender, type MailSender } from './mail.js';
+import { createDocumentRenderer, mailPresentation } from './document-presentation.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
@@ -37,7 +38,8 @@ export function createConversationServer(options: {
       try {
         if (!match || !options.jobs) throw new Error('Unavailable');
         const bytes = await options.jobs.download(match[1]);
-        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="conversation-${match[1]}.md"`,
+        const filename = encodeURIComponent(mailPresentation(options.jobs.metadata(match[1])).filename).replace(/'/g, '%27');
+        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="conversation.md"; filename*=UTF-8''${filename}`,
           'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" });
         res.end(bytes);
       } catch { res.writeHead(404); res.end('Artifact unavailable'); }
@@ -216,7 +218,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const hybrid = createDialogueProvider();
   const mail = createMailSender();
   const dataDirectory = resolve(process.env.EVEN_DATA_DIR ?? '.local');
-  const jobs = await JobStore.create(dataDirectory);
+  const jobs = await JobStore.create(dataDirectory, createDocumentRenderer());
   const save = fileSaver(resolve(dataDirectory, 'conversations'));
   const app = createConversationServer({ token, ...hybrid,
     jobs, mail,

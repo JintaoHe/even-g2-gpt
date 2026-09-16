@@ -24,7 +24,7 @@ Set `EVEN_DATA_DIR=/var/lib/even-agent` on Linux (local default `.local`). Keep 
   artifacts/          UUID.md completed output; UUID.part temporary output
 ```
 
-The first job type is deterministic conversation-to-Markdown export, not AI summarization and not Word/PDF generation. Use the webpage's “导出当前对话为 MD” button. It snapshots committed history; an answer still being generated is not included until committed. No extra model request is needed. Files are written by the application, not by giving Codex filesystem-write tools.
+The job type is conversation-to-Markdown export with a title and short summary above the full original conversation (not Word/PDF generation). Use the webpage's “导出当前对话为 MD” button. It snapshots committed history; an answer still being generated is not included until committed. API mode adds one bounded summary request by default; set `EMAIL_AI_SUMMARY=false` for a labelled local excerpt with no extra request. CLI mode uses excerpts. Files are written by the application, not by giving Codex filesystem-write tools. See [email presentation and delivery](EMAIL_DELIVERY.md).
 
 When migrating an existing installation, copy the complete data directory while stopped, including search-usage.json; changing EVEN_DATA_DIR to an empty location does not automatically migrate prior history or quota usage.
 

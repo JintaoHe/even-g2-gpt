@@ -24,7 +24,7 @@ function renderJobs(jobs) {
   $('jobs').replaceChildren();
   const names = { queued: '排队中', running: '导出中', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '服务中断，需重新提交' };
   for (const job of jobs) {
-    const row = document.createElement('div'); row.textContent = `MD · ${job.created} · ${names[job.state] ?? job.state} `;
+    const row = document.createElement('div'); row.textContent = `MD · ${job.title ?? '谈话笔记'} · ${job.created} · ${names[job.state] ?? job.state} `;
     if (job.state === 'completed') {
       const button = document.createElement('button'); button.textContent = '下载';
       button.onclick = async () => {
@@ -32,7 +32,7 @@ function renderJobs(jobs) {
           const response = await fetch(`/artifacts/${encodeURIComponent(job.id)}`, { headers: { Authorization: `Bearer ${downloadToken}` } });
           if (!response.ok) throw new Error('Download failed');
           const url = URL.createObjectURL(await response.blob()), link = document.createElement('a');
-          link.href = url; link.download = `conversation-${job.id}.md`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+          link.href = url; link.download = job.filename ?? '谈话笔记.md'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch { notice('下载失败，请重新连接后重试。'); }
       }; row.append(button);
       if (emailAvailable) {

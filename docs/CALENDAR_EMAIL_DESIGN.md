@@ -1,0 +1,26 @@
+# Calendar email: proposed next step, not implemented
+
+Email presentation is implemented separately. Calendar-file generation, calendar writes and voice-triggered scheduling are not enabled by this change.
+
+## Do not rely on inferred events
+
+Gmail's Events from Gmail feature supports specific confirmation categories (flights, hotels, restaurants, ticketed events), subject to account settings and eligibility. A personal assistant's generic conversation summary is not a reliable way to trigger it. Gmail's structured reservation markup also has sender registration requirements; do not pretend a suggestion is a confirmed booking.
+
+Apple documents Siri suggestions from Mail, Messages and Safari. Whether a particular personal email gets a suggestion is controlled by the receiving client and user settings, not guaranteed by our sender.
+
+## Recommended MVP
+
+Only after the user explicitly asks for a calendar item: collect a descriptive title, absolute date, start/end or all-day status, timezone, and optional location/notes. Resolve ambiguous relative dates and daylight-saving times with the user before creating the file. Show the interpreted event and obtain confirmation before email delivery.
+
+Attach a standard `.ics` iCalendar file alongside the MD with a meaningful filename. Show the same event details and timezone in the email body. The recipient imports it and chooses their calendar (including their iCloud calendar where the client supports it). Test Gmail web/iOS and Apple Mail separately: the availability and placement of an Add to Calendar button are client-dependent.
+
+Use stable event UIDs, escaped iCalendar text and correct UTF-8 line folding; distinguish timezone-aware timed events from all-day dates. Do not add alarms, attendees, subscriptions, invitation RSVP requests or external attachments by default. Do not automatically resend/import updates: stable UIDs alone do not guarantee deduplication across manual imports and clients. Explicit update/cancellation semantics need a separate design.
+
+This flow needs no iCloud account credential and grants the agent no calendar read/write permission. It is an importable file, not a silent write into the user's calendar. Automatic synchronization or editing existing events would require a separately authorized calendar integration.
+
+## Official references
+
+- [Google: Events from Gmail and limitations](https://support.google.com/calendar/answer/6084018?hl=en)
+- [Google: Registering a markup sender](https://developers.google.com/workspace/gmail/markup/registering-with-google)
+- [Apple: Event suggestions from other apps](https://support.apple.com/guide/iphone/create-and-edit-events-in-calendar-iph3d110f84/ios)
+- [Apple: Import calendar files on Mac](https://support.apple.com/guide/calendar/import-or-export-calendars-icl1023/mac)
