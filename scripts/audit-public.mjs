@@ -7,8 +7,12 @@ const findings = [];
 const secrets = [];
 try {
   for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
-    const match = /^\s*([A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (match) { const value = match[2].replace(/^['"]|['"]$/g, ''); if (value.length >= 12) secrets.push(value); }
+    const match = /^\s*([A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS)[A-Z_]*|SMTP_USER|EMAIL_FROM|EMAIL_TO)\s*=\s*(.*?)\s*$/.exec(line);
+    if (match) {
+      const value = match[2].replace(/^['"]|['"]$/g, '');
+      if (value.length >= 12) secrets.push(value);
+      if (match[1] === 'SMTP_PASS' && value.replace(/ /g, '').length >= 12) secrets.push(value.replace(/ /g, ''));
+    }
   }
 } catch (error) { if (error.code !== 'ENOENT') throw error; }
 for (const entry of entries) {

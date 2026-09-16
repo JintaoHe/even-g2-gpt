@@ -4,8 +4,9 @@ import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { Message } from './conversation.js';
+import type { MailSender } from './mail.js';
 
-export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number };
+export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number; mail_state?: string | null };
 const MAX_FILE = 2 * 1024 * 1024, MAX_TOTAL = 50 * 1024 * 1024;
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);
 
@@ -17,6 +18,7 @@ export class JobStore {
   private active?: string;
   private scheduled?: NodeJS.Immediate;
   private closePromise?: Promise<void>;
+  private mailing?: Promise<void>;
   private constructor(private db: DatabaseSync, private directory: string, private owner: string,
     private render: (history: Message[], signal: AbortSignal) => Promise<string>) {}
 
@@ -39,7 +41,8 @@ export class JobStore {
       db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
         CREATE TABLE IF NOT EXISTS service_owner (id INTEGER PRIMARY KEY CHECK(id=1), token TEXT, pid INTEGER, host TEXT);
         CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL,
-          updated TEXT NOT NULL, error TEXT, bytes INTEGER NOT NULL DEFAULT 0, input TEXT NOT NULL);`);
+          updated TEXT NOT NULL, error TEXT, bytes INTEGER NOT NULL DEFAULT 0, input TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS mail_deliveries (job_id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL);`);
       db.exec('BEGIN IMMEDIATE');
       const prior = db.prepare('SELECT * FROM service_owner WHERE id=1').get() as any;
       if (prior) {
@@ -51,13 +54,38 @@ export class JobStore {
       db.prepare('INSERT OR REPLACE INTO service_owner VALUES (1,?,?,?)').run(owner, process.pid, hostname());
       // Never replay a task that may already have produced output before a crash.
       db.prepare("UPDATE jobs SET state='interrupted',error='SERVICE_RESTARTED',input='[]',updated=? WHERE state='running'").run(new Date().toISOString());
+      db.exec("UPDATE mail_deliveries SET state='unknown' WHERE state='sending'");
       db.exec('COMMIT');
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} db.close(); throw error; }
     const store = new JobStore(db, artifacts, owner, render);
     store.kick(); return store;
   }
 
-  list(): Job[] { return this.db.prepare('SELECT id,state,created,updated,error,bytes FROM jobs ORDER BY created DESC LIMIT 100').all() as unknown as Job[]; }
+  list(): Job[] { return this.db.prepare('SELECT j.id,j.state,j.created,j.updated,j.error,j.bytes,m.state AS mail_state FROM jobs j LEFT JOIN mail_deliveries m ON j.id=m.job_id ORDER BY j.created DESC LIMIT 100').all() as unknown as Job[]; }
+  mailState(id: string): string | undefined {
+    return (this.db.prepare('SELECT state FROM mail_deliveries WHERE job_id=?').get(id) as { state: string } | undefined)?.state;
+  }
+  async email(id: string, sender: MailSender): Promise<string> {
+    if (this.closing) throw new Error('MAIL_STOPPING');
+    const prior = this.mailState(id);
+    if (prior) return prior; // One attempt per artifact, even across service restarts.
+    if (this.mailing) throw new Error('MAIL_BUSY');
+    const bytes = await this.download(id);
+    // Recheck after asynchronous I/O so simultaneous clicks cannot duplicate delivery.
+    if (this.closing || this.mailing) throw new Error('MAIL_BUSY');
+    const existing = this.mailState(id); if (existing) return existing;
+    const date = new Date().toISOString();
+    const count = this.db.prepare('SELECT COUNT(*) AS total FROM mail_deliveries WHERE created>=?').get(date.slice(0, 10)) as { total: number };
+    if (count.total >= 20) throw new Error('MAIL_DAILY_LIMIT');
+    this.db.prepare("INSERT INTO mail_deliveries VALUES (?,'sending',?)").run(id, date);
+    const operation = Promise.resolve().then(() => sender(id, bytes)).then(result => {
+      this.db.prepare('UPDATE mail_deliveries SET state=? WHERE job_id=?').run(result, id);
+    }).catch(() => {
+      this.db.prepare("UPDATE mail_deliveries SET state='unknown' WHERE job_id=?").run(id);
+    }).finally(() => { this.mailing = undefined; });
+    this.mailing = operation;
+    await operation; return this.mailState(id)!;
+  }
   get(id: string): Job | undefined {
     if (!validId(id)) return undefined;
     return this.db.prepare('SELECT id,state,created,updated,error,bytes FROM jobs WHERE id=?').get(id) as Job | undefined;
@@ -132,7 +160,7 @@ export class JobStore {
     return this.closePromise ??= (async () => {
       this.closing = true;
       if (this.scheduled) { clearImmediate(this.scheduled); this.scheduled = undefined; }
-      this.controller?.abort(); await this.busy;
+      this.controller?.abort(); await Promise.all([this.busy, this.mailing]);
       this.db.prepare('DELETE FROM service_owner WHERE id=1 AND token=?').run(this.owner);
       this.db.close();
     })();
