@@ -1,0 +1,31 @@
+[Unit]
+Description=Even Agent personal conversation service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=even-agent
+Group=even-agent
+WorkingDirectory=/opt/even-agent
+EnvironmentFile=/etc/even-agent.env
+Environment=EVEN_DATA_DIR=/var/lib/even-agent
+ExecStart=/usr/bin/node /opt/even-agent/src/conversation-server.js
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=30
+SendSIGKILL=yes
+StateDirectory=even-agent
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/even-agent /home/even-agent/.codex
+
+[Install]
+WantedBy=multi-user.target

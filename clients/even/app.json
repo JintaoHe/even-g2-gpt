@@ -1,0 +1,6 @@
+{
+  "package_id": "local.evenagent.simulator", "name": "Even Agent Dev", "version": "0.1.0",
+  "edition": "202601", "min_sdk_version": "0.0.14", "entrypoint": "index.html",
+  "permissions": [{ "name": "g2-microphone", "desc": "用户主动开启连续语音对话" }],
+  "supported_languages": ["zh", "en"]
+}

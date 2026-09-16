@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Even · Conversation Lab</title>
+<style>
+body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-width:860px;margin:40px auto;padding:0 22px}h1{font-size:28px;margin-bottom:4px}small,.muted{color:#a7b8aa}section{background:#1b261f;padding:20px;border:1px solid #3b5141;border-radius:14px;margin:18px 0}input,textarea,button{font:inherit;border-radius:7px;padding:9px 12px;border:1px solid #617968}input,textarea{background:#101713;color:inherit;box-sizing:border-box}input{width:min(100%,420px)}textarea{width:100%;resize:vertical}button{background:#cdfcae;color:#132010;cursor:pointer;margin:6px 8px 6px 0}button:disabled{opacity:.4;cursor:default}.secondary{background:#233a2b;color:#e4eee6}.danger{background:#ffd6c9}#state{color:#cdfcae}#history{max-height:440px;overflow:auto}.message{white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid #3b5141;padding:12px 0}.message label{display:block;color:#a7b8aa;font-size:13px}#transcript{white-space:pre-wrap;color:#bfe4c8}dialog{background:#1b261f;color:#e4eee6;border:1px solid #617968;border-radius:12px;max-width:420px}dialog::backdrop{background:#000a}#notice{color:#ffdcb0;white-space:pre-wrap}
+</style>
+<h1>Even · Conversation Lab</h1>
+<div class="muted">本地对话实验版 · 支持联网搜索与引用来源 · 尚未接入 G2 / R1</div>
+<div id="models" class="muted">连接后显示当前模型配置</div>
+<section aria-label="测试通道"><strong id="channel" role="status">测试通道：尚未连接，等待服务器确认</strong><div id="channelDetails" class="muted">连接后显示实际对话通道与语音转录方式。</div></section>
+<style>a{color:#cdfcae;text-decoration:underline}.sources{font-size:13px;margin-top:12px;color:#a7b8aa}</style>
+<section id="login">
+  <label for="token">本地 G2_CLIENT_TOKEN（不是 OpenAI key）</label><br>
+  <input id="token" type="password" autocomplete="off" placeholder="从本机 .env 复制 token">
+  <button id="connect">连接</button>
+  <div><small>凭据只保留在当前页面内存。OpenAI key 始终留在服务器。</small></div>
+</section>
+<section>
+  <strong id="state" role="status">未连接</strong> · <span id="mic">麦克风关闭</span>
+  <div id="notice" role="status"></div>
+  <div id="progress" class="muted" role="status" aria-live="polite"></div>
+  <div>
+    <button id="voice" disabled>开启麦克风 / 恢复语音</button>
+    <button id="submit" class="secondary" disabled>我说完了</button>
+    <button id="pause" class="secondary" disabled>暂停收音</button>
+    <button id="resume" class="secondary" disabled>恢复文字对话</button>
+    <button id="interrupt" class="secondary" disabled>打断回答</button>
+    <button id="retry" class="secondary" disabled>继续上一答</button>
+    <button id="exit" class="danger" disabled>结束对话</button>
+  </div>
+  <small>开启后持续监听，停顿约 1.2 秒后判断是否说完；可以直接开口插话。环境声音也可能触发，建议先在安静环境测试。音频发往 OpenAI；文字记录保存在本机 .local/conversations，不保存音频。隐藏页面会暂停收音。</small>
+  <p id="transcript" aria-label="实时转录"></p>
+</section>
+<section>
+  <div id="history" aria-label="对话记录"></div>
+  <button id="exportMd" class="secondary" disabled>导出当前对话为 MD</button>
+  <div id="jobs" aria-label="文件任务"></div>
+  <form id="textForm"><label for="text">也可以先用文字测试追问与退出意图</label>
+    <textarea id="text" rows="2" maxlength="6000" placeholder="例如：不要退出，帮我解释一下 API"></textarea>
+    <button id="send" disabled>发送文字</button>
+  </form>
+</section>
+<dialog id="exitDialog"><h2>确认退出？</h2><p>已经停止收音。这里模拟未来的 Even 系统确认框；取消后仍保持暂停。</p><button id="confirmExit">确认退出</button><button id="cancelExit" class="secondary">取消，保持暂停</button></dialog>
+<script type="module" src="/app.js"></script>
+</html>

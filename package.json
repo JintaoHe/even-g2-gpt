@@ -1,0 +1,25 @@
+{
+  "name": "even-g2-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "audit:public": "node scripts/audit-public.mjs",
+    "build:server": "node scripts/build-server.mjs",
+    "conversation": "tsx src/conversation-server.ts",
+    "conversation:eval": "tsx tests/live-conversation.ts",
+    "search:eval": "tsx tests/live-search.ts",
+    "nano:eval": "tsx tests/live-nano-tools.ts",
+    "nano:conversation:eval": "tsx tests/live-nano-conversation.ts",
+    "hybrid:eval": "tsx tests/live-nano-conversation.ts --hybrid",
+    "luna:eval": "tsx tests/live-nano-conversation.ts --luna",
+    "baseline:eval": "tsx tests/live-nano-conversation.ts --baseline",
+    "conversation:inject": "tsx src/conversation-inject.ts",
+    "start": "tsx src/server.ts",
+    "inject": "tsx src/inject.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": { "node": ">=24" },
+  "dependencies": { "dotenv": "16.4.7", "ws": "8.21.3" },
+  "devDependencies": { "@types/node": "22.10.5", "@types/ws": "8.5.13", "tsx": "4.23.13", "typescript": "5.7.3" }
+}

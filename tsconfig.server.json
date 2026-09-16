@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "sourceMap": false,
+    "declaration": false
+  },
+  "files": ["src/conversation-server.ts"],
+  "include": [],
+  "exclude": ["tests", "web", "clients", "tools", "scripts"]
+}

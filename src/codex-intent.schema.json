@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "decision": { "type": "string", "enum": ["respond", "wait", "exit", "clarify_exit"] },
+    "reasoning_effort": { "type": "string", "enum": ["none", "low", "medium"] }
+  },
+  "required": ["decision", "reasoning_effort"],
+  "additionalProperties": false
+}
