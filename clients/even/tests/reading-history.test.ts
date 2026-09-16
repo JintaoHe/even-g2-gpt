@@ -16,6 +16,20 @@ test('split URLs do not flash; Chinese text streams without waiting for spaces',
   assert.equal(displayText('你好，这是正在显示的中文', true), '你好，这是正在显示的中文');
   assert.equal(displayText('来源 [OpenAI](https://openai.com', true), '来源 OpenAI');
 });
+
+test('removed links leave no empty wrappers, but meaningful parentheses survive', () => {
+  const raw = '会。([example.com](https://example.com))\n- 活动（https://example.com/news）\n- 出游。()\n备注（适合家庭），日期 (9月18日)。';
+  const visible = displayText(raw);
+  assert.equal(visible, '会。\n- 活动\n- 出游。\n备注（适合家庭），日期 (9月18日)。');
+  assert.equal(displayText('活动 (https://example.com/news) 下一项'), '活动  下一项');
+  assert.equal(displayText('会。(( ))【 】[ ]'), '会。');
+  const history = new ReadingHistory();
+  history.event({ type: 'answer.start', id: 1 });
+  history.event({ type: 'answer.delta', id: 1, text: raw });
+  history.event({ type: 'answer.done', id: 1 });
+  assert.equal(history.selected?.raw, raw);
+  assert.doesNotMatch(history.pages.join(''), /\(\)|（）|https/);
+});
 test('speech deltas/finals keep segment order; committed question retained before answer', () => {
   const h = new ReadingHistory(); h.reset('ready');
   h.event({ type: 'speech.started', segment_id: 1 }); assert.match(h.label, /正在说/);

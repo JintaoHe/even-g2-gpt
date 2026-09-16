@@ -9,9 +9,16 @@ export function displayText(raw: string, streaming = false): string {
   // Buffer incomplete Markdown labels rather than exposing syntax during streaming.
   if (streaming) text = text.replace(/\[[^\]\n]*\]?$/, '');
   text = text.replace(/<https?:\/\/[^>]*(?:>|$)/gi, '');
-  text = text.replace(/\b(?:https?:\/\/|www\.)[^\s<>\u3000-\u303f\uff00-\uffef]+/gi, '');
-  text = text.replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>\u3000-\u303f\uff00-\uffef]*)?/gi, '');
+  text = text.replace(/\b(?:https?:\/\/|www\.)[^\s<>()\[\]\u3000-\u303f\uff00-\uffef]+/gi, '');
+  text = text.replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>()\[\]\u3000-\u303f\uff00-\uffef]*)?/gi, '');
   text = text.replace(/cite[^]*/g, '').replace(/【[^】]*†[^】]*】/g, '');
   text = text.replace(/^#{1,6}\s+/gm, '').replace(/\*\*|__|`/g, '');
+  // URL/citation removal can leave empty wrappers, including nested wrappers.
+  // Keep parentheses containing actual prose (dates, caveats, etc.).
+  let previous: string;
+  do {
+    previous = text;
+    text = text.replace(/\([\s]*\)|（[\s]*）|\[[\s]*\]|【[\s]*】/g, '');
+  } while (text !== previous);
   return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trimEnd();
 }

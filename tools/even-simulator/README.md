@@ -30,3 +30,17 @@ Launch a separate simulator against `http://127.0.0.1:5173/dev/exit-probe.html -
 - SDK returned true; framebuffer then had 0 lit pixels, with no visible confirmation.
 
 The failure therefore reproduces outside our application logic. This narrows it to the simulator/SDK host exit path; it does not prove which component is defective or predict real-device behavior. Keep mode 1 and mark confirmation/cancellation unverified until hardware or a validated simulator fix is available. The isolated probe was stopped after measurement; it did not use account credentials or model allowance.
+
+### Repeated-session recovery
+
+The companion page may survive glasses shutdown. Previously exit left rendering disabled (or permanently cleared its timer), and reconnecting the WebSocket did not recreate the SDK page. The client now recreates the page only on explicit reconnect/resume, invalidates its cached frame, and keeps the microphone off. A failed recreation is reported with instructions to reopen the simulator application. Only actual WebView teardown disposes the rendering timer.
+
+Automated entry-point tests use SDK/socket/DOM doubles to cover exit with and without a system event, two consecutive reconnects, cancellation, and microphone remaining off. They do not certify simulator or hardware behavior. Manual acceptance:
+
+1. Reopen the simulator once to load the new client (a previously disposed old page cannot repair itself).
+2. Connect with the application token, send text, and check the rendered answer.
+3. Request exit and complete any system confirmation. A blank exited display is acceptable for this recovery test.
+4. Enter the application token and reconnect without restarting the simulator. Expect the API/CLI header and connected page, with microphone OFF. Send another text question and repeat this cycle twice.
+5. Separately test Cancel exit / Resume. If the host refuses page recreation, capture the visible SDK error without credentials; reopening the simulator remains the fallback.
+
+Link-only empty parentheses are removed from display text; meaningful parentheses and raw stored answer links remain intact.

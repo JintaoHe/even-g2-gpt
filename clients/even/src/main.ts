@@ -1,14 +1,18 @@
 import { waitForEvenAppBridge, CreateStartUpPageContainer, TextContainerProperty, TextContainerUpgrade,
   OsEventTypeList, type EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { ReadingHistory } from './reading-history';
+import { DisplaySession } from './display-session';
 
 const element = (id: string) => document.getElementById(id)!;
 const pager = new ReadingHistory();
+const display = new DisplaySession();
+let connecting = false;
+let shutdown: Promise<void> | undefined;
 pager.reset('请在伴随页面连接后端。\n连接后可输入文字或开启麦克风。');
 let bridge: EvenAppBridge | undefined, socket: WebSocket | undefined;
 let connected = false, speech = false, audio = false, audioEpoch = 0, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
-const active = () => connected && !['paused', 'exit_pending', 'closed'].includes(state);
+const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
 function send(event: object) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); }
 function refresh() { dirty = true; element('status').textContent = `${status} · 麦克风${audio ? '开启' : '关闭'}`; }
 async function stopAudio() {
@@ -16,7 +20,7 @@ async function stopAudio() {
   if (bridge) await bridge.audioControl(false).catch(() => false);
 }
 async function toggleAudio() {
-  if (!bridge || !connected || !speech || state === 'exit_pending') { status = '请先连接 SDK 与后端，退出待确认时请先恢复'; refresh(); return; }
+  if (!bridge || !connected || !speech || exiting || disposed || state === 'exit_pending') { status = '请先连接 SDK 与后端，退出待确认时请先恢复'; refresh(); return; }
   if (audio) { await stopAudio(); send({ type: 'pause' }); return; }
   if (state === 'paused') send({ type: 'resume' });
   const epoch = ++audioEpoch;
@@ -26,23 +30,38 @@ async function toggleAudio() {
     audio = ok; status = ok ? '正在听' : '麦克风开启失败'; refresh();
   } catch { status = '麦克风不可用'; refresh(); }
 }
-async function exitDialog() {
+function exitDialog() {
+  if (shutdown) return shutdown;
+  shutdown = requestExit().finally(() => { shutdown = undefined; });
+  return shutdown;
+}
+async function requestExit() {
   if (exiting) return;
   exiting = true;
+  display.close();
   await stopAudio();
   if (bridge) {
     const ok = await bridge.shutDownPageContainer(1).catch(() => false);
-    if (!ok) { exiting = false; status = '系统退出请求未成功，请用双击重试'; refresh(); }
+    if (!ok) { status = '系统退出请求未成功，请点恢复后重试'; refresh(); }
   } else { status = '无 SDK：已停收音，恢复按钮可取消退出'; refresh(); }
   // An SDK acknowledgement is not proof the user confirmed. Stay paused until
   // unload/disconnect, or explicit cancellation through the companion control.
 }
-element('connect').onclick = () => {
-  if (socket && socket.readyState < WebSocket.CLOSING) return;
+element('connect').onclick = async () => {
+  if (connecting || disposed) return;
+  if (!exiting && socket && socket.readyState < WebSocket.CLOSING) return;
   let token = (element('token') as HTMLInputElement).value.trim();
   if (token.length < 32) { status = '请输入至少 32 字符的应用 token'; refresh(); return; }
+  connecting = true;
+  try {
+    if (exiting) {
+      const old = socket; socket = undefined; old?.close();
+      connected = false; state = 'closed'; answerId = undefined;
+      await stopAudio();
+      if (!await restoreDisplay()) return;
+    }
   const ws = socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/conversation`);
-  ws.onopen = () => { ws.send(JSON.stringify({ type: 'hello', token })); token = ''; (element('token') as HTMLInputElement).value = ''; };
+  ws.onopen = () => { if (socket !== ws) { token = ''; ws.close(); return; } ws.send(JSON.stringify({ type: 'hello', token })); token = ''; (element('token') as HTMLInputElement).value = ''; };
   ws.onmessage = ({ data }) => {
     if (socket !== ws) return;
     const event = JSON.parse(data);
@@ -72,7 +91,8 @@ element('connect').onclick = () => {
     refresh();
   };
   ws.onclose = () => { if (socket !== ws) return; connected = false; state = 'closed'; answerId = undefined; token = ''; status = '已断开，请重新连接'; element('channel').textContent = '通道：已断开'; void stopAudio(); refresh(); };
-  ws.onerror = () => { status = '连接失败，请检查后端'; refresh(); };
+  ws.onerror = () => { if (socket !== ws) return; status = '连接失败，请检查后端'; refresh(); };
+  } finally { connecting = false; }
 };
 element('form').onsubmit = event => {
   event.preventDefault(); const input = element('text') as HTMLTextAreaElement;
@@ -80,7 +100,14 @@ element('form').onsubmit = event => {
   if (input.value.trim()) { send({ type: 'text.submit', text: input.value.trim() }); input.value = ''; }
 };
 element('audio').onclick = () => void toggleAudio();
-element('resume').onclick = () => { exiting = false; if (state === 'exit_pending') send({ type: 'exit.confirm', confirm: false }); send({ type: 'resume' }); refresh(); };
+element('resume').onclick = async () => {
+  if (disposed || connecting) return;
+  if (exiting && !await restoreDisplay()) return;
+  if (state === 'exit_pending') send({ type: 'exit.confirm', confirm: false });
+  send({ type: 'resume' });
+  if (!connected) status = '画面已恢复，请输入应用 token 重新连接';
+  refresh();
+};
 element('interrupt').onclick = () => send({ type: 'interrupt' });
 element('exit').onclick = () => { if (connected) send({ type: 'exit.request' }); else void exitDialog(); };
 element('prev').onclick = () => { pager.move(-1); refresh(); };
@@ -94,7 +121,7 @@ const timer = setInterval(async () => {
   const text = `${channel} | ${status.slice(0, 18)} | ${audio ? 'MIC' : 'OFF'}\n${pager.label}\n${pager.current}`;
   element('preview').textContent = text; element('page').textContent = `记录 ${pager.index + 1}/${pager.entries.length} · ${pager.label}`;
   try {
-    if (bridge && !exiting && text !== last) {
+    if (bridge && display.open && !exiting && text !== last) {
       if (!await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'conversation', content: text }))) throw Error('Display update failed');
       last = text;
     }
@@ -102,20 +129,35 @@ const timer = setInterval(async () => {
   finally { drawing = false; }
 }, 300);
 
+async function restoreDisplay() {
+  await shutdown;
+  if (disposed) return false;
+  if (!bridge) { exiting = false; return true; }
+  try {
+  const ok = await display.restore(async () => await bridge!.createStartUpPageContainer(new CreateStartUpPageContainer({ containerTotalNum: 1,
+    textObject: [new TextContainerProperty({ containerID: 1, containerName: 'conversation', xPosition: 8, yPosition: 4,
+      width: 560, height: 280, paddingLength: 4, borderWidth: 0, isEventCapture: 1, content: 'Even Agent\n请在伴随页面连接后端。' })] })) === 0);
+  if (!ok || disposed) throw Error('Startup page rejected');
+  exiting = false; last = ''; dirty = true;
+  element('bridge').textContent = 'Even SDK 已连接 · 576 × 288 显示';
+  return true;
+  } catch {
+    status = 'SDK 页面重建失败，请重新打开模拟器应用';
+    element('bridge').textContent = status; refresh(); return false;
+  }
+}
 void (async () => {
   const candidate = await waitForEvenAppBridge();
   if (disposed) return;
-  const result = await candidate.createStartUpPageContainer(new CreateStartUpPageContainer({ containerTotalNum: 1,
-    textObject: [new TextContainerProperty({ containerID: 1, containerName: 'conversation', xPosition: 8, yPosition: 4,
-      width: 560, height: 280, paddingLength: 4, borderWidth: 0, isEventCapture: 1, content: 'Even Agent\n请在伴随页面连接后端。' })] }));
-  if (result !== 0) { console.error('[even-agent] startup rejected', result); throw Error('Startup page rejected'); }
-  bridge = candidate; element('bridge').textContent = 'Even SDK 已连接 · 576 × 288 显示'; dirty = true;
+  bridge = candidate;
   console.info('[even-agent] ready');
   candidate.onEvenHubEvent(event => {
     const system = event.sysEvent?.eventType;
     if (system === OsEventTypeList.FOREGROUND_EXIT_EVENT) { void stopAudio(); send({ type: 'pause' }); return; }
     if (system === OsEventTypeList.SYSTEM_EXIT_EVENT || system === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
-      disposed = true; clearInterval(timer); void stopAudio(); socket?.close(); return;
+      exiting = true; display.close(); connected = false; state = 'closed'; answerId = undefined;
+      const old = socket; socket = undefined; old?.close(); void stopAudio();
+      status = '眼镜页面已退出；可重新连接或恢复画面'; refresh(); return;
     }
     if (event.audioEvent && audio && active() && socket?.readyState === WebSocket.OPEN) {
       const pcm = event.audioEvent.audioPcm;
@@ -132,8 +174,9 @@ void (async () => {
     else if (event.textEvent && (type === OsEventTypeList.CLICK_EVENT || type === undefined)) void toggleAudio();
     refresh();
   });
+  await restoreDisplay();
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
-window.addEventListener('pagehide', () => { disposed = true; clearInterval(timer); void stopAudio(); socket?.close(); });
+window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void stopAudio(); socket?.close(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) { void stopAudio(); send({ type: 'pause' }); } });
 if (import.meta.env.DEV) {
   void import('../dev/reading-demo').then(({ installReadingDemo }) => installReadingDemo(events => {
