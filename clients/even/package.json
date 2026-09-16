@@ -9,8 +9,7 @@
     "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "0.0.14",
-    "even-g2-poc": "file:../.."
+    "@evenrealities/even_hub_sdk": "0.0.14"
   },
   "devDependencies": {
     "@types/node": "22.20.3",

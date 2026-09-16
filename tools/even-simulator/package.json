@@ -7,8 +7,5 @@
   },
   "devDependencies": {
     "@evenrealities/evenhub-simulator": "0.9.3"
-  },
-  "dependencies": {
-    "even-g2-poc": "file:../.."
   }
 }
