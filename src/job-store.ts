@@ -5,8 +5,9 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { Message } from './conversation.js';
 import type { MailSender } from './mail.js';
+import { renderDocument, type Document, type Presentation } from './document-presentation.js';
 
-export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number; mail_state?: string | null };
+export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number; mail_state?: string | null; title?: string; filename?: string };
 const MAX_FILE = 2 * 1024 * 1024, MAX_TOTAL = 50 * 1024 * 1024;
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);
 
@@ -20,12 +21,10 @@ export class JobStore {
   private closePromise?: Promise<void>;
   private mailing?: Promise<void>;
   private constructor(private db: DatabaseSync, private directory: string, private owner: string,
-    private render: (history: Message[], signal: AbortSignal) => Promise<string>) {}
+    private render: (history: Message[], signal: AbortSignal) => Promise<string | Document>) {}
 
-  static async create(directory: string, render = async (history: Message[], signal: AbortSignal) => {
-    signal.throwIfAborted();
-    return '# 对话记录\n\n' + history.map(m => `## ${m.role === 'user' ? '你' : 'Even'}\n\n${m.content}\n` +
-      (m.citations?.length ? '\n来源：\n' + m.citations.map(c => `- ${c.url}`).join('\n') + '\n' : '')).join('\n');
+  static async create(directory: string, render: (history: Message[], signal: AbortSignal) => Promise<string | Document> = async (history, signal) => {
+    signal.throwIfAborted(); return renderDocument(history);
   }) {
     const root = resolve(directory);
     await mkdir(root, { recursive: true, mode: 0o700 });
@@ -42,7 +41,8 @@ export class JobStore {
         CREATE TABLE IF NOT EXISTS service_owner (id INTEGER PRIMARY KEY CHECK(id=1), token TEXT, pid INTEGER, host TEXT);
         CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL,
           updated TEXT NOT NULL, error TEXT, bytes INTEGER NOT NULL DEFAULT 0, input TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS mail_deliveries (job_id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL);`);
+        CREATE TABLE IF NOT EXISTS mail_deliveries (job_id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS artifact_metadata (job_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);`);
       db.exec('BEGIN IMMEDIATE');
       const prior = db.prepare('SELECT * FROM service_owner WHERE id=1').get() as any;
       if (prior) {
@@ -61,9 +61,16 @@ export class JobStore {
     store.kick(); return store;
   }
 
-  list(): Job[] { return this.db.prepare('SELECT j.id,j.state,j.created,j.updated,j.error,j.bytes,m.state AS mail_state FROM jobs j LEFT JOIN mail_deliveries m ON j.id=m.job_id ORDER BY j.created DESC LIMIT 100').all() as unknown as Job[]; }
+  list(): Job[] {
+    const jobs = this.db.prepare('SELECT j.id,j.state,j.created,j.updated,j.error,j.bytes,m.state AS mail_state FROM jobs j LEFT JOIN mail_deliveries m ON j.id=m.job_id ORDER BY j.created DESC LIMIT 100').all() as unknown as Job[];
+    return jobs.map(job => { const metadata = this.metadata(job.id); return { ...job, title: metadata?.title, filename: metadata?.filename }; });
+  }
   mailState(id: string): string | undefined {
     return (this.db.prepare('SELECT state FROM mail_deliveries WHERE job_id=?').get(id) as { state: string } | undefined)?.state;
+  }
+  metadata(id: string): Presentation | undefined {
+    const row = this.db.prepare('SELECT metadata FROM artifact_metadata WHERE job_id=?').get(id) as { metadata: string } | undefined;
+    return row ? JSON.parse(row.metadata) : undefined;
   }
   async email(id: string, sender: MailSender): Promise<string> {
     if (this.closing) throw new Error('MAIL_STOPPING');
@@ -78,7 +85,7 @@ export class JobStore {
     const count = this.db.prepare('SELECT COUNT(*) AS total FROM mail_deliveries WHERE created>=?').get(date.slice(0, 10)) as { total: number };
     if (count.total >= 20) throw new Error('MAIL_DAILY_LIMIT');
     this.db.prepare("INSERT INTO mail_deliveries VALUES (?,'sending',?)").run(id, date);
-    const operation = Promise.resolve().then(() => sender(id, bytes)).then(result => {
+    const operation = Promise.resolve().then(() => sender(id, bytes, this.metadata(id))).then(result => {
       this.db.prepare('UPDATE mail_deliveries SET state=? WHERE job_id=?').run(result, id);
     }).catch(() => {
       this.db.prepare("UPDATE mail_deliveries SET state='unknown' WHERE job_id=?").run(id);
@@ -124,7 +131,8 @@ export class JobStore {
       this.active = next.id; const controller = this.controller = new AbortController();
       this.db.prepare("UPDATE jobs SET state='running',updated=? WHERE id=?").run(new Date().toISOString(), next.id);
       try {
-        const markdown = await this.render(JSON.parse(next.input), controller.signal);
+        const rendered = await this.render(JSON.parse(next.input), controller.signal);
+        const markdown = typeof rendered === 'string' ? rendered : rendered.markdown;
         controller.signal.throwIfAborted();
         const bytes = Buffer.byteLength(markdown);
         let used = 0;
@@ -141,7 +149,12 @@ export class JobStore {
         await rename(temporary, target);
         if (process.platform !== 'win32') { const dir = await open(this.directory, 'r'); try { await dir.sync(); } finally { await dir.close(); } }
         controller.signal.throwIfAborted();
-        this.db.prepare("UPDATE jobs SET state='completed',bytes=?,input='[]',updated=? WHERE id=?").run(bytes, new Date().toISOString(), next.id);
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+          if (typeof rendered !== 'string') this.db.prepare('INSERT OR REPLACE INTO artifact_metadata VALUES (?,?)').run(next.id, JSON.stringify(rendered.presentation));
+          this.db.prepare("UPDATE jobs SET state='completed',bytes=?,input='[]',updated=? WHERE id=?").run(bytes, new Date().toISOString(), next.id);
+          this.db.exec('COMMIT');
+        } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       } catch {
         const current = this.get(next.id);
         if (current?.state === 'running') this.db.prepare("UPDATE jobs SET state=?,error=?,input='[]',updated=? WHERE id=?").run(

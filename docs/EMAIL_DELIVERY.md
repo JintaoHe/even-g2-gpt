@@ -1,6 +1,16 @@
 # Fixed-recipient Markdown delivery
 
-This first version sends an already completed conversation-export artifact. It does not yet implement voice-triggered document generation, AI summarization, arbitrary recipients, or automatic sending after every answer. API and CLI conversation providers use the same backend delivery code.
+This version sends an already completed conversation-export artifact. It adds a descriptive title, short summary, friendly plain-text/HTML email and meaningful attachment filename. It does not yet implement voice-triggered document generation, calendar attachments, arbitrary recipients, or automatic sending after every answer. API and CLI conversation providers use the same backend delivery code.
+
+## Presentation and summary
+
+New exports store a title/summary beside the job in SQLite; the summary is also included above the full conversation in the MD. Original conversation text and source URLs remain intact. Internal disk filenames remain UUIDs for safe lookup; the user-facing attachment and browser download use a sanitized topic title. Existing artifacts without metadata retain a generic title and explanation; regenerate the export to get the new presentation. Already delivered emails are never changed or resent.
+
+In API mode, `EMAIL_AI_SUMMARY=true` (default) adds one bounded Responses request per export, using `EMAIL_SUMMARY_MODEL` or the intent model. It uses no tools/search, `store:false`, a 10-second timeout and 700 output-token limit. Ordinary model token charges apply. Only up to 24,000 characters of the conversation are sent for this summarization; the full MD remains intact. Summaries of truncated input are explicitly described as partial. Model output is untrusted: title and filename lengths are capped, controls/path separators are removed, and HTML is escaped. No remote images, login buttons or tracking links are embedded.
+
+Set `EMAIL_AI_SUMMARY=false` to avoid the additional API call. CLI mode, API failures/refusals, and unavailable keys use a clearly labelled **内容摘录（非 AI 总结）** instead. These summaries/excerpts are review aids, not new factual verification or evidence that a proposed plan was confirmed. Credential/recipient handling and send confirmation are unchanged.
+
+Run `node --import tsx scripts/mail-preview.ts` for a synthetic local HTML/MD preview, or add `--ai` for one real summary call. It never sends email. Preview output stays under ignored `.local/mail-preview` and is excluded from server releases.
 
 ## Private setup
 
