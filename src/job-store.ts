@@ -6,8 +6,9 @@ import { hostname } from 'node:os';
 import type { Message } from './conversation.js';
 import type { MailSender } from './mail.js';
 import { renderDocument, type Document, type Presentation } from './document-presentation.js';
+import { validateCalendar, type CalendarEvent } from './calendar.js';
 
-export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number; mail_state?: string | null; title?: string; filename?: string };
+export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number; mail_state?: string | null; title?: string; filename?: string; calendar?: CalendarEvent; superseded?: boolean };
 const MAX_FILE = 2 * 1024 * 1024, MAX_TOTAL = 50 * 1024 * 1024;
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);
 
@@ -42,7 +43,9 @@ export class JobStore {
         CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL,
           updated TEXT NOT NULL, error TEXT, bytes INTEGER NOT NULL DEFAULT 0, input TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS mail_deliveries (job_id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS artifact_metadata (job_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);`);
+        CREATE TABLE IF NOT EXISTS artifact_metadata (job_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS calendar_events (job_id TEXT PRIMARY KEY, event TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS superseded_artifacts (job_id TEXT PRIMARY KEY);`);
       db.exec('BEGIN IMMEDIATE');
       const prior = db.prepare('SELECT * FROM service_owner WHERE id=1').get() as any;
       if (prior) {
@@ -63,7 +66,13 @@ export class JobStore {
 
   list(): Job[] {
     const jobs = this.db.prepare('SELECT j.id,j.state,j.created,j.updated,j.error,j.bytes,m.state AS mail_state FROM jobs j LEFT JOIN mail_deliveries m ON j.id=m.job_id ORDER BY j.created DESC LIMIT 100').all() as unknown as Job[];
-    return jobs.map(job => { const metadata = this.metadata(job.id); return { ...job, title: metadata?.title, filename: metadata?.filename }; });
+    return jobs.map(job => { const metadata = this.metadata(job.id); return { ...job, title: metadata?.title, filename: metadata?.filename, calendar: this.calendar(job.id), superseded: this.superseded(job.id) }; });
+  }
+  superseded(id: string): boolean { return !!this.db.prepare('SELECT 1 FROM superseded_artifacts WHERE job_id=?').get(id); }
+  supersede(id: string) { if (this.get(id)) this.db.prepare('INSERT OR IGNORE INTO superseded_artifacts VALUES (?)').run(id); }
+  calendar(id: string): CalendarEvent | undefined {
+    const row = this.db.prepare('SELECT event FROM calendar_events WHERE job_id=?').get(id) as { event: string } | undefined;
+    return row ? validateCalendar(JSON.parse(row.event)) : undefined;
   }
   mailState(id: string): string | undefined {
     return (this.db.prepare('SELECT state FROM mail_deliveries WHERE job_id=?').get(id) as { state: string } | undefined)?.state;
@@ -72,12 +81,16 @@ export class JobStore {
     const row = this.db.prepare('SELECT metadata FROM artifact_metadata WHERE job_id=?').get(id) as { metadata: string } | undefined;
     return row ? JSON.parse(row.metadata) : undefined;
   }
-  async email(id: string, sender: MailSender): Promise<string> {
+  async email(id: string, sender: MailSender, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     if (this.closing) throw new Error('MAIL_STOPPING');
+    if (this.superseded(id)) throw new Error('MAIL_SUPERSEDED');
     const prior = this.mailState(id);
     if (prior) return prior; // One attempt per artifact, even across service restarts.
     if (this.mailing) throw new Error('MAIL_BUSY');
     const bytes = await this.download(id);
+    signal?.throwIfAborted();
+    if (this.superseded(id)) throw new Error('MAIL_SUPERSEDED');
     // Recheck after asynchronous I/O so simultaneous clicks cannot duplicate delivery.
     if (this.closing || this.mailing) throw new Error('MAIL_BUSY');
     const existing = this.mailState(id); if (existing) return existing;
@@ -85,7 +98,7 @@ export class JobStore {
     const count = this.db.prepare('SELECT COUNT(*) AS total FROM mail_deliveries WHERE created>=?').get(date.slice(0, 10)) as { total: number };
     if (count.total >= 20) throw new Error('MAIL_DAILY_LIMIT');
     this.db.prepare("INSERT INTO mail_deliveries VALUES (?,'sending',?)").run(id, date);
-    const operation = Promise.resolve().then(() => sender(id, bytes, this.metadata(id))).then(result => {
+    const operation = Promise.resolve().then(() => sender(id, bytes, this.metadata(id), this.calendar(id), this.get(id)!.created)).then(result => {
       this.db.prepare('UPDATE mail_deliveries SET state=? WHERE job_id=?').run(result, id);
     }).catch(() => {
       this.db.prepare("UPDATE mail_deliveries SET state='unknown' WHERE job_id=?").run(id);
@@ -97,15 +110,27 @@ export class JobStore {
     if (!validId(id)) return undefined;
     return this.db.prepare('SELECT id,state,created,updated,error,bytes FROM jobs WHERE id=?').get(id) as Job | undefined;
   }
-  enqueue(history: Message[]): Job {
-    if (this.closing) throw new Error('Service stopping');
+  enqueue(history: Message[], calendar?: unknown): Job {
     if (!history.length || history.length > 100 || history.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid conversation snapshot');
-    const input = JSON.stringify(history);
+    return this.enqueueInput(JSON.stringify(history), calendar);
+  }
+  enqueueDocument(document: Document, calendar?: unknown): Job {
+    if (!document.markdown.trim() || !document.presentation.title || !document.presentation.summary) throw new Error('Invalid document');
+    return this.enqueueInput(JSON.stringify({ document }), calendar);
+  }
+  private enqueueInput(input: string, calendar?: unknown): Job {
+    if (this.closing) throw new Error('Service stopping');
     if (Buffer.byteLength(input) > MAX_FILE) throw new Error('Input too large');
     const count = this.db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN state IN ('queued','running') THEN 1 ELSE 0 END) AS pending FROM jobs").get() as any;
     if (count.total >= 1000 || count.pending >= 20) throw new Error('Job capacity reached');
     const id = randomUUID(), now = new Date().toISOString();
-    this.db.prepare("INSERT INTO jobs VALUES (?,'queued',?,?,NULL,0,?)").run(id, now, now, input);
+    const event = calendar === undefined ? undefined : validateCalendar(calendar);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare("INSERT INTO jobs VALUES (?,'queued',?,?,NULL,0,?)").run(id, now, now, input);
+      if (event) this.db.prepare('INSERT INTO calendar_events VALUES (?,?)').run(id, JSON.stringify(event));
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     this.kick(); return this.get(id)!;
   }
   cancel(id: string) {
@@ -131,7 +156,8 @@ export class JobStore {
       this.active = next.id; const controller = this.controller = new AbortController();
       this.db.prepare("UPDATE jobs SET state='running',updated=? WHERE id=?").run(new Date().toISOString(), next.id);
       try {
-        const rendered = await this.render(JSON.parse(next.input), controller.signal);
+        const input = JSON.parse(next.input);
+        const rendered: string | Document = Array.isArray(input) ? await this.render(input, controller.signal) : input.document;
         const markdown = typeof rendered === 'string' ? rendered : rendered.markdown;
         controller.signal.throwIfAborted();
         const bytes = Buffer.byteLength(markdown);

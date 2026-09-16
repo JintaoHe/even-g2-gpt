@@ -2,9 +2,18 @@ import nodemailer from 'nodemailer';
 import { connect as connectTls } from 'node:tls';
 import { connect as connectTcp, type Socket } from 'node:net';
 import { mailPresentation, type Presentation } from './document-presentation.js';
+import { calendarAttachment, calendarDetails, type CalendarEvent } from './calendar.js';
 
 export type MailResult = 'accepted' | 'failed' | 'unknown';
-export type MailSender = (id: string, markdown: Buffer, metadata?: Presentation) => Promise<MailResult>;
+export type MailSender = (id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string) => Promise<MailResult>;
+export function mailPayload(id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string) {
+  const content = mailPresentation(metadata);
+  const attachment = calendar ? calendarAttachment(id, calendar, created ?? '') : undefined;
+  const details = calendar ? `\n\n日程附件（需你确认添加）\n${calendarDetails(calendar)}` : '';
+  const escaped = details.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+  return { subject: content.subject, text: content.text + details, html: content.html + (details ? `<pre style="white-space:pre-wrap">${escaped}</pre>` : ''),
+    attachments: [{ filename: content.filename, content: markdown, contentType: 'text/markdown; charset=utf-8' }, ...(attachment ? [attachment] : [])] };
+}
 type Config = { user: string; password: string; to: string; port: 465 | 587 };
 export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
   if (env.EVEN_EMAIL_ENABLED !== 'true') return undefined;
@@ -25,8 +34,10 @@ export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
 export function createMailSender(env: NodeJS.ProcessEnv = process.env): MailSender | undefined {
   const config = mailConfig(env);
   if (!config) return undefined;
-  return async (id, markdown, metadata) => {
+  return async (id, markdown, metadata, calendar, created) => {
     if (!/^[a-f0-9-]{36}$/.test(id) || !markdown.length || markdown.length > 2 * 1024 * 1024) return 'failed';
+    let payload: ReturnType<typeof mailPayload>;
+    try { payload = mailPayload(id, markdown, metadata, calendar, created); } catch { return 'failed'; }
     // Own the socket so the overall deadline can destroy it, including during DATA.
     // A non-pooled transport makes exactly one attempt (no pool requeue behavior).
     let socket: Socket | undefined;
@@ -46,13 +57,11 @@ export function createMailSender(env: NodeJS.ProcessEnv = process.env): MailSend
       connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 10000, dnsTimeout: 10000,
       logger: false, debug: false, disableFileAccess: true, disableUrlAccess: true
     });
-      const content = mailPresentation(metadata);
       const info = await transport.sendMail({
         from: { name: 'Even · 私人助理', address: config.user }, to: config.to,
         envelope: { from: config.user, to: [config.to] },
         messageId: `<even-${id}@${config.user.split('@')[1]}>`,
-        subject: content.subject, text: content.text, html: content.html,
-        attachments: [{ filename: content.filename, content: markdown, contentType: 'text/markdown; charset=utf-8' }],
+        ...payload,
         disableFileAccess: true, disableUrlAccess: true
       });
       return info.accepted?.length === 1 && info.rejected?.length === 0 ? 'accepted' : 'failed';

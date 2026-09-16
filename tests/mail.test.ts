@@ -82,9 +82,15 @@ test('mail endpoint requires authentication, rejects recipient overrides and sen
     }
     const client = new WebSocket(url); await once(client, 'open');
     const ready = waitFor(client, 'ready'); client.send(JSON.stringify({ type: 'hello', token })); await ready;
-    const result = waitFor(client, 'jobs.list'); client.send(JSON.stringify({ type: 'jobs.email', id }));
+    const denied = waitFor(client, 'notice'); client.send(JSON.stringify({ type: 'jobs.email', id }));
+    assert.match((await denied).text, /确认已失效/); assert.equal(sends, 0);
+    const preview = waitFor(client, 'mail.confirmation_required'); client.send(JSON.stringify({ type: 'jobs.email.prepare', id }));
+    const approval = await preview; assert.equal(sends, 0); assert.match(approval.preview, /Synthetic test/);
+    const result = waitFor(client, 'jobs.list'); client.send(JSON.stringify({ type: 'jobs.email', id, confirmation: approval.confirmation }));
     const jobs = (await result).jobs;
     assert.equal(jobs[0].mail_state, 'accepted'); assert.equal(sends, 1);
+    const replay = waitFor(client, 'notice'); client.send(JSON.stringify({ type: 'jobs.email', id, confirmation: approval.confirmation }));
+    assert.match((await replay).text, /确认已失效/); assert.equal(sends, 1);
     const closed = once(client, 'close'); client.close(); await closed;
   } finally { await app.close(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });

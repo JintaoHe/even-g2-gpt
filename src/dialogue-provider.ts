@@ -5,7 +5,7 @@ export function createDialogueProvider(env: NodeJS.ProcessEnv = process.env) {
   const provider = env.DIALOGUE_PROVIDER ?? 'api';
   if (provider === 'api') {
     if (!env.OPENAI_API_KEY) throw new Error('API dialogue requires OPENAI_API_KEY');
-    return { ...createHybridDialogue(env.OPENAI_API_KEY, env), provider,
+    return { ...createHybridDialogue(env.OPENAI_API_KEY, { ...env, EVEN_DELIVERY_ROUTING: 'true' }), provider,
       delivery: 'token-stream', webSearch: env.OPENAI_WEB_SEARCH !== 'false', close: async () => {} };
   }
   if (provider !== 'codex-cli') throw new Error('DIALOGUE_PROVIDER must be api or codex-cli');

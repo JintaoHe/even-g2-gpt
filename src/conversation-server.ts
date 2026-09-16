@@ -12,6 +12,9 @@ import { TurnDetector } from './vad.js';
 import { JobStore } from './job-store.js';
 import { createMailSender, type MailSender } from './mail.js';
 import { createDocumentRenderer, mailPresentation } from './document-presentation.js';
+import { createDraftGenerator, type DraftGenerator } from './delivery-draft.js';
+import { DeliveryDialogue } from './delivery-dialogue.js';
+import { calendarDetails } from './calendar.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
@@ -21,6 +24,7 @@ export function createConversationServer(options: {
   capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean };
   jobs?: JobStore;
   mail?: MailSender;
+  draftGenerator?: DraftGenerator;
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
   const files: Record<string, [string, string]> = {
@@ -72,6 +76,8 @@ export function createConversationServer(options: {
     let current: Transcriber | undefined, lastActivity = Date.now(), totalBytes = 0, forced = false, segmentId = 0;
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
+    let mailApproval: { id: string; token: string; expires: number } | undefined;
+    const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail) : undefined;
     const send = (event: Event) => {
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 262144) client.send(JSON.stringify(event));
       else client.close(1013, 'Client too slow');
@@ -80,8 +86,8 @@ export function createConversationServer(options: {
       generation++; detector.reset(); current = undefined; forced = false;
       for (const slot of slots) slot.job.cancel(); slots = [];
     };
-    const conversation = new Conversation(options.model, event => {
-      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) clearCapture();
+    const conversation = new Conversation(delivery ?? options.model, event => {
+      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) { clearCapture(); delivery?.invalidate(); mailApproval = undefined; }
       send(event);
       if (event.type === 'state' && event.state === 'closed') client.close(1000, 'Conversation ended');
     }, history => options.save?.(id, history) ?? Promise.resolve());
@@ -93,7 +99,7 @@ export function createConversationServer(options: {
       else send({ type: 'notice', text: '没有识别到文字；如误打断，可点“继续上一答”。' });
     };
     const detector = new TurnDetector(() => {
-      lastActivity = Date.now(); conversation.interrupt();
+      lastActivity = Date.now(); mailApproval = undefined; conversation.interrupt();
       if (slots.length >= 4) { conversation.pause(); send({ type: 'error', code: 'TRANSCRIPTION_BACKLOG' }); return; }
       const epoch = generation;
       const segment = ++segmentId;
@@ -142,9 +148,23 @@ export function createConversationServer(options: {
         }
         lastActivity = Date.now();
         switch (msg.type) {
-          case 'jobs.email':
+          case 'jobs.email.cancel': mailApproval = undefined; send({ type: 'notice', text: '已取消本次发送确认，没有发送邮件。' }); break;
+          case 'jobs.email.prepare': {
             if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
             if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid mail request');
+            mailApproval = undefined; delivery?.invalidate();
+            if (options.jobs.get(msg.id)?.state !== 'completed' || options.jobs.superseded(msg.id) || options.jobs.mailState(msg.id)) { send({ type: 'notice', text: '文件尚未完成、已被新版替代，或已有发送记录。' }); break; }
+            const metadata = mailPresentation(options.jobs.metadata(msg.id)), calendar = options.jobs.calendar(msg.id);
+            mailApproval = { id: msg.id, token: randomUUID(), expires: Date.now() + 5 * 60000 };
+            send({ type: 'mail.confirmation_required', id: msg.id, confirmation: mailApproval.token,
+              preview: metadata.text + (calendar ? '\n\n' + calendarDetails(calendar) : '') });
+            break;
+          }
+          case 'jobs.email':
+            if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
+            if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id', 'confirmation'].includes(key))) throw new Error('Invalid mail request');
+            if (!mailApproval || mailApproval.id !== msg.id || mailApproval.token !== msg.confirmation || mailApproval.expires <= Date.now()) { send({ type: 'notice', text: '发送确认已失效，请重新预览并确认。' }); break; }
+            mailApproval = undefined; delivery?.invalidate();
             send({ type: 'notice', text: '正在处理邮件请求；收件人为服务器配置的固定邮箱。' });
             void options.jobs.email(msg.id, options.mail).then(result => {
               send({ type: 'notice', text: result === 'accepted' ? '邮件已由发送服务器接受，请检查收件箱或垃圾邮件。'
@@ -156,18 +176,20 @@ export function createConversationServer(options: {
             break;
           case 'jobs.list': send({ type: 'jobs.list', jobs: options.jobs?.list() ?? [] }); break;
           case 'jobs.export':
+            mailApproval = undefined; delivery?.invalidate();
             if (!options.jobs) { send({ type: 'notice', text: '文件存储未启用。' }); break; }
             try {
-              const job = options.jobs.enqueue(conversation.history.map(m => ({ ...m })));
+              if (Object.keys(msg).some(key => !['type', 'calendar'].includes(key))) throw new Error('Invalid export request');
+              const job = options.jobs.enqueue(conversation.history.map(m => ({ ...m })), msg.calendar);
               send({ type: 'job.created', job });
-            } catch { send({ type: 'notice', text: '无法创建导出任务：请确认有对话内容且未超过存储或任务上限。' }); }
+            } catch { send({ type: 'notice', text: '无法创建导出任务：请检查日程日期、起止时间与时区偏移（含夏令时）是否一致，并确认有对话内容且未超过任务上限。' }); }
             break;
           case 'jobs.cancel':
             if (typeof msg.id !== 'string') throw new Error('Invalid job');
             options.jobs?.cancel(msg.id); send({ type: 'jobs.list', jobs: options.jobs?.list() ?? [] }); break;
           case 'text.submit':
             if (typeof msg.text !== 'string' || !msg.text.trim() || msg.text.length > 6000) throw new Error('Text');
-            if (conversation.acceptsInput) { clearCapture(); void conversation.submit(msg.text, true); } break;
+            if (conversation.acceptsInput) { mailApproval = undefined; clearCapture(); void conversation.submit(msg.text, true); } break;
           case 'turn.submit':
             if (!conversation.acceptsInput) break;
             forced = true; if (detector.active) detector.finish(); else flush(); break;
@@ -221,7 +243,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer());
   const save = fileSaver(resolve(dataDirectory, 'conversations'));
   const app = createConversationServer({ token, ...hybrid,
-    jobs, mail,
+    jobs, mail, draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key },
     transcriber: delta => {
       if (!key) throw new Error('Speech requires OPENAI_API_KEY');

@@ -27,8 +27,9 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
   const luna = (name: string) => name === 'gpt-5.6-luna';
   const cap = Number(env.OPENAI_MAX_SEARCH_CALLS ?? 2);
   const intent = new OpenAIDialogue(key, intentModel, overrides.endpoint, false, cap, timezone, undefined,
-    nano(intentModel) ? { reasoningEffort: 'low', intentTokens: 2048 }
-      : luna(intentModel) ? { reasoningEffort: 'none', intentTokens: 256, adaptiveReasoning: luna(replyModel) } : {});
+    { ...(nano(intentModel) ? { reasoningEffort: 'low' as const, intentTokens: 2048 }
+      : luna(intentModel) ? { reasoningEffort: 'none' as const, intentTokens: 256, adaptiveReasoning: luna(replyModel) } : {}),
+      deliveryRouting: env.EVEN_DELIVERY_ROUTING === 'true' });
   const reply = new OpenAIDialogue(key, replyModel, overrides.endpoint,
     overrides.search ?? env.OPENAI_WEB_SEARCH !== 'false', cap, timezone,
     overrides.quota ?? new SearchQuota(join(env.EVEN_DATA_DIR ?? '.local', 'search-usage.json'), timezone), {

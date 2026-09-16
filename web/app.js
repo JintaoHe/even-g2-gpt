@@ -19,12 +19,14 @@ function controls() {
   $('exit').disabled = !connected || ['closed', 'exit_pending'].includes(state);
   $('connect').disabled = connected;
   $('exportMd').disabled = !connected;
+  $('exportCalendar').disabled = !connected;
 }
 function renderJobs(jobs) {
   $('jobs').replaceChildren();
   const names = { queued: '排队中', running: '导出中', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '服务中断，需重新提交' };
   for (const job of jobs) {
-    const row = document.createElement('div'); row.textContent = `MD · ${job.title ?? '谈话笔记'} · ${job.created} · ${names[job.state] ?? job.state} `;
+    const row = document.createElement('div'); row.textContent = `${job.calendar ? 'MD＋ICS' : 'MD'} · ${job.title ?? '谈话笔记'} · ${job.created} · ${names[job.state] ?? job.state} `;
+    if (job.calendar) { const details = document.createElement('pre'); details.style.whiteSpace = 'pre-wrap'; details.textContent = calendarDescription(job.calendar); row.append(details); }
     if (job.state === 'completed') {
       const button = document.createElement('button'); button.textContent = '下载';
       button.onclick = async () => {
@@ -38,8 +40,8 @@ function renderJobs(jobs) {
       if (emailAvailable) {
         const mail = document.createElement('button');
         const names = { sending: '邮件发送中', accepted: '邮件已提交', failed: '邮件发送失败', unknown: '发送结果待核实' };
-        mail.textContent = names[job.mail_state] ?? '发到固定邮箱'; mail.disabled = !!job.mail_state;
-        mail.onclick = () => { if (window.confirm('将这份 MD 文件发送到你配置的固定邮箱？')) { mail.disabled = true; send({ type: 'jobs.email', id: job.id }); } };
+        mail.textContent = job.superseded ? '已有新版／草稿已失效' : names[job.mail_state] ?? '预览并确认发送'; mail.disabled = !!job.mail_state || job.superseded;
+        mail.onclick = () => send({ type: 'jobs.email.prepare', id: job.id });
         row.append(mail);
       }
     } else if (['queued', 'running'].includes(job.state)) {
@@ -50,6 +52,17 @@ function renderJobs(jobs) {
   }
 }
 $('exportMd').onclick = () => send({ type: 'jobs.export' });
+function calendarDescription(e) {
+  return `${e.title}\n${e.start} → ${e.end}\n${e.allDay ? '全天（不包含结束日期）' : e.timezone}${e.location ? '\n地点：' + e.location : ''}${e.notes ? '\n备注：' + e.notes : ''}\n不会自动添加到日历；收到附件后请确认导入。`;
+}
+$('calendarZone').value = Intl.DateTimeFormat().resolvedOptions().timeZone;
+$('calendarAllDay').onchange = () => { $('calendarZone').disabled = $('calendarAllDay').checked; };
+$('calendarForm').onsubmit = event => {
+  event.preventDefault();
+  const calendar = { title: $('calendarTitle').value.trim(), start: $('calendarStart').value.trim(), end: $('calendarEnd').value.trim(),
+    allDay: $('calendarAllDay').checked, timezone: $('calendarAllDay').checked ? '' : $('calendarZone').value.trim(), location: $('calendarLocation').value.trim(), notes: $('calendarNotes').value.trim() };
+  if (connected && window.confirm('请核对日程；这里只保存导出任务，不会发送邮件。\n\n' + calendarDescription(calendar))) send({ type: 'jobs.export', calendar });
+};
 function stopMic() {
   micEpoch++;
   if (worklet) { worklet.port.onmessage = null; worklet.disconnect(); worklet = undefined; }
@@ -90,6 +103,10 @@ $('connect').onclick = () => {
       if (e.capabilities?.provider === 'codex-cli') notice(`Codex CLI：整条回答返回，${e.capabilities.webSearch ? '原生联网搜索已开启（使用 Codex 账号额度）' : '联网搜索已关闭'}。${speechAvailable ? '语音转录仍走 OpenAI API。' : '未配置 API key，仅支持文字输入。'}`);
     }
     if (e.type === 'jobs.list') renderJobs(e.jobs);
+    if (e.type === 'mail.confirmation_required') {
+      if (window.confirm(`${e.preview}\n\n确认将这些附件发送到固定邮箱吗？`)) send({ type: 'jobs.email', id: e.id, confirmation: e.confirmation });
+      else send({ type: 'jobs.email.cancel' });
+    }
     if (e.type === 'job.created') { notice('MD 导出任务已保存，断开页面后仍会继续。'); send({ type: 'jobs.list' }); }
     if (e.type === 'state') {
       state = e.state; $('state').textContent = labels[state] ?? state;

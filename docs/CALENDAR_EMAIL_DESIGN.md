@@ -1,6 +1,12 @@
-# Calendar email: proposed next step, not implemented
+# Calendar email: confirmed ICS attachments
 
-Email presentation is implemented separately. Calendar-file generation, calendar writes and voice-triggered scheduling are not enabled by this change.
+The web lab can now attach one confirmed event to a conversation export. Expand the calendar form, enter title, start/end, IANA timezone and optional location/notes, then confirm export. Timed values require explicit offsets (for example `2026-09-20T14:00-05:00` in `America/Chicago`). The server rejects impossible dates, missing offsets, mismatched timezone offsets and reversed intervals. DST repeated hours require an explicit correct offset; nonexistent hours are rejected. All-day events use dates and an exclusive end date, without a timezone.
+
+Export does not send email. The completed task shows the persisted event; the separate fixed-recipient email confirmation includes these details. Email contains MD plus a descriptively named ICS attachment and visible event details. The download button still downloads MD only. Event data lives in the existing private SQLite store; ICS bytes are generated deterministically at send time using the job UUID and creation timestamp. There is no additional OpenAI request or calendar credential. Existing one-attempt delivery and daily quotas remain in force.
+
+API conversations also support explicit calendar drafting requests. Missing start/end, ambiguous relative dates or DST times trigger clarification rather than invented defaults. The configured `CONVERSATION_TIMEZONE` is used unless the user specifies another zone and is shown in the preview. After saving the draft, the assistant shows the absolute dates/times/zone and requests a separate “确认发送”. The ICS is generated only from validated event fields. See EMAIL_DELIVERY.md for the per-session confirmation state machine and version invalidation.
+
+Recurring events, updates/cancellations of already imported events, automatic calendar writes and notification alarms are NOT implemented. “Calendar reminder” means an importable event, not a scheduled notification service; the preview explicitly states that no alarm is included. A conversation merely mentioning a date does not create an event. Invalid input creates no job. Gmail/Apple client rendering and real-device import still require manual acceptance testing; unit tests do not prove an Add to Calendar button appears.
 
 ## Do not rely on inferred events
 
@@ -8,7 +14,7 @@ Gmail's Events from Gmail feature supports specific confirmation categories (fli
 
 Apple documents Siri suggestions from Mail, Messages and Safari. Whether a particular personal email gets a suggestion is controlled by the receiving client and user settings, not guaranteed by our sender.
 
-## Recommended MVP
+## Confirmation policy and future voice integration
 
 Only after the user explicitly asks for a calendar item: collect a descriptive title, absolute date, start/end or all-day status, timezone, and optional location/notes. Resolve ambiguous relative dates and daylight-saving times with the user before creating the file. Show the interpreted event and obtain confirmation before email delivery.
 
