@@ -13,8 +13,8 @@ import { JobStore } from './job-store.js';
 import { createMailSender, type MailSender } from './mail.js';
 import { createDocumentRenderer, mailPresentation } from './document-presentation.js';
 import { createDraftGenerator, type DraftGenerator } from './delivery-draft.js';
-import { DeliveryDialogue } from './delivery-dialogue.js';
-import { calendarDetails } from './calendar.js';
+import { DeliveryDialogue, deliveryResult, mailFallback } from './delivery-dialogue.js';
+import { calendarDetails, calendarAttachment } from './calendar.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
@@ -38,12 +38,16 @@ export function createConversationServer(options: {
       const given = Buffer.from((req.headers.authorization ?? '').replace(/^Bearer /, ''));
       const expected = Buffer.from(options.token);
       if (given.length !== expected.length || !timingSafeEqual(given, expected)) { res.writeHead(401); res.end(); return; }
-      const match = /^\/artifacts\/([a-f0-9-]{36})$/.exec(req.url);
+      const match = /^\/artifacts\/([a-f0-9-]{36})(\/calendar)?$/.exec(req.url);
       try {
         if (!match || !options.jobs) throw new Error('Unavailable');
-        const bytes = await options.jobs.download(match[1]);
-        const filename = encodeURIComponent(mailPresentation(options.jobs.metadata(match[1])).filename).replace(/'/g, '%27');
-        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="conversation.md"; filename*=UTF-8''${filename}`,
+        const markdown = await options.jobs.download(match[1]);
+        const calendar = match[2] ? options.jobs.calendar(match[1]) : undefined;
+        if (match[2] && !calendar) throw new Error('Unavailable');
+        const file = calendar ? calendarAttachment(match[1], calendar, options.jobs.get(match[1])!.created) : undefined;
+        const bytes = file?.content ?? markdown;
+        const filename = encodeURIComponent(file?.filename ?? mailPresentation(options.jobs.metadata(match[1])).filename).replace(/'/g, '%27');
+        res.writeHead(200, { 'Content-Type': file?.contentType ?? 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="${file ? 'event.ics' : 'conversation.md'}"; filename*=UTF-8''${filename}`,
           'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" });
         res.end(bytes);
       } catch { res.writeHead(404); res.end('Artifact unavailable'); }
@@ -76,8 +80,9 @@ export function createConversationServer(options: {
     let current: Transcriber | undefined, lastActivity = Date.now(), totalBytes = 0, forced = false, segmentId = 0;
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
-    let mailApproval: { id: string; token: string; expires: number } | undefined;
-    const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail) : undefined;
+    let mailApproval: { id: string; token: string; expires: number; retryAttempt?: number } | undefined;
+    const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
+      (jobId, result) => { if (!closed) { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); } }) : undefined;
     const send = (event: Event) => {
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 262144) client.send(JSON.stringify(event));
       else client.close(1013, 'Client too slow');
@@ -148,32 +153,37 @@ export function createConversationServer(options: {
         }
         lastActivity = Date.now();
         switch (msg.type) {
+          case 'jobs.email.received':
+            if (!options.jobs || typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid receipt');
+            mailApproval = undefined; delivery?.invalidate();
+            try { options.jobs.acknowledgeReceipt(msg.id); send({ type: 'notice', text: '已记录你确认收到，不会再重发这份文件。' }); }
+            catch { send({ type: 'notice', text: '暂无可关联的发送记录，或发送仍在进行。' }); }
+            send({ type: 'jobs.list', jobs: options.jobs.list() }); break;
           case 'jobs.email.cancel': mailApproval = undefined; send({ type: 'notice', text: '已取消本次发送确认，没有发送邮件。' }); break;
           case 'jobs.email.prepare': {
             if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
-            if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid mail request');
+            if (typeof msg.id !== 'string' || (msg.retry !== undefined && typeof msg.retry !== 'boolean') || Object.keys(msg).some(key => !['type', 'id', 'retry'].includes(key))) throw new Error('Invalid mail request');
             mailApproval = undefined; delivery?.invalidate();
-            if (options.jobs.get(msg.id)?.state !== 'completed' || options.jobs.superseded(msg.id) || options.jobs.mailState(msg.id)) { send({ type: 'notice', text: '文件尚未完成、已被新版替代，或已有发送记录。' }); break; }
+            if (options.jobs.get(msg.id)?.state !== 'completed' || options.jobs.superseded(msg.id) || (msg.retry ? !options.jobs.canRetryEmail(msg.id) : options.jobs.mailState(msg.id))) { send({ type: 'notice', text: '无法发送或重发：文件未完成、旧版失效、已收到或重发次数已用完。' + mailFallback }); break; }
             const metadata = mailPresentation(options.jobs.metadata(msg.id)), calendar = options.jobs.calendar(msg.id);
-            mailApproval = { id: msg.id, token: randomUUID(), expires: Date.now() + 5 * 60000 };
+            mailApproval = { id: msg.id, token: randomUUID(), expires: Date.now() + 5 * 60000, retryAttempt: msg.retry ? options.jobs.mailAttempts(msg.id) : undefined };
             send({ type: 'mail.confirmation_required', id: msg.id, confirmation: mailApproval.token,
-              preview: metadata.text + (calendar ? '\n\n' + calendarDetails(calendar) : '') });
+              preview: (msg.retry ? mailFallback + '\n重发同一份文件，可能收到重复邮件。每份文件最多重发一次。\n\n' : '') + metadata.text + (calendar ? '\n\n' + calendarDetails(calendar) : '') });
             break;
           }
-          case 'jobs.email':
+          case 'jobs.email': {
             if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
             if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id', 'confirmation'].includes(key))) throw new Error('Invalid mail request');
             if (!mailApproval || mailApproval.id !== msg.id || mailApproval.token !== msg.confirmation || mailApproval.expires <= Date.now()) { send({ type: 'notice', text: '发送确认已失效，请重新预览并确认。' }); break; }
+            const retryAttempt = mailApproval.retryAttempt;
             mailApproval = undefined; delivery?.invalidate();
             send({ type: 'notice', text: '正在处理邮件请求；收件人为服务器配置的固定邮箱。' });
-            void options.jobs.email(msg.id, options.mail).then(result => {
-              send({ type: 'notice', text: result === 'accepted' ? '邮件已由发送服务器接受，请检查收件箱或垃圾邮件。'
-                : result === 'sending' ? '邮件发送中，请勿重复提交。'
-                : result === 'failed' ? '邮件发送失败；文件仍已保存。请检查发件配置。'
-                : '邮件发送结果不确定，请先检查邮箱；为避免重复，不会自动重发。' });
+            void (retryAttempt ? options.jobs.retryEmail(msg.id, options.mail, retryAttempt) : options.jobs.email(msg.id, options.mail)).then(result => {
+              send({ type: 'notice', text: deliveryResult(result) });
               send({ type: 'jobs.list', jobs: options.jobs!.list() });
             }).catch(() => send({ type: 'notice', text: '暂时无法发送：请确认文件已完成、没有其他发送任务，且未达到每日 20 次上限。' }));
             break;
+          }
           case 'jobs.list': send({ type: 'jobs.list', jobs: options.jobs?.list() ?? [] }); break;
           case 'jobs.export':
             mailApproval = undefined; delivery?.invalidate();

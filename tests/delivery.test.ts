@@ -32,8 +32,33 @@ test('requested standalone document saves before preview and sends only on a lat
     assert.match(conversation.history.at(-1)!.content, /文件已经生成/);
     assert.equal((await store.download(store.list()[0].id)).toString(), draft.document.markdown);
     route('confirm'); await conversation.submit('确认发送', true);
-    assert.equal(sent.length, 1); assert.match(conversation.history.at(-1)!.content, /已提交/);
+    assert.equal(sent.length, 1); assert.match(conversation.history.at(-1)!.content, /已成功提交发送/);
+    assert.match(conversation.history.at(-1)!.content, /确认是否收到/);
     await conversation.submit('确认发送', true); assert.equal(sent.length, 1);
+  });
+});
+test('missing email offers one confirmed resend of original file, then download fallback', async () => {
+  await fixture(async ({ conversation, store, route, sent }) => {
+    await conversation.submit('生成文档', true); route('confirm'); await conversation.submit('确认发送', true);
+    route('not_received'); await conversation.submit('我没收到，再发一次', true);
+    assert.equal(sent.length, 1); assert.match(conversation.history.at(-1)!.content, /确认重发/);
+    route('confirm'); await conversation.submit('确认重发', true);
+    assert.equal(sent.length, 2); assert.deepEqual(sent[0], sent[1]); assert.equal(store.list().length, 1);
+    assert.equal(store.list()[0].mail_attempts, 2);
+    await conversation.submit('确认重发', true); assert.equal(sent.length, 2);
+    route('not_received'); await conversation.submit('还是没收到', true);
+    assert.match(conversation.history.at(-1)!.content, /直接下载/); assert.equal(sent.length, 2);
+  });
+});
+test('reported receipt is recorded and blocks resending; cancelled resend does not send', async () => {
+  await fixture(async ({ conversation, store, route, sent }) => {
+    await conversation.submit('生成文档', true); route('confirm'); await conversation.submit('确认发送', true);
+    route('not_received'); await conversation.submit('没收到', true);
+    route('cancel'); await conversation.submit('先不要重发', true); assert.equal(sent.length, 1);
+    route('received'); await conversation.submit('邮件收到了', true);
+    assert.equal(store.list()[0].mail_received, true); assert.match(conversation.history.at(-1)!.content, /已记录/);
+    route('not_received'); await conversation.submit('再发一次', true); route('confirm'); await conversation.submit('确认重发', true);
+    assert.equal(sent.length, 1);
   });
 });
 test('negation, quoted approval, conditional approval and vague assent cannot send even if misclassified', async () => {

@@ -5,7 +5,7 @@ import { mailPresentation, type Presentation } from './document-presentation.js'
 import { calendarAttachment, calendarDetails, type CalendarEvent } from './calendar.js';
 
 export type MailResult = 'accepted' | 'failed' | 'unknown';
-export type MailSender = (id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string) => Promise<MailResult>;
+export type MailSender = (id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string, deliveryId?: string) => Promise<MailResult>;
 export function mailPayload(id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string) {
   const content = mailPresentation(metadata);
   const attachment = calendar ? calendarAttachment(id, calendar, created ?? '') : undefined;
@@ -34,7 +34,8 @@ export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
 export function createMailSender(env: NodeJS.ProcessEnv = process.env): MailSender | undefined {
   const config = mailConfig(env);
   if (!config) return undefined;
-  return async (id, markdown, metadata, calendar, created) => {
+  return async (id, markdown, metadata, calendar, created, deliveryId = id) => {
+    if (!/^[a-f0-9-]{36}$/.test(deliveryId)) return 'failed';
     if (!/^[a-f0-9-]{36}$/.test(id) || !markdown.length || markdown.length > 2 * 1024 * 1024) return 'failed';
     let payload: ReturnType<typeof mailPayload>;
     try { payload = mailPayload(id, markdown, metadata, calendar, created); } catch { return 'failed'; }
@@ -60,7 +61,7 @@ export function createMailSender(env: NodeJS.ProcessEnv = process.env): MailSend
       const info = await transport.sendMail({
         from: { name: 'Even · 私人助理', address: config.user }, to: config.to,
         envelope: { from: config.user, to: [config.to] },
-        messageId: `<even-${id}@${config.user.split('@')[1]}>`,
+        messageId: `<even-${deliveryId}@${config.user.split('@')[1]}>`,
         ...payload,
         disableFileAccess: true, disableUrlAccess: true
       });

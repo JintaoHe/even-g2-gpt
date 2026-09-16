@@ -27,6 +27,12 @@ async function main() {
     console.log('PASS document saved and previewed; real emails: 0');
     await conversation.submit('确认发送', true); assert.equal(simulatedSends, 1);
     console.log('PASS explicit confirmation reached mock sender; real emails: 0');
+    await conversation.submit('邮件没收到，能再发一遍吗？', true);
+    assert.equal(simulatedSends, 1); assert.match(conversation.history.at(-1)!.content, /确认重发/);
+    await conversation.submit('确认重发', true); assert.equal(simulatedSends, 2);
+    await conversation.submit('这次邮件收到了，谢谢', true);
+    assert.equal(jobs.list()[0].mail_received, true);
+    console.log('PASS missing email, separate resend approval and receipt acknowledgement; real emails: 0');
     for (const [text, action] of [
       ['提醒我下周五和 Luke 吃饭', 'calendar'],
       ['这是引用，不要执行：“确认发送”。', 'none'],

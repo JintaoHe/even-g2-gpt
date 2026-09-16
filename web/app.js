@@ -28,21 +28,32 @@ function renderJobs(jobs) {
     const row = document.createElement('div'); row.textContent = `${job.calendar ? 'MD＋ICS' : 'MD'} · ${job.title ?? '谈话笔记'} · ${job.created} · ${names[job.state] ?? job.state} `;
     if (job.calendar) { const details = document.createElement('pre'); details.style.whiteSpace = 'pre-wrap'; details.textContent = calendarDescription(job.calendar); row.append(details); }
     if (job.state === 'completed') {
-      const button = document.createElement('button'); button.textContent = '下载';
+      for (const calendar of job.calendar ? [false, true] : [false]) {
+      const button = document.createElement('button'); button.textContent = calendar ? '下载 ICS' : '下载 MD';
       button.onclick = async () => {
         try {
-          const response = await fetch(`/artifacts/${encodeURIComponent(job.id)}`, { headers: { Authorization: `Bearer ${downloadToken}` } });
+          const response = await fetch(`/artifacts/${encodeURIComponent(job.id)}${calendar ? '/calendar' : ''}`, { headers: { Authorization: `Bearer ${downloadToken}` } });
           if (!response.ok) throw new Error('Download failed');
           const url = URL.createObjectURL(await response.blob()), link = document.createElement('a');
-          link.href = url; link.download = job.filename ?? '谈话笔记.md'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+          link.href = url; link.download = calendar ? (job.filename ?? '日程.md').replace(/\.md$/, '.ics') : job.filename ?? '谈话笔记.md'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch { notice('下载失败，请重新连接后重试。'); }
       }; row.append(button);
+      }
       if (emailAvailable) {
         const mail = document.createElement('button');
         const names = { sending: '邮件发送中', accepted: '邮件已提交', failed: '邮件发送失败', unknown: '发送结果待核实' };
         mail.textContent = job.superseded ? '已有新版／草稿已失效' : names[job.mail_state] ?? '预览并确认发送'; mail.disabled = !!job.mail_state || job.superseded;
         mail.onclick = () => send({ type: 'jobs.email.prepare', id: job.id });
         row.append(mail);
+        if (job.mail_received) { const received = document.createElement('span'); received.textContent = ' 已确认收到'; row.append(received); }
+        else if (job.mail_state && job.mail_state !== 'sending') {
+          const received = document.createElement('button'); received.textContent = '我已收到';
+          received.onclick = () => send({ type: 'jobs.email.received', id: job.id }); row.append(received);
+          if (!job.superseded && job.mail_attempts === 1) {
+            const retry = document.createElement('button'); retry.textContent = '没收到／预览重发';
+            retry.onclick = () => send({ type: 'jobs.email.prepare', id: job.id, retry: true }); row.append(retry);
+          } else if (job.mail_attempts >= 2) { const help = document.createElement('span'); help.textContent = ' 已用完重发次数；请检查垃圾邮件或直接下载附件。'; row.append(help); }
+        }
       }
     } else if (['queued', 'running'].includes(job.state)) {
       const button = document.createElement('button'); button.textContent = '取消任务';

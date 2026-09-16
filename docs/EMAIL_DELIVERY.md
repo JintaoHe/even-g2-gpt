@@ -35,11 +35,21 @@ Only `smtp.gmail.com` is supported: port 465 with `SMTP_SECURE=true` uses implic
 In the browser conversation lab, export the current conversation to MD, then choose **预览并确认发送** on a completed artifact. Downloads remain available independently. `jobs.email.prepare` with a saved `id` returns server-held preview data and a one-use, five-minute session confirmation token. Only a subsequent `jobs.email` with that `id` and `confirmation` can send; a bare send request is refused. Cancelling the dialog revokes the token. New speech/text, export, pause or exit invalidate the pending manual approval. No recipient, subject, attachment path, URL or arbitrary message fields are accepted. Only private server configuration chooses the address. Attachment content is read through the validated artifact store; external file and URL loading are disabled in the mail transport.
 
 - Delivery attempts are recorded in `jobs.sqlite` before SMTP, survive disconnect/restart and are limited to 20 per UTC calendar day. At most one send runs at once.
-- Each artifact is attempted only once. Repeated clicks do not send it again. SMTP transport requeues are disabled.
+- Each artifact permits one initial attempt and at most ONE separately confirmed resend. Repeated initial confirmations or replayed retry approvals never resend. Both attempts count toward the daily limit; attempts and recipient-reported receipts persist across restart. SMTP transport requeues are disabled.
 - `accepted` means the SMTP server accepted the message, **not proof of inbox delivery**. Check spam too.
-- `failed` means a definite authentication/recipient failure; `unknown` means delivery cannot safely be ruled out, including timeout or crash. Neither is automatically retried. Check the mailbox and fix configuration before explicitly exporting a new artifact if another attempt is wanted. Message-ID is stable but is not an exactly-once delivery guarantee.
+- `failed` means a definite authentication/recipient failure; `unknown` means delivery cannot safely be ruled out, including timeout or crash. Neither is automatically retried. Each authorized attempt has its own persisted Message-ID; the artifact and ICS event UID/DTSTAMP remain unchanged on resend. Duplicate mail/imports are still possible and disclosed before retry.
 - SMTP has a 20-second overall deadline and shorter connection timeouts. Graceful shutdown waits for the attempt; interrupted delivery is marked unknown on the next start. Failed delivery never removes the saved MD.
 - No raw SMTP errors, protocol logs, credentials or recipient details are returned to the browser/model. The application enforces fixed recipients; an app password itself is broader authorization and must remain private.
+
+## Receipt and recovery
+
+After SMTP acceptance, the assistant says the email was successfully submitted to the mail server and asks whether it arrived; it does not claim verified inbox delivery. A separate status notice is also emitted if the conversation was interrupted during SMTP submission. Disconnected clients can inspect the persisted file-list status after reconnecting.
+
+“没收到” / a request to resend first offers spam/all-mail checks and a warning about delayed duplicate delivery, then asks for **确认重发** / **resend it**. Only that separate explicit confirmation can retry the same immutable artifact once. Ambiguous assent, an expired approval, cancellation or a superseded artifact cannot trigger a retry. “收到了” records a **user-reported** receipt (not an email read receipt) and suppresses further retries. No inbox-reading permission or tracking pixel is added.
+
+The web lab offers “我已收到” and “没收到／预览重发”. `jobs.email.prepare` can include `retry:true`; the server binds its token to the current attempt number. `jobs.email` still accepts only the existing `id` and the one-use `confirmation`, not retry counts supplied by clients. `jobs.email.received` records explicit user feedback for the selected saved artifact.
+
+Fallback: authenticated MD and ICS downloads remain available independently of SMTP. `GET /artifacts/:id/calendar` uses the same bearer authentication and safe attachment headers as the MD endpoint, and generates the exact same calendar bytes as email. These are not public share links. The server-only Linux package does not include the web lab: use a separately deployed authenticated client for downloads. Once a retry is exhausted, suggest downloads/configuration checks rather than generating a fresh artifact to bypass the limit.
 
 ## Manual synthetic smoke test
 

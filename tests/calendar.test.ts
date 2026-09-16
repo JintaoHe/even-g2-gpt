@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { validateCalendar, calendarAttachment } from '../src/calendar.js';
 import { mailPayload } from '../src/mail.js';
 import { JobStore } from '../src/job-store.js';
+import { once } from 'node:events';
+import { createConversationServer } from '../src/conversation-server.js';
 
 const event = { title: '骑车，路线;确认', start: '2026-09-20T14:00-05:00', end: '2026-09-20T15:00-05:00', timezone: 'America/Chicago', allDay: false, location: '公园', notes: '待确认' };
 const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', created = '2026-09-16T12:00:00Z';
@@ -56,4 +58,21 @@ test('calendar persists across restart, is passed to sender once, and invalid in
     };
     await store.email(job.id, sender); await store.email(job.id, sender); assert.equal(sends, 1);
   } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('ICS download fallback requires authentication and matches email attachment bytes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-calendar-http-')), jobs = await JobStore.create(root);
+  const job = jobs.enqueue([{ role: 'user', content: 'Synthetic event' }], event);
+  for (let n = 0; n < 200 && jobs.get(job.id)?.state !== 'completed'; n++) await new Promise(r => setTimeout(r, 5));
+  const token = 'calendar-download-token-'.repeat(3);
+  const app = createConversationServer({ token, jobs, model: { decide: async () => 'respond', reply: async () => {} }, transcriber: () => { throw Error('Unused'); } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  const url = `http://127.0.0.1:${(app.http.address() as { port: number }).port}/artifacts/${job.id}/calendar`;
+  try {
+    assert.equal((await fetch(url)).status, 401);
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200); assert.match(response.headers.get('content-type')!, /text\/calendar/);
+    assert.match(response.headers.get('content-disposition')!, /attachment;/); assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(await response.text(), calendarAttachment(job.id, event, job.created).content.toString());
+  } finally { await app.close(); await jobs.close(); await rm(root, { recursive: true, force: true }); }
 });
