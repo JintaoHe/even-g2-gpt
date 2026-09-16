@@ -21,7 +21,7 @@ for (const entry of entries) {
     || /(^|\/)(auth|credentials|secrets)\.json$/i.test(path)
     || /(^|\/)\.env(?:\.|$)/.test(path) && path !== '.env.example'
     || path === 'tests/recording-regression.md') report('Private/generated path');
-  if (!/\.(?:ts|js|mjs|json|md|html|css|service)$/.test(path) && !['.gitignore', '.env.example'].includes(path)) report('Not an allowed source/document file');
+  if (!/\.(?:ts|js|mjs|json|md|html|css|service|yml|yaml)$/.test(path) && !['.gitignore', '.env.example', '.github/CODEOWNERS'].includes(path)) report('Not an allowed source/document file');
   const bytes = git('cat-file', 'blob', hash);
   if (bytes.length > 1024 * 1024 || bytes.includes(0)) report('Oversized/binary content');
   const original = bytes.toString('utf8');

@@ -1,5 +1,11 @@
 # Public source, private runtime
 
+## Reporting a vulnerability
+
+Use [GitHub private vulnerability reporting](https://github.com/JintaoHe/even-g2-gpt/security/advisories/new). Do not disclose exploitable details or credentials in public issues. Only the current main branch is maintained; this experimental project does not provide a security response SLA.
+
+## Publishing and deployment
+
 Never commit `.env`, account auth, tokens, audio recordings/transcripts, user conversations, generated documents, SQLite databases, screenshots, logs, dependency directories or release output. `.env.example` contains empty credential fields only. Development/test fixtures must use synthetic or non-sensitive sample data.
 
 Before publishing, stage only reviewed source/document paths, inspect `git diff --cached --stat` and run `npm run audit:public`. The audit scans staged blobs (including exact matches to long local .env secret values without printing them), rejects unexpected file types/paths, and checks common credential patterns. This supplements manual review; it cannot prove that all confidential data is absent. Ignore rules do not remove files already committed.
