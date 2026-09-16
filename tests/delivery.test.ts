@@ -101,7 +101,12 @@ test('calendar clarification creates no artifact; completed calendar is previewe
     assert.equal(store.list().length, 0); assert.equal(sent.length, 0); assert.match(conversation.history.at(-1)!.content, /几点/);
     route('revise'); await conversation.submit('9月25日18到19点，Chicago', true);
     assert.match(conversation.history.at(-1)!.content, /2026-09-25T18:00-05:00/); assert.equal(sent.length, 0);
-    route('confirm'); await conversation.submit('确认发送', true); assert.deepEqual(sent[0].calendar, calendar);
+    route('confirm'); await conversation.submit('确认发送', true); assert.equal(sent.length, 0);
+    await conversation.submit('确认按纽约时间发送', true); assert.equal(sent.length, 0);
+    await conversation.submit('确认按芝加哥时间发送', true); assert.deepEqual(sent[0].calendar, calendar);
+    route('not_received'); await conversation.submit('没收到', true); route('confirm');
+    await conversation.submit('确认重发', true); assert.equal(sent.length, 1);
+    await conversation.submit('确认按芝加哥时间重发', true); assert.equal(sent.length, 2);
   }, async () => ++count === 1 ? { clarification: '请确认具体日期和几点开始、结束？' } : { ...draft, calendar });
 });
 test('late cancelled generation cannot publish a sendable artifact or confirmation', async () => {

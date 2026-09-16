@@ -39,9 +39,43 @@ export function validateCalendar(value: unknown): CalendarEvent {
   }
   return event;
 }
+const zones: Record<string, { label: string; city: string; english: string }> = {
+  'America/Chicago': { label: '美国芝加哥（中部时间）', city: '芝加哥', english: 'Chicago' },
+  'America/Los_Angeles': { label: '美国洛杉矶（太平洋时间）', city: '洛杉矶', english: 'Los Angeles' },
+  'America/New_York': { label: '美国纽约（东部时间）', city: '纽约', english: 'New York' }
+};
+function canonicalZone(zone: string): string { return new Intl.DateTimeFormat('en', { timeZone: zone }).resolvedOptions().timeZone; }
+function localTime(value: string, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'longOffset' }).formatToParts(Date.parse(value));
+  const p = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName.replace('GMT', 'UTC')}`;
+}
+export function calendarConfirmationPhrase(event: CalendarEvent, retry = false): string {
+  const e = validateCalendar(event), verb = retry ? '重发' : '发送';
+  if (e.allDay) return `确认全天日期并${verb}`;
+  const zone = canonicalZone(e.timezone);
+  return `确认按${zones[zone]?.city ?? zone}时间${verb}`;
+}
+export function calendarApprovalMatches(text: string, event: CalendarEvent, retry = false): boolean {
+  const e = validateCalendar(event), verb = retry ? '重发' : '发送', englishVerb = retry ? 'resend' : 'send';
+  const accepted = [calendarConfirmationPhrase(e, retry)];
+  if (e.allDay) accepted.push(`confirm ${englishVerb} all-day dates`);
+  else {
+    const zone = canonicalZone(e.timezone), city = zones[zone];
+    accepted.push(`确认按${zone}时间${verb}`, `confirm ${englishVerb} in ${zone} time`);
+    if (city) accepted.push(`确认按美国${city.city}时间${verb}`, `确认按${city.english}时间${verb}`, `confirm ${englishVerb} in ${city.english} time`);
+  }
+  const normalize = (s: string) => s.trim().replace(/[。！.!]+$/, '').trim().toLowerCase();
+  return accepted.some(phrase => normalize(phrase) === normalize(text));
+}
 export function calendarDetails(event: CalendarEvent): string {
   const e = validateCalendar(event);
-  return `${e.title}\n${e.start} → ${e.end}\n${e.allDay ? '全天；结束日期不包含在事件内' : `时区：${e.timezone}（时间包含 UTC 偏移）`}${e.location ? `\n地点：${e.location}` : ''}${e.notes ? `\n备注：${e.notes}` : ''}\n尚未添加到日历；请打开 ICS 附件确认导入。重复导入可能产生重复事件。`;
+  const zone = e.allDay ? '' : canonicalZone(e.timezone);
+  const timing = e.allDay ? '全天日期，不绑定小时或时区；结束日期不包含在事件内。请确认这是全天事件，不是有具体时间的约会。'
+    : `主时区：${zones[zone]?.label ?? zone} [${zone}]\n${[zone, ...Object.keys(zones).filter(z => z !== zone)].map(z =>
+      `${zones[z]?.label ?? z} [${z}]：${localTime(e.start, z)} → ${localTime(e.end, z)}`).join('\n')}\n以上是同一事件的时区换算，不是多个事件。请核对每一端的完整日期、UTC 偏移和是否跨日；主时区未确认前不会发送。`;
+  return `${e.title}\n${e.start} → ${e.end}\n${timing}${e.location ? `\n地点：${e.location}` : ''}${e.notes ? `\n备注：${e.notes}` : ''}\n尚未添加到日历；请打开 ICS 附件确认导入。重复导入可能产生重复事件。`;
 }
 const escapeText = (text: string) => text.replace(/\\/g, '\\\\').replace(/\r\n|\r|\n/g, '\\n').replace(/;/g, '\\;').replace(/,/g, '\\,');
 function fold(line: string): string {

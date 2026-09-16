@@ -14,7 +14,7 @@ import { createMailSender, type MailSender } from './mail.js';
 import { createDocumentRenderer, mailPresentation } from './document-presentation.js';
 import { createDraftGenerator, type DraftGenerator } from './delivery-draft.js';
 import { DeliveryDialogue, deliveryResult, mailFallback } from './delivery-dialogue.js';
-import { calendarDetails, calendarAttachment } from './calendar.js';
+import { calendarDetails, calendarAttachment, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
@@ -168,15 +168,20 @@ export function createConversationServer(options: {
             const metadata = mailPresentation(options.jobs.metadata(msg.id)), calendar = options.jobs.calendar(msg.id);
             mailApproval = { id: msg.id, token: randomUUID(), expires: Date.now() + 5 * 60000, retryAttempt: msg.retry ? options.jobs.mailAttempts(msg.id) : undefined };
             send({ type: 'mail.confirmation_required', id: msg.id, confirmation: mailApproval.token,
+              calendar_confirmation: calendar ? calendarConfirmationPhrase(calendar, !!msg.retry) : undefined,
               preview: (msg.retry ? mailFallback + '\n重发同一份文件，可能收到重复邮件。每份文件最多重发一次。\n\n' : '') + metadata.text + (calendar ? '\n\n' + calendarDetails(calendar) : '') });
             break;
           }
           case 'jobs.email': {
             if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
-            if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id', 'confirmation'].includes(key))) throw new Error('Invalid mail request');
+            if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id', 'confirmation', 'calendar_confirmation'].includes(key))) throw new Error('Invalid mail request');
             if (!mailApproval || mailApproval.id !== msg.id || mailApproval.token !== msg.confirmation || mailApproval.expires <= Date.now()) { send({ type: 'notice', text: '发送确认已失效，请重新预览并确认。' }); break; }
             const retryAttempt = mailApproval.retryAttempt;
             mailApproval = undefined; delivery?.invalidate();
+            const calendar = options.jobs.calendar(msg.id);
+            if (calendar && (typeof msg.calendar_confirmation !== 'string' || !calendarApprovalMatches(msg.calendar_confirmation, calendar, !!retryAttempt))) {
+              send({ type: 'notice', text: '日历日期／主时区未明确确认，没有发送。请重新预览并确认指定时区。' }); break;
+            }
             send({ type: 'notice', text: '正在处理邮件请求；收件人为服务器配置的固定邮箱。' });
             void (retryAttempt ? options.jobs.retryEmail(msg.id, options.mail, retryAttempt) : options.jobs.email(msg.id, options.mail)).then(result => {
               send({ type: 'notice', text: deliveryResult(result) });

@@ -2,7 +2,7 @@ import type { DialogueModel, Message, TurnPlan, ReplyUpdate, ReasoningEffort } f
 import type { Draft, DraftGenerator } from './delivery-draft.js';
 import type { MailSender } from './mail.js';
 import { JobStore } from './job-store.js';
-import { calendarDetails } from './calendar.js';
+import { calendarDetails, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
 
 type Approval = { id: string; prompt: string; expires: number; retryAttempt?: number };
 type Plan = { plan: TurnPlan; approval?: Approval };
@@ -42,7 +42,7 @@ export class DeliveryDialogue implements DialogueModel {
     const metadata = this.draft.document.presentation;
     const prompt = prefix + `文件已经生成：${metadata.filename}\n${metadata.summary}` +
       (this.draft.calendar ? `\n\n日历文件：\n${calendarDetails(this.draft.calendar)}\n不包含自动通知或闹钟。` : '') +
-      (this.sender ? '\n\n确认发送到固定邮箱吗？请说“确认发送”；也可以要求修改、查看全文或说“取消发送”。' : '\n\n邮件发送未启用。文件已保存，可在网页下载；没有发送邮件。');
+      (this.sender ? `\n\n确认发送到固定邮箱吗？请说“${this.draft.calendar ? calendarConfirmationPhrase(this.draft.calendar) : '确认发送'}”；也可以要求修改、查看全文或说“取消发送”。` : '\n\n邮件发送未启用。文件已保存，可在网页下载；没有发送邮件。');
     delta(prompt);
     if (this.sender) this.approval = { id: this.jobId, prompt, expires: this.now() + 5 * 60000 };
   }
@@ -51,7 +51,8 @@ export class DeliveryDialogue implements DialogueModel {
     if (!this.sender || !this.jobs.canRetryEmail(this.jobId)) {
       delta('目前不能再次发送：可能已确认收到、仍在发送、旧版已失效，或已用完这份文件的一次重发机会。' + mailFallback); return;
     }
-    const prompt = `${mailFallback}\n\n要将同一份文件“${this.jobs.metadata(this.jobId)?.filename ?? '谈话笔记.md'}”再发送一次到固定邮箱吗？内容不会改变；前一封可能延迟到达，因此可能收到两封。每份文件最多重发一次。请说“确认重发”，或说“取消发送”。`;
+    const calendar = this.jobs.calendar(this.jobId);
+    const prompt = `${mailFallback}\n\n要将同一份文件“${this.jobs.metadata(this.jobId)?.filename ?? '谈话笔记.md'}”再发送一次到固定邮箱吗？内容不会改变；前一封可能延迟到达，因此可能收到两封。每份文件最多重发一次。${calendar ? '\n' + calendarDetails(calendar) + '\n' : ''}请说“${calendar ? calendarConfirmationPhrase(calendar, true) : '确认重发'}”，或说“取消发送”。`;
     delta(prompt); this.approval = { id: this.jobId, prompt, expires: this.now() + 5 * 60000, retryAttempt: this.jobs.mailAttempts(this.jobId) };
   }
   async reply(history: Message[], signal: AbortSignal, delta: (text: string) => void, update?: (event: ReplyUpdate) => void, effort?: ReasoningEffort) {
@@ -74,9 +75,11 @@ export class DeliveryDialogue implements DialogueModel {
       const approval = context?.approval;
       const lastAssistant = history.slice(0, -1).at(-1);
       const text = history.at(-1)?.content ?? '';
-      if (!(approval?.retryAttempt ? explicitResend(text) : explicitSend(text)) || !approval || approval.expires <= this.now() || approval.id !== this.jobId
+      const calendar = this.jobId ? this.jobs.calendar(this.jobId) : undefined;
+      const validPhrase = calendar ? calendarApprovalMatches(text, calendar, !!approval?.retryAttempt) : approval?.retryAttempt ? explicitResend(text) : explicitSend(text);
+      if (!validPhrase || !approval || approval.expires <= this.now() || approval.id !== this.jobId
         || lastAssistant?.role !== 'assistant' || lastAssistant.content !== approval.prompt) {
-        if (explicitResend(text)) this.retryPreview(delta); else this.preview(delta);
+        if (approval?.retryAttempt || explicitResend(text) || (calendar && calendarApprovalMatches(text, calendar, true))) this.retryPreview(delta); else this.preview(delta);
         return; // Requires a fresh separate confirmation turn.
       }
       if (!this.sender) { delta('邮件发送未启用，没有发送。'); return; }

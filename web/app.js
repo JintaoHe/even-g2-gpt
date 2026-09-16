@@ -115,7 +115,11 @@ $('connect').onclick = () => {
     }
     if (e.type === 'jobs.list') renderJobs(e.jobs);
     if (e.type === 'mail.confirmation_required') {
-      if (window.confirm(`${e.preview}\n\n确认将这些附件发送到固定邮箱吗？`)) send({ type: 'jobs.email', id: e.id, confirmation: e.confirmation });
+      if (e.calendar_confirmation) {
+        const phrase = window.prompt(`${e.preview}\n\n请核对日期和主时区。要发送，请输入：${e.calendar_confirmation}`);
+        if (phrase !== null) send({ type: 'jobs.email', id: e.id, confirmation: e.confirmation, calendar_confirmation: phrase });
+        else send({ type: 'jobs.email.cancel' });
+      } else if (window.confirm(`${e.preview}\n\n确认将这些附件发送到固定邮箱吗？`)) send({ type: 'jobs.email', id: e.id, confirmation: e.confirmation });
       else send({ type: 'jobs.email.cancel' });
     }
     if (e.type === 'job.created') { notice('MD 导出任务已保存，断开页面后仍会继续。'); send({ type: 'jobs.list' }); }

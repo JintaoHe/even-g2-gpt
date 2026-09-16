@@ -43,6 +43,8 @@ In the browser conversation lab, export the current conversation to MD, then cho
 
 ## Receipt and recovery
 
+For calendar attachments, the generic send/resend phrases below are replaced by explicit primary-timezone/date approval (see CALENDAR_EMAIL_DESIGN.md). The manual send payload additionally requires `calendar_confirmation`, validated on the server; it is not a recipient or message-content override.
+
 After SMTP acceptance, the assistant says the email was successfully submitted to the mail server and asks whether it arrived; it does not claim verified inbox delivery. A separate status notice is also emitted if the conversation was interrupted during SMTP submission. Disconnected clients can inspect the persisted file-list status after reconnecting.
 
 “没收到” / a request to resend first offers spam/all-mail checks and a warning about delayed duplicate delivery, then asks for **确认重发** / **resend it**. Only that separate explicit confirmation can retry the same immutable artifact once. Ambiguous assent, an expired approval, cancellation or a superseded artifact cannot trigger a retry. “收到了” records a **user-reported** receipt (not an email read receipt) and suppresses further retries. No inbox-reading permission or tracking pixel is added.
