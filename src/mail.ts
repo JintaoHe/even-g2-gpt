@@ -6,13 +6,16 @@ import { calendarAttachment, calendarDetails, type CalendarEvent } from './calen
 
 export type MailResult = 'accepted' | 'failed' | 'unknown';
 export type MailSender = (id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string, deliveryId?: string) => Promise<MailResult>;
-export function mailPayload(id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string) {
-  const content = mailPresentation(metadata);
+export function mailPayload(id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string, calendarOnly = false) {
+  if (calendarOnly && !calendar) throw new Error('CALENDAR_REQUIRED');
+  const filename = mailPresentation(metadata).filename;
   const attachment = calendar ? calendarAttachment(id, calendar, created ?? '') : undefined;
+  const attachments = [...(calendarOnly ? [] : [{ filename, content: markdown, contentType: 'text/markdown; charset=utf-8' }]), ...(attachment ? [attachment] : [])];
+  const content = mailPresentation(metadata, attachments.map(item => item.filename));
   const details = calendar ? `\n\n日程附件（需你确认添加）\n${calendarDetails(calendar)}` : '';
   const escaped = details.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
   return { subject: content.subject, text: content.text + details, html: content.html + (details ? `<pre style="white-space:pre-wrap">${escaped}</pre>` : ''),
-    attachments: [{ filename: content.filename, content: markdown, contentType: 'text/markdown; charset=utf-8' }, ...(attachment ? [attachment] : [])] };
+    attachments };
 }
 type Config = { user: string; password: string; to: string; port: 465 | 587 };
 export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
@@ -31,14 +34,14 @@ export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
   return { user, password, to, port };
 }
 
-export function createMailSender(env: NodeJS.ProcessEnv = process.env): MailSender | undefined {
+export function createMailSender(env: NodeJS.ProcessEnv = process.env, options: { calendarOnly?: boolean } = {}): MailSender | undefined {
   const config = mailConfig(env);
   if (!config) return undefined;
   return async (id, markdown, metadata, calendar, created, deliveryId = id) => {
     if (!/^[a-f0-9-]{36}$/.test(deliveryId)) return 'failed';
     if (!/^[a-f0-9-]{36}$/.test(id) || !markdown.length || markdown.length > 2 * 1024 * 1024) return 'failed';
     let payload: ReturnType<typeof mailPayload>;
-    try { payload = mailPayload(id, markdown, metadata, calendar, created); } catch { return 'failed'; }
+    try { payload = mailPayload(id, markdown, metadata, calendar, created, options.calendarOnly); } catch { return 'failed'; }
     // Own the socket so the overall deadline can destroy it, including during DATA.
     // A non-pooled transport makes exactly one attempt (no pool requeue behavior).
     let socket: Socket | undefined;
@@ -59,7 +62,7 @@ export function createMailSender(env: NodeJS.ProcessEnv = process.env): MailSend
       logger: false, debug: false, disableFileAccess: true, disableUrlAccess: true
     });
       const info = await transport.sendMail({
-        from: { name: 'Even · 私人助理', address: config.user }, to: config.to,
+        from: { name: 'Even Assistant · 系统通知', address: config.user }, to: config.to,
         envelope: { from: config.user, to: [config.to] },
         messageId: `<even-${deliveryId}@${config.user.split('@')[1]}>`,
         ...payload,

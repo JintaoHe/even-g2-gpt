@@ -62,6 +62,10 @@ test('all-day end is exclusive; mail includes safe visible details and both atta
   assert.match(payload.text, /尚未添加到日历/); assert.doesNotMatch(payload.html, /<script>/);
   assert.throws(() => validateCalendar({ ...allDay, end: allDay.start }));
   assert.equal(mailPayload(id, Buffer.from('# MD')).attachments.length, 1);
+  const calendarOnly = mailPayload(id, Buffer.from('# MD'), undefined, allDay, created, true);
+  assert.equal(calendarOnly.attachments.length, 1); assert.match(calendarOnly.attachments[0].filename, /\.ics$/);
+  assert.doesNotMatch(calendarOnly.text, /\.md/); assert.match(calendarOnly.text, /系统通知/); assert.match(calendarOnly.html, /内容摘录/);
+  assert.throws(() => mailPayload(id, Buffer.from('# MD'), undefined, undefined, created, true));
 });
 test('calendar persists across restart, is passed to sender once, and invalid input leaves no job', async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-calendar-'));

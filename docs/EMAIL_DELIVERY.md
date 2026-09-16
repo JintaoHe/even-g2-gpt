@@ -55,6 +55,10 @@ Fallback: authenticated MD and ICS downloads remain available independently of S
 
 ## Manual synthetic smoke test
 
+For the three-format acceptance suite, explicitly authorize each real email first, then run `node --import tsx scripts/mail-acceptance.ts --case md --send`, or `--case ics` / `--case both` with `--confirm-chicago-test-time` after confirming its documented synthetic date (2026-10-01, 18:00–18:15 America/Chicago). These send real mail to the private fixed recipient; no model request or private conversation is used. The separate `.local/mail-acceptance-v1/<case>` ledgers prevent accidental reruns. Do not delete their ledgers to retry uncertain delivery. ICS-only mode is an explicit sender-factory option used by this test; normal conversation delivery still defaults to MD plus optional ICS.
+
+All formats include a descriptive subject, plain-text/HTML summary, actual attachment names and the honest display identity **Even Assistant · 系统通知**, using the configured dedicated Gmail address. This identifies our own application's automated notification, not a Google/Apple/Even vendor message. No spoofed sender domain, login link or tracking image is added. Calendar test content is prominently labelled as a non-real arrangement without alarms or automatic import.
+
 Run `node --import tsx scripts/mail-smoke.ts --send` manually from the repository root, using the supported Node runtime and system CA configuration as needed. This explicit command overrides the enable flag **only for its synthetic test**, uses no model API, and sends one non-private Markdown attachment. Its separate `.local/mail-smoke` ledger prevents reruns from resending the same test artifact. Do not delete that ledger to retry an uncertain send without first checking the mailbox. This script is excluded from CI test discovery and the server-only release.
 
 Credentials are not included in Linux builds. Deploy and back up the private data/config separately. SMTP connectivity and process lifecycle still need validation on the chosen Linux host.
