@@ -1,5 +1,6 @@
 import { renderCitations } from './citations.js';
 import { createProgress } from './progress.js';
+import { calendarPanel } from './calendar.js';
 const $ = id => document.getElementById(id);
 const progress = createProgress(text => { $('progress').textContent = text; });
 let socket, state = 'closed', connected = false, context, media, source, worklet, micEpoch = 0;
@@ -11,6 +12,7 @@ const answers = new Map();
 const labels = { listening: '等待说话 / 继续追问', thinking: '判断意图中（可继续说）', answering: '回答中（可插话）', paused: '已暂停', exit_pending: '已停止收音，等待退出确认', closed: '已结束' };
 const active = () => connected && ['listening', 'thinking', 'answering'].includes(state);
 function send(value) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); }
+const calendarEvent = calendarPanel($('googleCalendar'), send);
 function notice(text) { $('notice').textContent = text; }
 function controls() {
   for (const id of ['voice', 'resume']) $(id).disabled = !connected || ['closed', 'exit_pending'].includes(state);
@@ -97,6 +99,7 @@ $('connect').onclick = () => {
   socket.onopen = () => send({ type: 'hello', token });
   socket.onmessage = ({ data }) => {
     const e = JSON.parse(data);
+    calendarEvent(e);
     progress.event(e);
     if (e.type === 'ready') {
       emailAvailable = e.capabilities?.email === true;

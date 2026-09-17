@@ -2,20 +2,24 @@ import nodemailer from 'nodemailer';
 import { connect as connectTls } from 'node:tls';
 import { connect as connectTcp, type Socket } from 'node:net';
 import { mailPresentation, type Presentation } from './document-presentation.js';
-import { calendarAttachment, calendarDetails, type CalendarEvent } from './calendar.js';
+import { calendarAttachment, calendarDetails, calendarInvitation, type CalendarInvitation, type CalendarEvent } from './calendar.js';
 
 export type MailResult = 'accepted' | 'failed' | 'unknown';
 export type MailSender = (id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string, deliveryId?: string) => Promise<MailResult>;
-export function mailPayload(id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string, calendarOnly = false) {
+export function mailPayload(id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string, calendarOnly = false, invitation?: CalendarInvitation) {
   if (calendarOnly && !calendar) throw new Error('CALENDAR_REQUIRED');
+  if (invitation && !calendar) throw new Error('CALENDAR_REQUIRED');
   const filename = mailPresentation(metadata).filename;
-  const attachment = calendar ? calendarAttachment(id, calendar, created ?? '') : undefined;
+  const attachment = calendar && !invitation ? calendarAttachment(id, calendar, created ?? '') : undefined;
+  const icalEvent = invitation && calendar ? calendarInvitation(calendar, invitation) : undefined;
   const attachments = [...(calendarOnly ? [] : [{ filename, content: markdown, contentType: 'text/markdown; charset=utf-8' }]), ...(attachment ? [attachment] : [])];
-  const content = mailPresentation(metadata, attachments.map(item => item.filename));
-  const details = calendar ? `\n\n日程附件（需你确认添加）\n${calendarDetails(calendar)}` : '';
+  const content = mailPresentation(metadata, [...attachments.map(item => item.filename), ...(icalEvent ? [icalEvent.filename] : [])]);
+  const details = calendar ? invitation
+    ? `\n\n正式日历邀请（Google 上的原事件已创建）\n${calendarDetails(calendar).replace('尚未添加到日历；请打开 ICS 附件确认导入。重复导入可能产生重复事件。', '请使用邮件客户端的接受／拒绝功能。客户端识别及回复同步需本次测试验证；不要反复导入附件。')}`
+    : `\n\n日程附件（需你确认添加）\n${calendarDetails(calendar)}` : '';
   const escaped = details.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
   return { subject: content.subject, text: content.text + details, html: content.html + (details ? `<pre style="white-space:pre-wrap">${escaped}</pre>` : ''),
-    attachments };
+    attachments, ...(icalEvent ? { icalEvent } : {}) };
 }
 type Config = { user: string; password: string; to: string; port: 465 | 587 };
 export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
@@ -34,14 +38,15 @@ export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
   return { user, password, to, port };
 }
 
-export function createMailSender(env: NodeJS.ProcessEnv = process.env, options: { calendarOnly?: boolean } = {}): MailSender | undefined {
+export function createMailSender(env: NodeJS.ProcessEnv = process.env, options: { calendarOnly?: boolean; invitation?: CalendarInvitation } = {}): MailSender | undefined {
   const config = mailConfig(env);
   if (!config) return undefined;
+  if (options.invitation && options.invitation.attendee !== config.to) throw new Error('INVITATION_RECIPIENT_MISMATCH');
   return async (id, markdown, metadata, calendar, created, deliveryId = id) => {
     if (!/^[a-f0-9-]{36}$/.test(deliveryId)) return 'failed';
     if (!/^[a-f0-9-]{36}$/.test(id) || !markdown.length || markdown.length > 2 * 1024 * 1024) return 'failed';
     let payload: ReturnType<typeof mailPayload>;
-    try { payload = mailPayload(id, markdown, metadata, calendar, created, options.calendarOnly); } catch { return 'failed'; }
+    try { payload = mailPayload(id, markdown, metadata, calendar, created, options.calendarOnly, options.invitation); } catch { return 'failed'; }
     // Own the socket so the overall deadline can destroy it, including during DATA.
     // A non-pooled transport makes exactly one attempt (no pool requeue behavior).
     let socket: Socket | undefined;

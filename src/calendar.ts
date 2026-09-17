@@ -69,13 +69,13 @@ export function calendarApprovalMatches(text: string, event: CalendarEvent, retr
   const normalize = (s: string) => s.trim().replace(/[。！.!]+$/, '').trim().toLowerCase();
   return accepted.some(phrase => normalize(phrase) === normalize(text));
 }
-export function calendarDetails(event: CalendarEvent): string {
+export function calendarDetails(event: CalendarEvent, mode: 'export' | 'live' = 'export'): string {
   const e = validateCalendar(event);
   const zone = e.allDay ? '' : canonicalZone(e.timezone);
   const timing = e.allDay ? '全天日期，不绑定小时或时区；结束日期不包含在事件内。请确认这是全天事件，不是有具体时间的约会。'
     : `主时区：${zones[zone]?.label ?? zone} [${zone}]\n${[zone, ...Object.keys(zones).filter(z => z !== zone)].map(z =>
-      `${zones[z]?.label ?? z} [${z}]：${localTime(e.start, z)} → ${localTime(e.end, z)}`).join('\n')}\n以上是同一事件的时区换算，不是多个事件。请核对每一端的完整日期、UTC 偏移和是否跨日；主时区未确认前不会发送。`;
-  return `${e.title}\n${e.start} → ${e.end}\n${timing}${e.location ? `\n地点：${e.location}` : ''}${e.notes ? `\n备注：${e.notes}` : ''}\n尚未添加到日历；请打开 ICS 附件确认导入。重复导入可能产生重复事件。`;
+      `${zones[z]?.label ?? z} [${z}]：${localTime(e.start, z)} → ${localTime(e.end, z)}`).join('\n')}\n以上是同一事件的时区换算，不是多个事件。请核对每一端的完整日期、UTC 偏移和是否跨日；主时区未确认前不会${mode === 'live' ? '提交修改' : '发送'}。`;
+  return `${e.title}\n${e.start} → ${e.end}\n${timing}${e.location ? `\n地点：${e.location}` : ''}${e.notes ? `\n备注：${e.notes}` : ''}${mode === 'export' ? '\n尚未添加到日历；请打开 ICS 附件确认导入。重复导入可能产生重复事件。' : ''}`;
 }
 const escapeText = (text: string) => text.replace(/\\/g, '\\\\').replace(/\r\n|\r|\n/g, '\\n').replace(/;/g, '\\;').replace(/,/g, '\\,');
 function fold(line: string): string {
@@ -88,6 +88,24 @@ function fold(line: string): string {
   return output;
 }
 const utc = (time: number) => new Date(time).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+export type CalendarInvitation = { uid: string; organizer: string; attendee: string; sequence: number; stamp: string };
+export function calendarInvitation(value: CalendarEvent, invitation: CalendarInvitation) {
+  const e = validateCalendar(value), i = invitation;
+  const address = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$/;
+  if (!address.test(i.organizer) || !address.test(i.attendee) || i.organizer.length > 254 || i.attendee.length > 254
+    || !/^[a-zA-Z0-9@._-]{5,1024}$/.test(i.uid) || !Number.isSafeInteger(i.sequence) || i.sequence < 0
+    || !Number.isFinite(Date.parse(i.stamp))) throw invalid();
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Even Assistant//Calendar Invitation//EN', 'CALSCALE:GREGORIAN', 'METHOD:REQUEST',
+    'BEGIN:VEVENT', `UID:${i.uid}`, `DTSTAMP:${utc(Date.parse(i.stamp))}`, `SEQUENCE:${i.sequence}`, 'STATUS:CONFIRMED',
+    `ORGANIZER;CN=Even Assistant:mailto:${i.organizer}`,
+    `ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:${i.attendee}`,
+    e.allDay ? `DTSTART;VALUE=DATE:${e.start.replace(/-/g, '')}` : `DTSTART:${utc(Date.parse(e.start))}`,
+    e.allDay ? `DTEND;VALUE=DATE:${e.end.replace(/-/g, '')}` : `DTEND:${utc(Date.parse(e.end))}`,
+    `SUMMARY:${escapeText(e.title)}`, `DESCRIPTION:${escapeText(e.notes + '\n此邀请关联 Google Calendar 中的事件。请自行选择是否接受邀请。')}`,
+    ...(e.location ? [`LOCATION:${escapeText(e.location)}`] : []), 'END:VEVENT', 'END:VCALENDAR'];
+  return { method: 'REQUEST' as const, filename: presentation(e.title, '', 'excerpt').filename.replace(/\.md$/, '.ics'),
+    content: Buffer.from(lines.map(fold).join('\r\n') + '\r\n') };
+}
 export function calendarAttachment(id: string, value: CalendarEvent, created: string) {
   if (!/^[a-f0-9-]{36}$/.test(id) || !Number.isFinite(Date.parse(created))) throw invalid();
   const e = validateCalendar(value);

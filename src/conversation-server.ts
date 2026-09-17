@@ -15,6 +15,11 @@ import { createDocumentRenderer, mailPresentation } from './document-presentatio
 import { createDraftGenerator, type DraftGenerator } from './delivery-draft.js';
 import { DeliveryDialogue, deliveryResult, mailFallback } from './delivery-dialogue.js';
 import { calendarDetails, calendarAttachment, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
+import { GoogleCalendarService, loadCalendarTransport } from './google-calendar.js';
+import { CalendarControl } from './calendar-control.js';
+import { CalendarDialogue } from './calendar-dialogue.js';
+import { createCalendarPlanner, type CalendarPlanner } from './calendar-planner.js';
+import { createCalendarAnswerer, type CalendarAnswerer } from './calendar-answer.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
@@ -25,11 +30,15 @@ export function createConversationServer(options: {
   jobs?: JobStore;
   mail?: MailSender;
   draftGenerator?: DraftGenerator;
+  calendar?: GoogleCalendarService;
+  calendarPlanner?: CalendarPlanner;
+  calendarAnswerer?: CalendarAnswerer;
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
+  const calendarTasks = new Set<Promise<void>>();
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript'], '/mic.js': ['mic.js', 'text/javascript'],
-    '/citations.js': ['citations.js', 'text/javascript'], '/progress.js': ['progress.js', 'text/javascript']
+    '/citations.js': ['citations.js', 'text/javascript'], '/progress.js': ['progress.js', 'text/javascript'], '/calendar.js': ['calendar.js', 'text/javascript']
   };
   const http = createServer(async (req, res) => {
     const host = req.headers.host ?? '';
@@ -81,6 +90,7 @@ export function createConversationServer(options: {
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
     let mailApproval: { id: string; token: string; expires: number; retryAttempt?: number } | undefined;
+    let unsubscribeCalendarHealth: (() => void) | undefined;
     const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
       (jobId, result) => { if (!closed) { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); } }) : undefined;
     const send = (event: Event) => {
@@ -91,8 +101,12 @@ export function createConversationServer(options: {
       generation++; detector.reset(); current = undefined; forced = false;
       for (const slot of slots) slot.job.cancel(); slots = [];
     };
-    const conversation = new Conversation(delivery ?? options.model, event => {
-      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) { clearCapture(); delivery?.invalidate(); mailApproval = undefined; }
+    const calendarControl = options.calendar ? new CalendarControl(options.calendar, send) : undefined;
+    const calendarDialogue = options.calendar && options.calendarPlanner ? new CalendarDialogue(delivery ?? options.model, options.calendar, options.calendarPlanner,
+      text => { if (!closed) send({ type: 'notice', text }); }, Date.now, options.calendarAnswerer) : undefined;
+    const conversation = new Conversation(calendarDialogue ?? delivery ?? options.model, event => {
+      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) { clearCapture(); delivery?.invalidate(); mailApproval = undefined; calendarControl?.invalidate(); calendarDialogue?.invalidate(); }
+      if (event.type === 'state' && event.state === 'closed') calendarDialogue?.endSession();
       send(event);
       if (event.type === 'state' && event.state === 'closed') client.close(1000, 'Conversation ended');
     }, history => options.save?.(id, history) ?? Promise.resolve());
@@ -149,9 +163,29 @@ export function createConversationServer(options: {
           if (msg.type !== 'hello' || given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Auth');
           if (owner && owner !== client) { send({ type: 'error', code: 'BUSY' }); client.close(); return; }
           owner = client; authenticated = true; clearTimeout(authTimer);
-          send({ type: 'ready', session_id: id, models: options.models, capabilities: { ...options.capabilities, email: !!options.mail } }); send({ type: 'state', state: conversation.state }); return;
+          send({ type: 'ready', session_id: id, models: options.models, capabilities: { ...options.capabilities, email: !!options.mail, calendar: !!options.calendar } }); send({ type: 'state', state: conversation.state });
+          if (options.calendar) {
+            let lastHealthState = '';
+            send({ type: 'calendar.health', health: options.calendar.health() });
+            unsubscribeCalendarHealth = options.calendar.subscribeHealth(health => {
+              if (closed) return;
+              send({ type: 'calendar.health', health });
+              if (health.state === 'retrying' && lastHealthState !== 'retrying') send({ type: 'notice', text: '日历读取异常，正在自动重试一次。' });
+              lastHealthState = health.state;
+            });
+          }
+          return;
         }
         lastActivity = Date.now();
+        if (typeof msg.type === 'string' && msg.type.startsWith('calendar.')) {
+          if (!calendarControl) send({ type: 'calendar.error', code: 'CALENDAR_DISABLED' });
+          else if (['closed', 'exit_pending'].includes(conversation.state)) send({ type: 'calendar.error', code: 'CALENDAR_SESSION_CLOSED' });
+          else {
+            const task = calendarControl.handle(msg);
+            calendarTasks.add(task); void task.finally(() => calendarTasks.delete(task));
+          }
+          return;
+        }
         switch (msg.type) {
           case 'jobs.email.received':
             if (!options.jobs || typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid receipt');
@@ -224,6 +258,7 @@ export function createConversationServer(options: {
     client.on('error', () => client.close());
     client.on('close', () => {
       closed = true; clearTimeout(authTimer); clearInterval(idle); clearTimeout(lifetime);
+      unsubscribeCalendarHealth?.();
       clearCapture(); conversation.close(); if (owner === client) owner = undefined;
     });
   });
@@ -231,6 +266,7 @@ export function createConversationServer(options: {
     for (const client of wss.clients) client.terminate();
     await new Promise<void>(resolve => wss.close(() => resolve()));
     await new Promise<void>(resolve => http.close(() => resolve()));
+    await Promise.allSettled(calendarTasks);
   } };
 }
 
@@ -256,9 +292,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const mail = createMailSender();
   const dataDirectory = resolve(process.env.EVEN_DATA_DIR ?? '.local');
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer());
+  let calendar: GoogleCalendarService | undefined;
+  if (process.env.GOOGLE_CALENDAR_ENABLED === 'true') {
+    try {
+      if (!process.env.EMAIL_TO?.trim()) throw new Error('Calendar creation requires a fixed invitation recipient');
+      const google = await loadCalendarTransport(dataDirectory);
+      calendar = await GoogleCalendarService.create(dataDirectory, google.calendarId, google.transport, Date.now, process.env.EMAIL_TO);
+    } catch { await jobs.close(); throw new Error('Google Calendar setup invalid; check private auth files and calendar binding.'); }
+  }
   const save = fileSaver(resolve(dataDirectory, 'conversations'));
   const app = createConversationServer({ token, ...hybrid,
-    jobs, mail, draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
+    jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner() : undefined,
+    calendarAnswerer: calendar && hybrid.provider === 'api' ? createCalendarAnswerer() : undefined,
+    draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key },
     transcriber: delta => {
       if (!key) throw new Error('Speech requires OPENAI_API_KEY');
@@ -279,6 +325,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const deadline = setTimeout(() => process.exit(1), 25000); deadline.unref();
       try {
         await Promise.allSettled([app.close()]);
+        await calendar?.close();
         await Promise.all([hybrid.close(), jobs.close(), save.flush()]);
       } finally { clearTimeout(deadline); }
     })().catch(() => { process.exitCode = 1; });

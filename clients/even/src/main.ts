@@ -82,6 +82,7 @@ element('connect').onclick = async () => {
     if (event.type === 'answer.done' && event.id === answerId) answerId = undefined;
     if (event.type === 'search.status' && event.id === answerId) status = event.status === 'searching' ? '正在查资料' : '整理回答中';
     if (event.type === 'artifact.status' && event.id === answerId) status = event.status === 'sending' ? '正在提交邮件' : '正在生成文件';
+    if (event.type === 'calendar.status' && event.id === answerId) status = event.status === 'saving' ? '正在保存日历' : event.status === 'querying' ? '正在查询日历' : '正在理解日历请求';
     if (event.type === 'speech.started') status = '正在说 · 正在识别文字';
     if (event.type === 'speech.ended') status = '正在完成识别';
     if (event.type === 'transcript.final') status = '识别结果已保留';

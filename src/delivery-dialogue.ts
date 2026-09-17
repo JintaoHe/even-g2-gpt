@@ -8,6 +8,14 @@ type Approval = { id: string; prompt: string; expires: number; retryAttempt?: nu
 type Plan = { plan: TurnPlan; approval?: Approval };
 export const explicitSend = (text: string) => /^(?:确认发送|确认发出|可以发送|发送吧|发吧|confirm send|confirm sending|send it|yes,? send it)[。！.!\s]*$/i.test(text.trim());
 export const explicitResend = (text: string) => /^(?:确认重发|确认重新发送|重发吧|confirm resend|resend it|yes,? resend it)[。！.!\s]*$/i.test(text.trim());
+// Additional semantic approval still requires the model's confirm classification AND the
+// immediately preceding immutable preview. Reject common negation/correction/recipient changes.
+export function naturalMailApproval(text: string) {
+  const s = text.trim();
+  return s.length <= 160 && /发|send|email|mail/i.test(s)
+    && !/[?？“”"「」『』@]|不|没|别|吗|么|等等|等会|稍后|明天|以后|如果|假如|他说|她说|改|换|加|删|先.*再|刚才|已经|是否|能否|can you|could you|should|if\b|don't|not\b|\bno\b|never|later|tomorrow|said|change|instead|already|after/i.test(s)
+    && !/发给\s*(?!我|自己|固定邮箱)[^\s，。！]|发(?:送)?到\s*(?!我的邮箱|我邮箱|固定邮箱)[^\s，。！]|\bto\s+(?!me\b|my\b|the fixed\b)/i.test(s);
+}
 export const mailFallback = '请先稍等片刻，检查垃圾邮件、所有邮件，并搜索“Even 笔记”。也可到网页文件列表直接下载 MD／ICS；无需重新生成文件或开放收件箱权限。';
 export function deliveryResult(result: string): string {
   return result === 'accepted' ? '邮件已成功提交发送（邮件服务器已接受），请确认是否收到？你可以说“收到了”或“没收到”。我无法直接核实收件箱送达情况。'
@@ -42,7 +50,7 @@ export class DeliveryDialogue implements DialogueModel {
     const metadata = this.draft.document.presentation;
     const prompt = prefix + `文件已经生成：${metadata.filename}\n${metadata.summary}` +
       (this.draft.calendar ? `\n\n日历文件：\n${calendarDetails(this.draft.calendar)}\n不包含自动通知或闹钟。` : '') +
-      (this.sender ? `\n\n确认发送到固定邮箱吗？请说“${this.draft.calendar ? calendarConfirmationPhrase(this.draft.calendar) : '确认发送'}”；也可以要求修改、查看全文或说“取消发送”。` : '\n\n邮件发送未启用。文件已保存，可在网页下载；没有发送邮件。');
+      (this.sender ? `\n\n${this.draft.calendar ? '请核对以上日期与主时区。' : ''}确认发送到固定邮箱吗？可以说“可以，发给我吧”，也可以要求修改、查看全文或说“取消发送”。` : '\n\n邮件发送未启用。文件已保存，可在网页下载；没有发送邮件。');
     delta(prompt);
     if (this.sender) this.approval = { id: this.jobId, prompt, expires: this.now() + 5 * 60000 };
   }
@@ -76,7 +84,9 @@ export class DeliveryDialogue implements DialogueModel {
       const lastAssistant = history.slice(0, -1).at(-1);
       const text = history.at(-1)?.content ?? '';
       const calendar = this.jobId ? this.jobs.calendar(this.jobId) : undefined;
-      const validPhrase = calendar ? calendarApprovalMatches(text, calendar, !!approval?.retryAttempt) : approval?.retryAttempt ? explicitResend(text) : explicitSend(text);
+      const validPhrase = calendar ? calendarApprovalMatches(text, calendar, !!approval?.retryAttempt)
+          || (naturalMailApproval(text) && !/芝加哥|纽约|洛杉矶|时区|Chicago|New York|Los Angeles|UTC|GMT|\d|明天|后天/.test(text))
+        : (approval?.retryAttempt ? explicitResend(text) : explicitSend(text)) || naturalMailApproval(text);
       if (!validPhrase || !approval || approval.expires <= this.now() || approval.id !== this.jobId
         || lastAssistant?.role !== 'assistant' || lastAssistant.content !== approval.prompt) {
         if (approval?.retryAttempt || explicitResend(text) || (calendar && calendarApprovalMatches(text, calendar, true))) this.retryPreview(delta); else this.preview(delta);

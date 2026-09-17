@@ -1,9 +1,9 @@
 export type Citation = { start: number; end: number; url: string; title: string };
-export type ReplyUpdate = { type: 'search.status'; status: string } | { type: 'artifact.status'; status: 'generating' | 'sending' } | { type: 'answer.citations'; text: string; citations: Citation[] };
+export type ReplyUpdate = { type: 'search.status'; status: string } | { type: 'calendar.status'; status: 'planning' | 'querying' | 'saving' } | { type: 'artifact.status'; status: 'generating' | 'sending' } | { type: 'answer.citations'; text: string; citations: Citation[] };
 export type Message = { role: 'user' | 'assistant'; content: string; citations?: Citation[] };
 export type Decision = 'respond' | 'wait' | 'exit' | 'clarify_exit';
 export type ReasoningEffort = 'none' | 'low' | 'medium';
-export type TurnPlan = { decision: Decision; reasoningEffort?: ReasoningEffort; deliveryAction?: import('./delivery-intent.js').DeliveryAction };
+export type TurnPlan = { decision: Decision; reasoningEffort?: ReasoningEffort; deliveryAction?: import('./delivery-intent.js').DeliveryAction; calendarAction?: import('./calendar-planner.js').CalendarAction };
 export interface DialogueModel {
   plan?(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan>;
   decide(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<Decision>;

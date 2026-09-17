@@ -29,6 +29,9 @@ tests/recording-regression.md
 auth.json
 credentials.json
 secrets.json
+google-oauth-client.json
+google-calendar-auth.json
+client_secret*.json
 .codex/
 .agents/
 .vscode/
