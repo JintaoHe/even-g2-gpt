@@ -54,9 +54,9 @@ endpoint, remove local debug configuration, and document data flows, retention,
 deletion, permissions, support and privacy practices. Never ship provider keys,
 OAuth refresh tokens or operator email credentials in the client package.
 
-The current backend is a personal, single-owner deployment. Public distribution
-must choose either user-operated backends or a separately designed multi-user
-service with per-user authorization, credentials, storage and quotas. Publishing
+The current backend is a personal, single-owner deployment. The selected public
+distribution model is user-operated backends, not a shared multi-user service.
+Each operator manages their own credentials, storage and quotas. Publishing
 the client must not expose the operator's private calendar or shared access token.
 Google public OAuth readiness is a separate gate from Even Hub review.
 
