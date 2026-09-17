@@ -109,6 +109,27 @@ test('energy detector handles silence, short spikes, pause and chunk boundaries'
   assert.deepEqual(run(74), run(6400)); assert.equal(run(74).starts, 1); assert.equal(run(74).ends, 1);
 });
 
+test('800ms pre-roll preserves soft onset, stays bounded and clears on reset', () => {
+  const frame = (level: number) => { const b = Buffer.alloc(640); for (let i = 0; i < 640; i += 2) b.writeInt16LE(level, i); return b; };
+  const run = (size: number) => {
+    const output: Buffer[] = []; let starts = 0;
+    const vad = new TurnDetector(() => starts++, b => output.push(Buffer.from(b)), () => {});
+    // 400ms soft opening followed by 160ms of speech: all of the opening survives.
+    const audio = Buffer.concat([...Array(50).fill(frame(0)), ...Array(20).fill(frame(200)), ...Array(8).fill(frame(4000))]);
+    for (let i = 0; i < audio.length; i += size) vad.push(audio.subarray(i, i + size));
+    assert.equal(starts, 1);
+    const retained = Buffer.concat(output);
+    assert.equal(retained.length, 40 * 640);
+    assert.deepEqual(retained, audio.subarray(audio.length - 40 * 640));
+    assert.equal(retained.subarray(12 * 640, 32 * 640).equals(Buffer.concat(Array(20).fill(frame(200)))), true);
+    vad.reset(); output.length = 0;
+    for (let i = 0; i < 8; i++) vad.push(frame(5000));
+    assert.deepEqual(Buffer.concat(output), Buffer.concat(Array(8).fill(frame(5000))));
+    return retained;
+  };
+  assert.deepEqual(run(74), run(6400));
+});
+
 test('SSE decoder handles split unicode, CRLF, multi-line and incomplete streams', async () => {
   const bytes = new TextEncoder().encode('data: {"type":"response.output_text.delta",\r\ndata: "delta":"你好"}\r\n\r\ndata: [DONE]\n\n');
   const body = new ReadableStream<Uint8Array>({ start(c) { for (const byte of bytes) c.enqueue(Uint8Array.of(byte)); c.close(); } });

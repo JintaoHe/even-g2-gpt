@@ -7,6 +7,10 @@ import { parseGoogleClient, GOOGLE_SCOPES, type GoogleClient } from './google-ca
 import { compactCalendarPreview, shortConfirmation, calendarConfirmed } from './calendar-preview.js';
 import { suggestCalendarSlot, zonedMinute } from './calendar-slots.js';
 import { calendarDisplayTime } from './calendar-display.js';
+import { calendarQueryMatches, suggestCalendarMatches } from './calendar-query.js';
+import { recurrenceOccurrences, boundRecurrenceRequest, revisedRecurrenceNotes } from './calendar-recurrence.js';
+
+export type CalendarScope = 'single' | 'series';
 
 type Auth = { account: string; calendarId: string; refreshToken: string; scope: string };
 export type CalendarTransport = (method: string, path: string, body?: unknown, etag?: string) => Promise<any>;
@@ -53,7 +57,7 @@ export async function loadCalendarTransport(directory: string, request: typeof f
     // Callers cannot redirect credentials or select another calendar.
     const parsedPath = new URL(path || '/', 'https://calendar.invalid');
     const listing = method === 'GET' && parsedPath.pathname === '/events' && [...parsedPath.searchParams.keys()].every(k => ['timeMin', 'timeMax', 'timeZone', 'singleEvents', 'orderBy', 'showDeleted', 'maxResults', 'pageToken'].includes(k));
-    if (!/^(?:|\/events(?:\/[a-v0-9]{5,1024})?(?:\?sendUpdates=(?:none|all))?)$/.test(path)
+    if (!/^(?:|\/events(?:\/[a-v0-9]{5,1024}(?:_\d{8}(?:T\d{6}Z)?)?)?(?:\?sendUpdates=(?:none|all))?)$/.test(path)
       && !(listing && path.startsWith('/events?') && parsedPath.origin === 'https://calendar.invalid')) throw new CalendarError('CALENDAR_PATH_INVALID');
     if (Date.now() >= expires) await refresh();
     let response: Response;
@@ -82,22 +86,23 @@ export async function loadCalendarTransport(directory: string, request: typeof f
   return { transport, calendarId: auth.calendarId };
 }
 
-type Operation = { id: string; eventId: string; kind: 'create' | 'update' | 'cancel'; event: CalendarEvent; etag?: string;
+type Operation = { id: string; eventId: string; kind: 'create' | 'update' | 'cancel'; event: CalendarEvent; etag?: string; parentId?: string; parentEtag?: string;
   before?: unknown; phrase: string; expires: number; state: string; error?: string; notifyGuests?: boolean; invitee?: string; overlapIds?: string[] };
-export type CalendarItem = { id: string; title: string; start: string; end: string; timezone: string; location: string; notes?: string; notesTruncated?: boolean; editable: boolean; event?: CalendarEvent };
+export type CalendarItem = { id: string; title: string; start: string; end: string; timezone: string; location: string; notes?: string; notesTruncated?: boolean; recurringEventId?: string; editable: boolean; event?: CalendarEvent };
 export function eventBody(event: CalendarEvent) {
   const e = validateCalendar(event);
-  return { summary: e.title, description: e.notes, location: e.location,
+  return { summary: e.title, description: e.notes, location: e.location, ...(e.recurrence !== undefined ? { recurrence: e.recurrence ? [e.recurrence] : [] } : {}),
     start: e.allDay ? { date: e.start } : { dateTime: e.start.replace(/(T\d{2}:\d{2})(Z|[+-]\d{2}:\d{2})$/, '$1:00$2'), timeZone: e.timezone },
     end: e.allDay ? { date: e.end } : { dateTime: e.end.replace(/(T\d{2}:\d{2})(Z|[+-]\d{2}:\d{2})$/, '$1:00$2'), timeZone: e.timezone } };
 }
-function identity(id: string) { if (!/^[a-v0-9]{5,1024}$/.test(id)) throw new CalendarError('CALENDAR_EVENT_INVALID'); }
+function identity(id: string) { if (!/^[a-v0-9]{5,1024}(?:_\d{8}(?:T\d{6}Z)?)?$/.test(id)) throw new CalendarError('CALENDAR_EVENT_INVALID'); }
 function previewEvent(remote: any): CalendarEvent {
   // Google's returned RFC3339 can include seconds. Never infer missing timezones.
   const shorten = (s: string) => typeof s === 'string' ? s.replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}):00(Z|[+-]\d\d:\d\d)$/, '$1$2') : s;
   return validateCalendar({ title: remote.summary ?? '', notes: remote.description ?? '', location: remote.location ?? '',
     allDay: !!remote.start?.date, start: remote.start?.date ?? shorten(remote.start?.dateTime),
-    end: remote.end?.date ?? shorten(remote.end?.dateTime), timezone: remote.start?.date ? '' : remote.start?.timeZone ?? '' });
+    end: remote.end?.date ?? shorten(remote.end?.dateTime), timezone: remote.start?.date ? '' : remote.start?.timeZone ?? '',
+    ...(remote.recurrence?.length ? { recurrence: remote.recurrence.length === 1 ? remote.recurrence[0] : 'unsupported' } : {}) });
 }
 /** Dedicated-calendar, managed-event-only service. Requires a preview and exact one-use confirmation. */
 export class GoogleCalendarService {
@@ -199,10 +204,19 @@ export class GoogleCalendarService {
   private supported(remote: any) {
     return remote.extendedProperties?.private?.evenAssistant === '1' && typeof remote.etag === 'string'
       && !(remote.attendees ?? []).some((a: any) => !this.allowedGuest || a.email?.toLowerCase() !== this.allowedGuest.toLowerCase())
-      && !remote.recurrence?.length && !remote.recurringEventId && remote.status !== 'cancelled';
+      && remote.status !== 'cancelled';
   }
   async query(start: string, end: string, timezone: string): Promise<{ items: CalendarItem[]; complete: boolean }> {
-    validateCalendar({ title: 'query', start, end, timezone, allDay: false, location: '', notes: '' });
+    // Read bounds are instants, unlike write-time wall-clock confirmations.
+    // RFC3339 seconds/fractions and UTC Z are valid Google query parameters.
+    const valid = (s: string) => {
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(s)) return false;
+      const local = s.slice(0, 10), day = Date.parse(local + 'T00:00Z');
+      return Number.isFinite(day) && new Date(day).toISOString().slice(0, 10) === local
+        && +s.slice(11, 13) < 24 && +s.slice(14, 16) < 60 && (s[16] !== ':' || +s.slice(17, 19) < 60) && Number.isFinite(Date.parse(s));
+    };
+    try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format(); } catch { throw new CalendarError('CALENDAR_QUERY_INVALID'); }
+    if (!timezone || !valid(start) || !valid(end) || Date.parse(end) <= Date.parse(start)) throw new CalendarError('CALENDAR_QUERY_INVALID');
     if (Date.parse(end) - Date.parse(start) > 31 * 86400000) throw new CalendarError('CALENDAR_RANGE_LIMIT');
     const items: CalendarItem[] = []; let page = '';
     for (let n = 0; n < 5; n++) {
@@ -219,7 +233,7 @@ export class GoogleCalendarService {
         items.push({ id: raw.id, title: String(raw.summary ?? '(无标题)').slice(0, 200), start: raw.start?.dateTime ?? raw.start?.date ?? '',
           end: raw.end?.dateTime ?? raw.end?.date ?? '', timezone: raw.start?.timeZone ?? timezone, location: String(raw.location ?? '').slice(0, 200),
           notes: String(raw.description ?? '').slice(0, 6000), notesTruncated: String(raw.description ?? '').length > 6000,
-          editable: !!event && this.supported(raw), event });
+          recurringEventId: raw.recurringEventId, editable: !!event && this.supported(raw), event });
       }
       if (!result.nextPageToken) return { items, complete: true };
       if (typeof result.nextPageToken !== 'string' || page === result.nextPageToken) break;
@@ -227,7 +241,53 @@ export class GoogleCalendarService {
     }
     return { items, complete: false };
   }
+  async next(filter: string, timezone: string, now = this.now(), selection?: CalendarItem) {
+    if (!filter.trim()) throw new CalendarError('CALENDAR_QUERY_TITLE_REQUIRED');
+    const candidates: CalendarItem[] = [];
+    // Three non-overlapping 31-day windows; never claim absence beyond this horizon.
+    for (let i = 0; i < 3; i++) {
+      const start = new Date(now + i * 31 * 86400000).toISOString(), end = new Date(now + (i + 1) * 31 * 86400000).toISOString();
+      const result = await this.query(start, end, timezone);
+      if (!result.complete) throw new CalendarError('CALENDAR_QUERY_INCOMPLETE');
+      const upcoming = result.items.filter(e => e.start.includes('T') && Date.parse(e.start) >= now);
+      candidates.push(...upcoming);
+      const matches = (selection ? upcoming.filter(e => selection.recurringEventId ? e.recurringEventId === selection.recurringEventId : e.id === selection.id)
+        : calendarQueryMatches(upcoming, filter))
+        .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+      this.recordQuerySelection(start, end, timezone, filter, result.items.length, matches.length, true);
+      if (matches.length) return { items: matches.filter(e => Date.parse(e.start) === Date.parse(matches[0].start)), suggestions: [] as CalendarItem[], horizonDays: 93 };
+    }
+    return { items: [], suggestions: selection ? [] : suggestCalendarMatches(candidates, filter), horizonDays: 93 };
+  }
   async read(id: string) { return previewEvent(await this.remote(id)); }
+  private async overlaps(event: CalendarEvent, excludeId: string) {
+    const found = new Map<string, CalendarItem>();
+    // Batch nearby occurrences into bounded list windows, then test actual time overlap.
+    const occurrences = recurrenceOccurrences(event);
+    for (let i = 0; i < occurrences.length;) {
+      const start = occurrences[i].start; let j = i;
+      while (j + 1 < occurrences.length && Date.parse(occurrences[j + 1].end) - Date.parse(start) <= 31 * 86400000) j++;
+      const group = occurrences.slice(i, j + 1);
+      const result = await this.query(start, occurrences[j].end, event.timezone);
+      if (!result.complete) throw new CalendarError('CALENDAR_OVERLAP_INCOMPLETE');
+      for (const item of result.items) {
+        if (item.id === excludeId || item.recurringEventId === excludeId) continue;
+        const overlaps = group.some(occurrence => item.start.includes('T')
+          ? Date.parse(item.start) < Date.parse(occurrence.end) && Date.parse(item.end) > Date.parse(occurrence.start)
+          : item.start <= occurrence.end.slice(0, 10) && item.end > occurrence.start.slice(0, 10));
+        if (overlaps) found.set(item.id, item);
+      }
+      i = j + 1;
+    }
+    return { items: [...found.values()], complete: true };
+  }
+  async scopedTarget(id: string, scope?: CalendarScope) {
+    const remote = await this.remote(id);
+    if ((remote.recurringEventId || remote.recurrence?.length) && !scope) throw new CalendarError('CALENDAR_SCOPE_REQUIRED');
+    if (scope === 'series' && remote.recurringEventId) return { id: remote.recurringEventId as string, event: await this.read(remote.recurringEventId) };
+    if (scope === 'single' && remote.recurrence?.length) throw new CalendarError('CALENDAR_INSTANCE_REQUIRED');
+    return { id, event: previewEvent(remote) };
+  }
   async details(id: string) {
     identity(id);
     const remote = await this.readResponse(`/events/${id}`, 'event', data => data?.id === id && (data.status === 'cancelled' || !!(data.start && data.end)));
@@ -244,25 +304,35 @@ export class GoogleCalendarService {
     if (remote.id !== id || !this.supported(remote)) {
       throw new CalendarError('CALENDAR_UNSUPPORTED_EVENT');
     }
+    if (remote.recurringEventId) {
+      identity(remote.recurringEventId);
+      const parent = await this.readResponse(`/events/${remote.recurringEventId}`, 'event', data => data?.id === remote.recurringEventId && !!data.start && !!data.end);
+      if (!this.supported(parent) || parent.recurringEventId || !previewEvent(parent).recurrence) throw new CalendarError('CALENDAR_UNSUPPORTED_EVENT');
+      remote.evenParentEtag = parent.etag;
+    }
     return remote;
   }
-  async preview(kind: Operation['kind'], value?: unknown, eventId?: string, expectedEvent?: CalendarEvent, checkOverlaps = false) {
+  async preview(kind: Operation['kind'], value?: unknown, eventId?: string, expectedEvent?: CalendarEvent, checkOverlaps = false, scope?: CalendarScope) {
     if (this.work) throw new CalendarError('CALENDAR_BUSY');
     if (!['create', 'update', 'cancel'].includes(kind)) throw new CalendarError('CALENDAR_ACTION_INVALID');
     if ((this.db.prepare('SELECT count(*) AS n FROM operations').get() as { n: number }).n >= 10000) throw new CalendarError('CALENDAR_STORAGE_LIMIT');
-    const id = randomUUID(), target = kind === 'create' ? randomUUID().replaceAll('-', '') : eventId ?? '';
+    if (scope !== undefined && !['single', 'series'].includes(scope)) throw new CalendarError('CALENDAR_SCOPE_REQUIRED');
+    const id = randomUUID(), target = kind === 'create' ? randomUUID().replaceAll('-', '') : (await this.scopedTarget(eventId ?? '', scope)).id;
     const remote = kind === 'create' ? undefined : await this.remote(target);
     if (remote && expectedEvent && JSON.stringify(previewEvent(remote)) !== JSON.stringify(expectedEvent)) throw new CalendarError('CALENDAR_CHANGED_REVIEW_AGAIN', 412);
     // Block follow-up writes after an uncertain result until an operator reconciles it.
-    const uncertain = (this.db.prepare('SELECT data FROM operations WHERE event_id=?').all(target) as { data: string }[])
-      .some(row => ['sending', 'unknown'].includes(JSON.parse(row.data).state));
+    const uncertain = (this.db.prepare('SELECT data FROM operations').all() as { data: string }[])
+      .some(row => { const op = JSON.parse(row.data) as Operation;
+        return ['sending', 'unknown'].includes(op.state) && (op.eventId === target || op.parentId === target || op.eventId === remote?.recurringEventId || (op.parentId && op.parentId === remote?.recurringEventId)); });
     if (uncertain) throw new CalendarError('CALENDAR_RECONCILIATION_REQUIRED');
-    const event = kind === 'cancel' ? previewEvent(remote) : validateCalendar(value);
-    const overlaps = checkOverlaps && kind !== 'cancel' && !event.allDay ? await this.query(event.start, event.end, event.timezone) : undefined;
+    const event = kind === 'cancel' ? previewEvent(remote) : revisedRecurrenceNotes(validateCalendar(boundRecurrenceRequest(value)), remote ? previewEvent(remote) : undefined);
+    if (kind === 'update' && remote?.recurrence?.length && event.recurrence === undefined) throw new CalendarError('CALENDAR_RECURRENCE_REQUIRED');
+    if (remote?.recurringEventId && event.recurrence) throw new CalendarError('CALENDAR_INSTANCE_RECURRENCE_FORBIDDEN');
+    const overlaps = (checkOverlaps || !!event.recurrence) && kind !== 'cancel' && !event.allDay ? await this.overlaps(event, target) : undefined;
     if (overlaps && !overlaps.complete) throw new CalendarError('CALENDAR_OVERLAP_INCOMPLETE');
     const matching = overlaps?.items.filter(e => e.id !== target) ?? [];
     let alternative: string | undefined;
-    if (matching.length) {
+    if (matching.length && !event.recurrence) {
       try {
         const horizon = await this.query(event.start, zonedMinute(Date.parse(event.start) + 48 * 3600000, event.timezone), event.timezone);
         const slot = horizon.complete ? suggestCalendarSlot(event, horizon.items, target) : undefined;
@@ -273,9 +343,10 @@ export class GoogleCalendarService {
     const phrase = shortConfirmation(kind);
     const invitee = kind === 'create' ? this.allowedGuest : undefined;
     const notifyGuests = !!invitee || !!remote?.attendees?.length;
-    const preview = compactCalendarPreview(kind, event, remote ? previewEvent(remote) : undefined, matching.map(e => e.title), notifyGuests, alternative);
+    const preview = compactCalendarPreview(kind, event, remote ? previewEvent(remote) : undefined, matching.map(e => e.title), notifyGuests, alternative,
+      remote?.recurringEventId ? 'single' : remote?.recurrence?.length ? 'series' : undefined);
     const op = this.save({ id, eventId: target, kind, event, before: remote ? previewEvent(remote) : undefined,
-      etag: remote?.etag, phrase, expires: this.now() + 5 * 60_000, state: 'pending', notifyGuests, invitee,
+      etag: remote?.etag, parentId: remote?.recurringEventId, parentEtag: remote?.evenParentEtag, phrase, expires: this.now() + 5 * 60_000, state: 'pending', notifyGuests, invitee,
       ...(overlaps ? { overlapIds: matching.map(e => e.id).sort() } : {}) });
     return { id: op.id, eventId: target, phrase, expires: op.expires, preview };
   }
@@ -290,8 +361,12 @@ export class GoogleCalendarService {
     op.state = 'sending'; this.save(op); // Persist before network; restart never replays a write.
     this.work = (async () => {
       try {
+        if (op.parentId) {
+          const parent = await this.remote(op.parentId);
+          if (parent.etag !== op.parentEtag) throw new CalendarError('CALENDAR_CHANGED_REVIEW_AGAIN', 412);
+        }
         if (op.overlapIds) {
-          const current = await this.query(op.event.start, op.event.end, op.event.timezone);
+          const current = await this.overlaps(op.event, op.eventId);
           if (!current.complete || JSON.stringify(current.items.filter(e => e.id !== op.eventId).map(e => e.id).sort()) !== JSON.stringify(op.overlapIds)) {
             throw new CalendarError('CALENDAR_OVERLAPS_CHANGED_REVIEW_AGAIN', 412);
           }
@@ -303,7 +378,9 @@ export class GoogleCalendarService {
             ...(op.invitee ? { attendees: [{ email: op.invitee, responseStatus: 'needsAction' }], guestsCanInviteOthers: false, guestsCanModify: false, guestsCanSeeOtherGuests: false } : {}),
             reminders: { useDefault: false }, extendedProperties: { private: { evenAssistant: '1' } } });
         } else if (op.kind === 'update') {
-          result = await this.transport('PATCH', `/events/${op.eventId}?sendUpdates=${op.notifyGuests ? 'all' : 'none'}`, eventBody(op.event), op.etag);
+          const body = eventBody(op.event);
+          if (op.parentId) delete body.recurrence;
+          result = await this.transport('PATCH', `/events/${op.eventId}?sendUpdates=${op.notifyGuests ? 'all' : 'none'}`, body, op.etag);
         } else { await this.transport('DELETE', `/events/${op.eventId}?sendUpdates=${op.notifyGuests ? 'all' : 'none'}`, undefined, op.etag); }
         if (op.kind !== 'cancel' && result?.id !== op.eventId) throw new CalendarError('CALENDAR_RESPONSE_UNKNOWN');
         this.db.prepare('INSERT OR REPLACE INTO managed_events VALUES (?, ?)').run(op.eventId,

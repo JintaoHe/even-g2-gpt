@@ -29,7 +29,7 @@ export function calendarDisplayRange(start: string, end: string, zone: string) {
 export function calendarDisplayItems(items: CalendarItem[], zone: string) {
   return items.map((e, i) => {
     const notes = plainText(e.notes ?? e.event?.notes ?? '');
-    return `${i + 1}. ${e.title}\n时间：${calendarDisplayTime(e.start, e.end, zone)}${e.location ? '\n地点：' + e.location : ''}${notes ? '\n备注：' + notes + (e.notesTruncated ? '（备注过长，显示内容已截断）' : '') : ''}${e.editable ? '' : '\n（只读）'}`;
+    return `${i + 1}. ${e.title}${e.recurringEventId ? '（重复会议·本次）' : ''}\n时间：${calendarDisplayTime(e.start, e.end, zone)}${e.location ? '\n地点：' + e.location : ''}${notes ? '\n备注：' + notes + (e.notesTruncated ? '（备注过长，显示内容已截断）' : '') : ''}${e.editable ? '' : '\n（只读）'}`;
   }).join('\n\n');
 }
 export function calendarOverlapSummary(items: CalendarItem[]) {

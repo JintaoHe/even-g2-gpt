@@ -16,7 +16,7 @@ export class CalendarControl {
     this.busy = true;
     try {
       const allowed: Record<string, string[]> = {
-        'calendar.list': ['type'], 'calendar.preview': ['type', 'kind', 'event', 'eventId'],
+        'calendar.list': ['type'], 'calendar.preview': ['type', 'kind', 'event', 'eventId', 'scope'],
         'calendar.confirm': ['type', 'id', 'phrase'], 'calendar.dismiss': ['type'], 'calendar.health': ['type', 'probe']
       };
       if (!allowed[msg.type] || Object.keys(msg).some(k => !allowed[msg.type].includes(k))) throw Error('Invalid message');
@@ -28,7 +28,7 @@ export class CalendarControl {
       else if (msg.type === 'calendar.dismiss') { this.invalidate(); this.send({ type: 'calendar.dismissed' }); }
       else if (msg.type === 'calendar.preview') {
         this.invalidate(); const epoch = this.epoch;
-        const result = await this.service.preview(msg.kind, msg.event, msg.eventId);
+        const result = await this.service.preview(msg.kind, msg.event, msg.eventId, undefined, false, msg.scope);
         if (epoch !== this.epoch) { this.service.dismiss(result.id); return; }
         this.pending = result.id; this.send({ type: 'calendar.preview', ...result });
       } else {

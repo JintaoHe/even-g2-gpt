@@ -13,28 +13,34 @@
 This is a development checkpoint, not a production or Even Hub approval claim.
 Linux deployment and physical G2/R1 acceptance remain outstanding.
 
-## Recurring meetings: feasible, not implemented for writes
+## Recurring meetings: bounded first implementation
 
 Google supports a recurring parent event with `recurrence` (RRULE), an IANA
 timezone and attendees. `sendUpdates=all` requests attendee notifications.
 Our queries already use `singleEvents=true`, so occurrences in the requested
-date range are visible. The current write guard rejects both recurring parents
-and occurrences; the planner and event schema only support single events.
-Do not promise recurring creation or silently replace it with a single meeting.
+date range are visible. Timed daily/weekly series with finite count (2–366),
+interval (1–12) and span at most 366 days can now be created with confirmation.
+Single-occurrence and entire-series update/cancel use original Google IDs and
+notify the fixed recipient. Read-only/external events remain protected.
 
-Suggested follow-up implementation (not enabled by this checkpoint):
+Implemented safety and outstanding boundaries:
 
-1. Structured daily/weekly recurrence with interval, weekdays and an explicit
-   end date or count; validate rules server-side and preview in plain language.
+1. Bounded daily/weekly RRULE validation and plain-language preview. Unspecified
+   or open-ended requests default server-side to three calendar months from the
+   first date, disclosed in notes and preview, never auto-renewed. Explicit local
+   ending dates convert to finite counts. Monthly, multiple weekdays and all-day
+   series remain unsupported.
 2. Create one recurring parent, not a batch of independent meetings. Retain its
    Google ID and iCalUID; invite the configured recipient after confirmation.
-3. Explicitly distinguish **this occurrence**, **entire series**, and **this and
-   following** for updates/cancellations. The last option requires splitting a
-   series; handle partial failure without automatic duplicate creation.
-4. Check conflicts over a bounded, disclosed date horizon. Test DST so a Chicago
-   9 AM meeting remains 9 AM when the UTC offset changes.
-5. Test attendee updates, exception instances, cancellation, retry/idempotency
-   and RRULE-aware ICS fallback. Real invitations need separate test approval.
+3. Explicitly distinguish **this occurrence** and **entire series (including past)**.
+   **This and following** remains unsupported: it requires transactional recovery
+   for a two-write split, not silently choosing a different scope.
+4. Check every proposed occurrence, batching queries into windows of at most 31
+   days. DST tests preserve local start; ambiguous/nonexistent starts fail closed.
+5. Mock tests cover invitations, instance/series changes, cancellation and stale
+   approvals. Real recurring Google writes/invitation receipt are not yet tested.
+   Standalone recurring ICS export remains unsupported and fails explicitly;
+   native Google Calendar handles series invitations. Single-event ICS is unchanged.
 
 References checked 2026-09-16:
 - [Google recurring events](https://developers.google.com/workspace/calendar/api/guides/recurringevents)

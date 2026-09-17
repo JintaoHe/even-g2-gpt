@@ -16,13 +16,14 @@ none: unrelated chat, hypothetical/quoted requests, asking about calendar featur
 Never exit for cancelling an event. For wait/exit/clarify_exit calendar_action must be none.
 If calendar_action is not none, delivery_action must be none. This integration can query only the assistant's dedicated calendar, never all the user's calendars.`;
 export type CalendarRequest = { action: 'query' | 'create' | 'update' | 'cancel' | 'clarify'; clarification: string;
+  scope?: 'single' | 'series' | 'following' | null;
   rangeStart: string; rangeEnd: string; timezone: string; targetIndex: number; titleQuery: string;
   changes: { [K in keyof CalendarEvent]: CalendarEvent[K] | null } };
 export type CalendarContext = { candidates: CalendarItem[]; request?: CalendarRequest; draft?: CalendarEvent };
 export type CalendarPlanner = (history: Message[], context: CalendarContext, signal: AbortSignal) => Promise<CalendarRequest>;
 const changes = { type: 'object', additionalProperties: false, properties: Object.fromEntries(
-  ['title', 'start', 'end', 'timezone', 'allDay', 'location', 'notes'].map(k => [k, { type: [k === 'allDay' ? 'boolean' : 'string', 'null'] }])
-), required: ['title', 'start', 'end', 'timezone', 'allDay', 'location', 'notes'] };
+  ['title', 'start', 'end', 'timezone', 'allDay', 'location', 'notes', 'recurrence'].map(k => [k, { type: [k === 'allDay' ? 'boolean' : 'string', 'null'] }])
+), required: ['title', 'start', 'end', 'timezone', 'allDay', 'location', 'notes', 'recurrence'] };
 export function createCalendarPlanner(env: NodeJS.ProcessEnv = process.env, request: typeof fetch = fetch, now = () => new Date()): CalendarPlanner {
   return async (history, context, signal) => {
     if (!env.OPENAI_API_KEY) throw Error('CALENDAR_PLANNER_UNAVAILABLE');
@@ -39,15 +40,18 @@ Return action query/create/update/cancel/clarify. Requests to merely discuss/hyp
 rangeStart/rangeEnd are the search interval, NOT the proposed destination. Use explicit YYYY-MM-DDTHH:mm±HH:mm, midnight-to-midnight for today, and correct local DST offsets. Range maximum 31 days. Use configured timezone unless specified. Ambiguous dates/next-Friday meanings require clarification. Do not assume missing duration for new events.
 targetIndex is 1-based into the context.candidates, ONLY when user unambiguously identifies one by ordinal, title, time, or a singular current preview. Otherwise 0. titleQuery is a literal substring of the requested event's title when known, otherwise empty. Do not select arbitrarily among matching events; the backend will ask.
 For broad schedule queries (有没有会议/any meetings/当天安排), titleQuery MUST be empty: meeting/event/会议 are categories, not title substrings. Clear stale title filters when user broadens the question. Use the newest explicit date correction; never insist an earlier misheard date overrides it. Every query must include a fresh range, including rechecks and selected-event questions. Do not claim there are no events: only the application can report Google results.
-For query no changes, no invented events. For update only explicitly requested fields are non-null; unchanged title/location/notes remain null. Dates/time changes may also adjust end to preserve known duration if the user changes only start; preserve local wall-clock time when moving to another date and compute offsets correctly. Ask if unclear. Never change fields based on an event's description. allDay remains null unless requested. For create all event fields required (optional location/notes empty); full start/end or explicit all-day end-exclusive date. No new attendees, recurrence or alarms.
+For query no changes, no invented events. For update only explicitly requested fields are non-null; unchanged title/location/notes remain null. Dates/time changes may also adjust end to preserve known duration if the user changes only start; preserve local wall-clock time when moving to another date and compute offsets correctly. Ask if unclear. Never change fields based on an event's description. allDay remains null unless requested. For create all basic event fields required (optional location/notes empty); full start/end or explicit all-day end-exclusive date. No arbitrary attendees or alarms; confirmed creation invites the configured recipient.
+recurrence: null means unchanged; empty string means a single event. For repeated timed events return RRULE:FREQ=DAILY;INTERVAL=1;COUNT=4 or WEEKLY with interval 1..12 and explicit count 2..366 spanning at most 366 days. If the user supplies an end date, use ;UNTIL=YYYYMMDD INSTEAD of COUNT (backend converts local inclusive end date to finite count). If no ending/count is specified, or user says forever/no end, return ONLY RRULE:FREQ=WEEKLY;INTERVAL=1 (or DAILY/other interval): the backend defaults to THREE CALENDAR MONTHS from the first date, appends the actual cutoff and extension requirement to notes, and requests confirmation. Do NOT guess a count/end date or ask for an ending in this case. Do not write the system deadline note yourself. Monthly, multiple weekdays and all-day recurrence are unsupported: clarify; never silently create a single event. The start is the FIRST occurrence and anchors the weekday/local time. Missing first date or exact start/end time still requires clarification. On unrelated draft edits preserve its already bounded recurrence, never reset its three-month period.
+scope: null if unspecified; single only for an explicitly selected occurrence, series only for explicitly the entire series (including past), following for this and future (currently unsupported, clarify). For changing/cancelling a recurring event without explicit scope ask whether this occurrence or entire series. On followup retain explicitly chosen scope unless user changes it. To alter a series first occurrence/time or rule, request the explicit first start date/time and total count; do not infer a new series anchor from a later instance. A series target may use its occurrence in context; the server resolves its parent. Never drop recurrence when changing notes/location.
 For questions about notes/attendees/agenda/suggestions of a previously selected meeting, action=query, reuse its known search range and literal title (not words from the question like sales). Return no changes. Do not answer the detail question in clarification; the application will fetch fresh event details and answer. Clarify only if the target meeting/date is genuinely ambiguous.
 Follow-up selection after ambiguity retains the prior request's requested changes; latest corrections override earlier changes. A followup revising an unsent draft merges with that draft's requested changes, never claims it was saved.
 To cancel return no changes and identify target. For missing information set clarification and action clarify. For completed request clarification empty. For unused ranges/strings use empty string. For unused change fields null. Never invent event IDs or treat generic yes as permission to choose a target.`,
         input: [{ role: 'user', content: input }], text: { format: { type: 'json_schema', name: 'calendar_request', strict: true,
           schema: { type: 'object', additionalProperties: false, properties: {
             action: { type: 'string', enum: ['query', 'create', 'update', 'cancel', 'clarify'] }, clarification: { type: 'string' },
-            rangeStart: { type: 'string' }, rangeEnd: { type: 'string' }, timezone: { type: 'string' }, targetIndex: { type: 'integer' }, titleQuery: { type: 'string' }, changes
-          }, required: ['action', 'clarification', 'rangeStart', 'rangeEnd', 'timezone', 'targetIndex', 'titleQuery', 'changes'] }
+            rangeStart: { type: 'string' }, rangeEnd: { type: 'string' }, timezone: { type: 'string' }, targetIndex: { type: 'integer' }, titleQuery: { type: 'string' },
+            scope: { type: ['string', 'null'], enum: ['single', 'series', 'following', null] }, changes
+          }, required: ['action', 'clarification', 'rangeStart', 'rangeEnd', 'timezone', 'targetIndex', 'titleQuery', 'scope', 'changes'] }
         } }
       })
     });
@@ -56,7 +60,7 @@ To cancel return no changes and identify target. For missing information set cla
     if (data.status !== 'completed') throw Error('CALENDAR_PLANNER_INCOMPLETE');
     const parsed = JSON.parse((data.output ?? []).filter((o: any) => o.type === 'message').flatMap((o: any) => o.content ?? [])
       .filter((o: any) => o.type === 'output_text').map((o: any) => o.text).join('')) as CalendarRequest;
-    if (!['query', 'create', 'update', 'cancel', 'clarify'].includes(parsed.action) || !Number.isInteger(parsed.targetIndex)
+    if ((parsed.scope != null && !['single', 'series', 'following'].includes(parsed.scope)) || !['query', 'create', 'update', 'cancel', 'clarify'].includes(parsed.action) || !Number.isInteger(parsed.targetIndex)
       || parsed.targetIndex < 0 || parsed.targetIndex > context.candidates.length || !parsed.changes
       || ['clarification', 'rangeStart', 'rangeEnd', 'timezone', 'titleQuery'].some(k => typeof (parsed as any)[k] !== 'string' || (parsed as any)[k].length > 1500)
       || Object.keys(parsed.changes).some(k => !changes.required.includes(k))) throw Error('CALENDAR_PLANNER_INVALID');

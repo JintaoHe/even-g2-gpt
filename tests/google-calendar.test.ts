@@ -99,28 +99,30 @@ test('external edit after preview produces conflict, never overwrites; unmanaged
   f.events.get(create.eventId).attendees = [{ email: 'guest@example.com' }];
   await assert.rejects(f.service.preview('cancel', undefined, create.eventId), /CALENDAR_UNSUPPORTED/);
 });
-test('recurring parent and occurrence stay read-only and cannot be updated or cancelled', async t => {
+test('recurring parent and occurrence require explicit scope before any write', async t => {
   const f = await fixture(t);
   const created = await f.service.preview('create', event);
   await f.service.confirm(created.id, created.phrase);
   const remote = f.events.get(created.eventId);
-  for (const recurring of [{ recurrence: ['RRULE:FREQ=WEEKLY;COUNT=4'] }, { recurringEventId: 'parent123' }]) {
-    delete remote.recurrence; delete remote.recurringEventId;
-    Object.assign(remote, recurring);
+  remote.recurrence = ['RRULE:FREQ=WEEKLY;INTERVAL=1;COUNT=4'];
+  const instance = { ...remote, id: created.eventId + '_20261001T230000Z', recurrence: undefined, recurringEventId: created.eventId };
+  f.events.set(instance.id, instance);
+  for (const id of [remote.id, instance.id]) {
     const before = f.calls.filter(c => c.method !== 'GET').length;
-    await assert.rejects(f.service.preview('update', { ...event, location: 'new' }, created.eventId), /CALENDAR_UNSUPPORTED/);
-    await assert.rejects(f.service.preview('cancel', undefined, created.eventId), /CALENDAR_UNSUPPORTED/);
+    await assert.rejects(f.service.preview('update', { ...event, location: 'new' }, id), /CALENDAR_SCOPE_REQUIRED/);
+    await assert.rejects(f.service.preview('cancel', undefined, id), /CALENDAR_SCOPE_REQUIRED/);
     assert.equal(f.calls.filter(c => c.method !== 'GET').length, before);
   }
   const reader = await GoogleCalendarService.create(join(f.directory, 'reader'), 'dedicated', async (method, path) => {
     assert.equal(method, 'GET');
     assert.equal(new URL(path, 'https://example.com').searchParams.get('singleEvents'), 'true');
-    return { items: [remote] };
+    return { items: [instance] };
   });
   try {
     const result = await reader.query('2026-10-01T00:00-05:00', '2026-10-02T00:00-05:00', 'America/Chicago');
     assert.equal(result.items.length, 1);
-    assert.equal(result.items[0].editable, false);
+    assert.equal(result.items[0].editable, true);
+    assert.equal(result.items[0].recurringEventId, created.eventId);
     assert.equal(result.items[0].notes, event.notes);
   } finally { await reader.close(); }
 });

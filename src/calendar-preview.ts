@@ -1,4 +1,5 @@
 import type { CalendarEvent } from './calendar.js';
+import { recurrenceLabel } from './calendar-recurrence.js';
 
 export type CalendarKind = 'create' | 'update' | 'cancel';
 export function shortConfirmation(kind: CalendarKind) { return kind === 'create' ? '确认创建' : kind === 'cancel' ? '确认取消' : '确认修改'; }
@@ -41,17 +42,26 @@ function when(e: CalendarEvent, zone: string) {
   return start + '–' + (start.slice(0, 10) === end.slice(0, 10) ? end.slice(11) : end);
 }
 /** Full changed values, no repeated notes/timezone conversions. Oversize edits fail closed. */
-export function compactCalendarPreview(kind: CalendarKind, event: CalendarEvent, before?: CalendarEvent, overlaps: string[] = [], notifyGuests = false, alternative?: string) {
+export function compactCalendarPreview(kind: CalendarKind, event: CalendarEvent, before?: CalendarEvent, overlaps: string[] = [], notifyGuests = false, alternative?: string, scope?: 'single' | 'series') {
   const zones: Record<string, string> = { 'America/Chicago': '芝加哥', 'America/Los_Angeles': '洛杉矶', 'America/New_York': '纽约' };
   const zone = event.timezone || 'America/Chicago';
   const label = zones[zone] ?? zone;
   const lines = [`${kind === 'update' ? '修改' : kind === 'create' ? '创建' : '取消'}·${label}时间：${clip(before?.title ?? event.title, 18)}`];
+  if (scope) lines.push(scope === 'series' ? '范围：整个系列（含过去）' : '范围：仅这一次');
+  if (event.recurrence || before?.recurrence) lines.push(before && before.recurrence !== event.recurrence
+    ? `${recurrenceLabel(before.recurrence)} → ${recurrenceLabel(event.recurrence)}` : recurrenceLabel(event.recurrence));
   if (before && kind === 'update') {
     const oldTime = when(before, zone), newTime = when(event, zone);
     if (oldTime !== newTime || before.allDay !== event.allDay) lines.push(`原 ${oldTime}`, `新 ${newTime}`);
     else lines.push(`时间不变：${newTime}`);
     if (before.timezone !== event.timezone) lines.push(`时区：${zones[before.timezone] ?? (before.timezone || '全天')}→${label}`);
     for (const [key, name] of [['location', '地点'], ['title', '标题'], ['notes', '备注']] as const) {
+      if (key === 'notes' && before.notes !== event.notes && /【期限】/.test(event.notes)) {
+        const strip = (s: string) => s.replace(/【期限】[^。]*。/g, '').trim();
+        if (strip(before.notes) !== strip(event.notes)) lines.push(`备注：${strip(before.notes) || '无'} → ${strip(event.notes) || '无'}`);
+        lines.push(event.notes.match(/【期限】[^。]*。/)![0]);
+        continue;
+      }
       if (before[key] !== event[key]) lines.push(`${name}：${before[key] || '无'} → ${event[key] || '无'}`);
     }
   } else {

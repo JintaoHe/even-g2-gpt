@@ -1,6 +1,7 @@
 import { presentation } from './document-presentation.js';
+import { recurrenceOccurrences } from './calendar-recurrence.js';
 
-export type CalendarEvent = { title: string; start: string; end: string; timezone: string; allDay: boolean; location: string; notes: string };
+export type CalendarEvent = { title: string; start: string; end: string; timezone: string; allDay: boolean; location: string; notes: string; recurrence?: string };
 const invalid = () => new Error('CALENDAR_INVALID');
 function date(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value < '1900-01-01' || value > '9998-12-31') throw invalid();
@@ -24,7 +25,7 @@ export function validateCalendar(value: unknown): CalendarEvent {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
   const v = value as Record<string, unknown>;
   const fields = ['title', 'start', 'end', 'timezone', 'allDay', 'location', 'notes'];
-  if (Object.keys(v).some(key => !fields.includes(key)) || typeof v.allDay !== 'boolean') throw invalid();
+  if (Object.keys(v).some(key => !fields.includes(key) && key !== 'recurrence') || typeof v.allDay !== 'boolean') throw invalid();
   for (const key of fields.filter(key => key !== 'allDay')) {
     if (typeof v[key] !== 'string' || (v[key] as string).length > (key === 'notes' ? 2000 : 200) || /[\p{Cc}\p{Cf}]/u.test(v[key] as string)) throw invalid();
   }
@@ -36,6 +37,11 @@ export function validateCalendar(value: unknown): CalendarEvent {
   } else {
     if (!event.timezone) throw invalid();
     try { if (instant(event.end, event.timezone) <= instant(event.start, event.timezone)) throw invalid(); } catch { throw invalid(); }
+  }
+  if (v.recurrence !== undefined) {
+    if (typeof v.recurrence !== 'string') throw invalid();
+    event.recurrence = v.recurrence;
+    recurrenceOccurrences(event);
   }
   return event;
 }
@@ -71,6 +77,7 @@ export function calendarApprovalMatches(text: string, event: CalendarEvent, retr
 }
 export function calendarDetails(event: CalendarEvent, mode: 'export' | 'live' = 'export'): string {
   const e = validateCalendar(event);
+  if (e.recurrence && mode === 'export') throw Error('CALENDAR_RECURRENCE_ICS_UNSUPPORTED');
   const zone = e.allDay ? '' : canonicalZone(e.timezone);
   const timing = e.allDay ? '全天日期，不绑定小时或时区；结束日期不包含在事件内。请确认这是全天事件，不是有具体时间的约会。'
     : `主时区：${zones[zone]?.label ?? zone} [${zone}]\n${[zone, ...Object.keys(zones).filter(z => z !== zone)].map(z =>
@@ -91,6 +98,8 @@ const utc = (time: number) => new Date(time).toISOString().replace(/[-:]/g, '').
 export type CalendarInvitation = { uid: string; organizer: string; attendee: string; sequence: number; stamp: string };
 export function calendarInvitation(value: CalendarEvent, invitation: CalendarInvitation) {
   const e = validateCalendar(value), i = invitation;
+  // Native Google invitations support recurrence; never emit a misleading UTC-only ICS fallback.
+  if (e.recurrence) throw Error('CALENDAR_RECURRENCE_ICS_UNSUPPORTED');
   const address = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$/;
   if (!address.test(i.organizer) || !address.test(i.attendee) || i.organizer.length > 254 || i.attendee.length > 254
     || !/^[a-zA-Z0-9@._-]{5,1024}$/.test(i.uid) || !Number.isSafeInteger(i.sequence) || i.sequence < 0
