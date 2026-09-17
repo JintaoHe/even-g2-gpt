@@ -13,7 +13,7 @@ test('friendly subject, summary and title filename; HTML and header/path injecti
   const mail = mailPresentation(metadata);
   assert.equal(mail.subject, 'Even 笔记｜周末社区活动安排'); assert.equal(mail.filename, '周末社区活动安排.md');
   assert.match(mail.text, /活动日期仍需核实/); assert.doesNotMatch(mail.text, /[a-f0-9]{8}-/);
-  assert.match(mail.html, /Even · 私人助理/); assert.doesNotMatch(mail.html, /<img|<script|<a\b/i);
+  assert.match(mail.html, /Even Assistant · 系统通知/); assert.doesNotMatch(mail.html, /<img|<script|<a\b/i);
   const unsafe = presentation('../CON\r\nBcc: other@example.com<script>x</script>', '<img src=x onerror=alert(1)> A & B', 'summary');
   assert.doesNotMatch(unsafe.filename, /[\\/:\r\n<>]/); assert.doesNotMatch(mailPresentation(unsafe).subject, /[\r\n]/);
   assert.match(mailPresentation(unsafe).html, /A &amp; B/);

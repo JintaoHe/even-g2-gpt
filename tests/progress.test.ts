@@ -13,6 +13,8 @@ test('progress reports real phases, elapsed time, and clears on cancellation, fa
   progress.event({ type: 'state', state: 'thinking' }); assert.match(text, /正在理解/);
   now = 8000; tick!(); assert.match(text, /8 秒/); assert.doesNotMatch(text, /查资料/);
   progress.event({ type: 'answer.start', id: 1 }); assert.match(text, /正在思考/); assert.equal(timers, 1);
+  progress.event({ type: 'artifact.status', status: 'generating', id: 1 }); assert.match(text, /生成并保存文件/);
+  progress.event({ type: 'artifact.status', status: 'sending', id: 1 }); assert.match(text, /提交邮件/);
   progress.event({ type: 'search.status', status: 'searching', id: 1 }); assert.match(text, /正在查资料/);
   progress.event({ type: 'search.status', status: 'completed', id: 1 }); assert.match(text, /整理回答/);
   progress.event({ type: 'answer.cancelled', id: 1 }); assert.equal(text, ''); assert.equal(timers, 0);

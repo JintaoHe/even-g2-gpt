@@ -35,6 +35,19 @@ body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-wi
 <section>
   <div id="history" aria-label="对话记录"></div>
   <button id="exportMd" class="secondary" disabled>导出当前对话为 MD</button>
+  <details><summary>手动填写日历文件（API 对话也支持口头生成）</summary>
+    <p>不自动创建事件。填写并核对后导出，再选择发到固定邮箱。时间必须包含该日期的 UTC 偏移，例如 2026-09-20T14:00-05:00；冬季偏移可能不同。</p>
+    <form id="calendarForm">
+      <label>日程标题<br><input id="calendarTitle" required maxlength="200"></label><br>
+      <label><input id="calendarAllDay" type="checkbox" style="width:auto"> 全天事件</label><br>
+      <label>开始（全天格式 YYYY-MM-DD）<br><input id="calendarStart" required placeholder="2026-09-20T14:00-05:00"></label><br>
+      <label>结束（全天填写最后一天的次日，不包含结束日期）<br><input id="calendarEnd" required placeholder="2026-09-20T15:00-05:00"></label><br>
+      <label>时区（全天事件忽略）<br><input id="calendarZone" placeholder="America/Chicago"></label><br>
+      <label>地点（可选）<br><input id="calendarLocation" maxlength="200"></label><br>
+      <label>备注（可选，单行）<br><input id="calendarNotes" maxlength="2000"></label><br>
+      <button id="exportCalendar" disabled>核对并导出 MD＋ICS</button>
+    </form>
+  </details>
   <div id="jobs" aria-label="文件任务"></div>
   <form id="textForm"><label for="text">也可以先用文字测试追问与退出意图</label>
     <textarea id="text" rows="2" maxlength="6000" placeholder="例如：不要退出，帮我解释一下 API"></textarea>
@@ -42,5 +55,6 @@ body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-wi
   </form>
 </section>
 <dialog id="exitDialog"><h2>确认退出？</h2><p>已经停止收音。这里模拟未来的 Even 系统确认框；取消后仍保持暂停。</p><button id="confirmExit">确认退出</button><button id="cancelExit" class="secondary">取消，保持暂停</button></dialog>
+<section id="googleCalendar" hidden></section>
 <script type="module" src="/app.js"></script>
 </html>

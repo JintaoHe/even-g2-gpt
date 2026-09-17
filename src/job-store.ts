@@ -6,8 +6,9 @@ import { hostname } from 'node:os';
 import type { Message } from './conversation.js';
 import type { MailSender } from './mail.js';
 import { renderDocument, type Document, type Presentation } from './document-presentation.js';
+import { validateCalendar, type CalendarEvent } from './calendar.js';
 
-export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number; mail_state?: string | null; title?: string; filename?: string };
+export type Job = { id: string; state: string; created: string; updated: string; error: string | null; bytes: number; mail_state?: string | null; title?: string; filename?: string; calendar?: CalendarEvent; superseded?: boolean; mail_attempts?: number; mail_received?: boolean };
 const MAX_FILE = 2 * 1024 * 1024, MAX_TOTAL = 50 * 1024 * 1024;
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);
 
@@ -42,7 +43,11 @@ export class JobStore {
         CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL,
           updated TEXT NOT NULL, error TEXT, bytes INTEGER NOT NULL DEFAULT 0, input TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS mail_deliveries (job_id TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS artifact_metadata (job_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);`);
+        CREATE TABLE IF NOT EXISTS artifact_metadata (job_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS calendar_events (job_id TEXT PRIMARY KEY, event TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS superseded_artifacts (job_id TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS mail_attempts (job_id TEXT NOT NULL, attempt INTEGER NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, delivery_id TEXT NOT NULL, PRIMARY KEY(job_id,attempt));
+        CREATE TABLE IF NOT EXISTS mail_receipts (job_id TEXT PRIMARY KEY, created TEXT NOT NULL);`);
       db.exec('BEGIN IMMEDIATE');
       const prior = db.prepare('SELECT * FROM service_owner WHERE id=1').get() as any;
       if (prior) {
@@ -55,6 +60,8 @@ export class JobStore {
       // Never replay a task that may already have produced output before a crash.
       db.prepare("UPDATE jobs SET state='interrupted',error='SERVICE_RESTARTED',input='[]',updated=? WHERE state='running'").run(new Date().toISOString());
       db.exec("UPDATE mail_deliveries SET state='unknown' WHERE state='sending'");
+      db.exec("INSERT OR IGNORE INTO mail_attempts SELECT job_id,1,state,created,job_id FROM mail_deliveries WHERE job_id NOT IN (SELECT job_id FROM mail_attempts)");
+      db.exec("UPDATE mail_attempts SET state='unknown' WHERE state='sending'");
       db.exec('COMMIT');
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} db.close(); throw error; }
     const store = new JobStore(db, artifacts, owner, render);
@@ -63,7 +70,26 @@ export class JobStore {
 
   list(): Job[] {
     const jobs = this.db.prepare('SELECT j.id,j.state,j.created,j.updated,j.error,j.bytes,m.state AS mail_state FROM jobs j LEFT JOIN mail_deliveries m ON j.id=m.job_id ORDER BY j.created DESC LIMIT 100').all() as unknown as Job[];
-    return jobs.map(job => { const metadata = this.metadata(job.id); return { ...job, title: metadata?.title, filename: metadata?.filename }; });
+    return jobs.map(job => { const metadata = this.metadata(job.id); return { ...job, title: metadata?.title, filename: metadata?.filename, calendar: this.calendar(job.id), superseded: this.superseded(job.id), mail_attempts: this.mailAttempts(job.id), mail_received: this.mailReceived(job.id) }; });
+  }
+  mailAttempts(id: string): number {
+    const row = this.db.prepare('SELECT MAX(attempt) AS total FROM mail_attempts WHERE job_id=?').get(id) as { total: number | null };
+    return row.total ?? (this.mailState(id) ? 1 : 0);
+  }
+  mailReceived(id: string): boolean { return !!this.db.prepare('SELECT 1 FROM mail_receipts WHERE job_id=?').get(id); }
+  acknowledgeReceipt(id: string) {
+    if (!this.mailState(id) || this.mailState(id) === 'sending') throw new Error('MAIL_RECEIPT_UNAVAILABLE');
+    this.db.prepare('INSERT OR IGNORE INTO mail_receipts VALUES (?,?)').run(id, new Date().toISOString());
+  }
+  canRetryEmail(id: string): boolean {
+    return this.get(id)?.state === 'completed' && !this.superseded(id) && !this.mailReceived(id)
+      && ['accepted', 'failed', 'unknown'].includes(this.mailState(id) ?? '') && this.mailAttempts(id) === 1;
+  }
+  superseded(id: string): boolean { return !!this.db.prepare('SELECT 1 FROM superseded_artifacts WHERE job_id=?').get(id); }
+  supersede(id: string) { if (this.get(id)) this.db.prepare('INSERT OR IGNORE INTO superseded_artifacts VALUES (?)').run(id); }
+  calendar(id: string): CalendarEvent | undefined {
+    const row = this.db.prepare('SELECT event FROM calendar_events WHERE job_id=?').get(id) as { event: string } | undefined;
+    return row ? validateCalendar(JSON.parse(row.event)) : undefined;
   }
   mailState(id: string): string | undefined {
     return (this.db.prepare('SELECT state FROM mail_deliveries WHERE job_id=?').get(id) as { state: string } | undefined)?.state;
@@ -72,23 +98,55 @@ export class JobStore {
     const row = this.db.prepare('SELECT metadata FROM artifact_metadata WHERE job_id=?').get(id) as { metadata: string } | undefined;
     return row ? JSON.parse(row.metadata) : undefined;
   }
-  async email(id: string, sender: MailSender): Promise<string> {
+  async email(id: string, sender: MailSender, signal?: AbortSignal): Promise<string> {
+    return this.sendEmail(id, sender, signal);
+  }
+  async retryEmail(id: string, sender: MailSender, expectedAttempt: number, signal?: AbortSignal): Promise<string> {
+    if (expectedAttempt !== 1) throw new Error('MAIL_RETRY_LIMIT');
+    return this.sendEmail(id, sender, signal, expectedAttempt);
+  }
+  private async sendEmail(id: string, sender: MailSender, signal?: AbortSignal, expectedAttempt?: number): Promise<string> {
+    signal?.throwIfAborted();
     if (this.closing) throw new Error('MAIL_STOPPING');
+    if (this.superseded(id)) throw new Error('MAIL_SUPERSEDED');
     const prior = this.mailState(id);
-    if (prior) return prior; // One attempt per artifact, even across service restarts.
+    if (expectedAttempt === undefined && prior) return prior; // Repeated initial confirmations never resend.
+    if (expectedAttempt !== undefined && !this.canRetryEmail(id)) throw new Error('MAIL_RETRY_UNAVAILABLE');
     if (this.mailing) throw new Error('MAIL_BUSY');
     const bytes = await this.download(id);
+    signal?.throwIfAborted();
+    if (this.superseded(id)) throw new Error('MAIL_SUPERSEDED');
     // Recheck after asynchronous I/O so simultaneous clicks cannot duplicate delivery.
     if (this.closing || this.mailing) throw new Error('MAIL_BUSY');
-    const existing = this.mailState(id); if (existing) return existing;
+    const existing = this.mailState(id); if (expectedAttempt === undefined && existing) return existing;
+    if (expectedAttempt !== undefined && (!this.canRetryEmail(id) || this.mailAttempts(id) !== expectedAttempt)) throw new Error('MAIL_RETRY_UNAVAILABLE');
     const date = new Date().toISOString();
-    const count = this.db.prepare('SELECT COUNT(*) AS total FROM mail_deliveries WHERE created>=?').get(date.slice(0, 10)) as { total: number };
+    const count = this.db.prepare(`SELECT COUNT(*) AS total FROM (
+      SELECT created FROM mail_attempts UNION ALL
+      SELECT created FROM mail_deliveries WHERE job_id NOT IN (SELECT job_id FROM mail_attempts)
+    ) WHERE created>=?`).get(date.slice(0, 10)) as { total: number };
     if (count.total >= 20) throw new Error('MAIL_DAILY_LIMIT');
-    this.db.prepare("INSERT INTO mail_deliveries VALUES (?,'sending',?)").run(id, date);
-    const operation = Promise.resolve().then(() => sender(id, bytes, this.metadata(id))).then(result => {
-      this.db.prepare('UPDATE mail_deliveries SET state=? WHERE job_id=?').run(result, id);
+    const attempt = (expectedAttempt ?? 0) + 1, deliveryId = attempt === 1 ? id : randomUUID();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      // Retain legacy history as well as the latest-state compatibility row.
+      this.db.prepare('INSERT OR IGNORE INTO mail_attempts SELECT job_id,1,state,created,job_id FROM mail_deliveries WHERE job_id=?').run(id);
+      this.db.prepare("INSERT INTO mail_attempts VALUES (?,?,'sending',?,?)").run(id, attempt, date, deliveryId);
+      this.db.prepare("INSERT OR REPLACE INTO mail_deliveries VALUES (?,'sending',?)").run(id, date);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    const settle = (state: string) => {
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        this.db.prepare('UPDATE mail_attempts SET state=? WHERE job_id=? AND attempt=?').run(state, id, attempt);
+        this.db.prepare('UPDATE mail_deliveries SET state=? WHERE job_id=?').run(state, id);
+        this.db.exec('COMMIT');
+      } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    };
+    const operation = Promise.resolve().then(() => sender(id, bytes, this.metadata(id), this.calendar(id), this.get(id)!.created, deliveryId)).then(result => {
+      settle(result);
     }).catch(() => {
-      this.db.prepare("UPDATE mail_deliveries SET state='unknown' WHERE job_id=?").run(id);
+      settle('unknown');
     }).finally(() => { this.mailing = undefined; });
     this.mailing = operation;
     await operation; return this.mailState(id)!;
@@ -97,15 +155,27 @@ export class JobStore {
     if (!validId(id)) return undefined;
     return this.db.prepare('SELECT id,state,created,updated,error,bytes FROM jobs WHERE id=?').get(id) as Job | undefined;
   }
-  enqueue(history: Message[]): Job {
-    if (this.closing) throw new Error('Service stopping');
+  enqueue(history: Message[], calendar?: unknown): Job {
     if (!history.length || history.length > 100 || history.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid conversation snapshot');
-    const input = JSON.stringify(history);
+    return this.enqueueInput(JSON.stringify(history), calendar);
+  }
+  enqueueDocument(document: Document, calendar?: unknown): Job {
+    if (!document.markdown.trim() || !document.presentation.title || !document.presentation.summary) throw new Error('Invalid document');
+    return this.enqueueInput(JSON.stringify({ document }), calendar);
+  }
+  private enqueueInput(input: string, calendar?: unknown): Job {
+    if (this.closing) throw new Error('Service stopping');
     if (Buffer.byteLength(input) > MAX_FILE) throw new Error('Input too large');
     const count = this.db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN state IN ('queued','running') THEN 1 ELSE 0 END) AS pending FROM jobs").get() as any;
     if (count.total >= 1000 || count.pending >= 20) throw new Error('Job capacity reached');
     const id = randomUUID(), now = new Date().toISOString();
-    this.db.prepare("INSERT INTO jobs VALUES (?,'queued',?,?,NULL,0,?)").run(id, now, now, input);
+    const event = calendar === undefined ? undefined : validateCalendar(calendar);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare("INSERT INTO jobs VALUES (?,'queued',?,?,NULL,0,?)").run(id, now, now, input);
+      if (event) this.db.prepare('INSERT INTO calendar_events VALUES (?,?)').run(id, JSON.stringify(event));
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     this.kick(); return this.get(id)!;
   }
   cancel(id: string) {
@@ -131,7 +201,8 @@ export class JobStore {
       this.active = next.id; const controller = this.controller = new AbortController();
       this.db.prepare("UPDATE jobs SET state='running',updated=? WHERE id=?").run(new Date().toISOString(), next.id);
       try {
-        const rendered = await this.render(JSON.parse(next.input), controller.signal);
+        const input = JSON.parse(next.input);
+        const rendered: string | Document = Array.isArray(input) ? await this.render(input, controller.signal) : input.document;
         const markdown = typeof rendered === 'string' ? rendered : rendered.markdown;
         controller.signal.throwIfAborted();
         const bytes = Buffer.byteLength(markdown);

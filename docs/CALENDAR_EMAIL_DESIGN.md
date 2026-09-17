@@ -1,6 +1,20 @@
-# Calendar email: proposed next step, not implemented
+# Calendar email: confirmed ICS attachments
 
-Email presentation is implemented separately. Calendar-file generation, calendar writes and voice-triggered scheduling are not enabled by this change.
+## Mandatory timezone/date approval
+
+Timed-event previews name the primary IANA timezone in human-readable terms and show both endpoints as full dates, times and UTC offsets. America/Chicago (美国芝加哥／中部时间), America/Los_Angeles (美国洛杉矶／太平洋时间) and America/New_York (美国纽约／东部时间) are always compared, with the selected primary zone first. These are conversions of one event, not three events. Conversion uses each endpoint's actual date and timezone rules, including DST transitions and previous/next-day differences; it never assumes a fixed hour difference.
+
+Voice approval must name the primary zone, e.g. **确认按芝加哥时间发送** or **confirm send in Chicago time**. Generic approval or another comparison zone cannot send the event. Retry likewise requires **确认按芝加哥时间重发**. All-day events instead require **确认全天日期并发送**, explicitly noting their exclusive end date and absence of an hourly timezone.
+
+The web send dialog displays the same server-generated comparisons and asks the user to type the displayed approval. `jobs.email` includes `calendar_confirmation`; the server independently validates it against the persisted event, initial/retry mode and existing one-use confirmation token. A missing/wrong timezone approval consumes the token without sending, requiring a fresh preview. These gates also apply to older stored calendar artifacts.
+
+The web lab can now attach one confirmed event to a conversation export. Expand the calendar form, enter title, start/end, IANA timezone and optional location/notes, then confirm export. Timed values require explicit offsets (for example `2026-09-20T14:00-05:00` in `America/Chicago`). The server rejects impossible dates, missing offsets, mismatched timezone offsets and reversed intervals. DST repeated hours require an explicit correct offset; nonexistent hours are rejected. All-day events use dates and an exclusive end date, without a timezone.
+
+Export does not send email. The completed task shows the persisted event; the separate fixed-recipient email confirmation includes these details. Email contains MD plus a descriptively named ICS attachment and visible event details. The web lab supports authenticated MD and ICS downloads as a fallback when email does not arrive. Event data lives in the existing private SQLite store; ICS bytes are generated deterministically using the job UUID and creation timestamp. A separately confirmed resend preserves those exact bytes and is limited to once per artifact, counting toward the daily mail quota. No additional model call or calendar credential is needed to resend/download.
+
+API conversations also support explicit calendar drafting requests. Missing start/end, ambiguous relative dates or DST times trigger clarification rather than invented defaults. The configured `CONVERSATION_TIMEZONE` is used unless the user specifies another zone and is shown in the preview. After saving the draft, the assistant shows the absolute dates/times/zone and requests a separate “确认发送”. The ICS is generated only from validated event fields. See EMAIL_DELIVERY.md for the per-session confirmation state machine and version invalidation.
+
+Recurring events, updates/cancellations of already imported events, automatic calendar writes and notification alarms are NOT implemented. “Calendar reminder” means an importable event, not a scheduled notification service; the preview explicitly states that no alarm is included. A conversation merely mentioning a date does not create an event. Invalid input creates no job. Gmail/Apple client rendering and real-device import still require manual acceptance testing; unit tests do not prove an Add to Calendar button appears.
 
 ## Do not rely on inferred events
 
@@ -8,7 +22,7 @@ Gmail's Events from Gmail feature supports specific confirmation categories (fli
 
 Apple documents Siri suggestions from Mail, Messages and Safari. Whether a particular personal email gets a suggestion is controlled by the receiving client and user settings, not guaranteed by our sender.
 
-## Recommended MVP
+## Confirmation policy and future voice integration
 
 Only after the user explicitly asks for a calendar item: collect a descriptive title, absolute date, start/end or all-day status, timezone, and optional location/notes. Resolve ambiguous relative dates and daylight-saving times with the user before creating the file. Show the interpreted event and obtain confirmation before email delivery.
 

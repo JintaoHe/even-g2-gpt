@@ -1,7 +1,9 @@
 import type { Citation, Decision, DialogueModel, Message, ReplyUpdate, ReasoningEffort, TurnPlan } from './conversation.js';
 import type { SearchBudget, SearchTicket } from './search-quota.js';
+import { deliveryActions, DELIVERY_INSTRUCTIONS } from './delivery-intent.js';
+import { calendarActions, CALENDAR_INTENT } from './calendar-planner.js';
 
-export type DialogueOptions = { reasoningEffort?: ReasoningEffort; adaptiveReasoning?: boolean; intentTokens?: number; replyTokens?: number; extraInstructions?: string };
+export type DialogueOptions = { reasoningEffort?: ReasoningEffort; adaptiveReasoning?: boolean; intentTokens?: number; replyTokens?: number; extraInstructions?: string; deliveryRouting?: boolean; calendarRouting?: boolean };
 
 export const REASONING_INSTRUCTIONS = `Also select reasoning_effort for the NEXT answer, using this utterance and prior context.
 none: greetings, simple facts, straightforward single-step requests. low: ordinary explanations, comparisons, causal analysis.
@@ -103,20 +105,24 @@ export class OpenAIDialogue implements DialogueModel {
     return (await this.plan(history, text, forced, signal)).decision;
   }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan> {
-    const adaptive = this.options.adaptiveReasoning;
-    const response = await this.request({ instructions: INTENT_INSTRUCTIONS + (adaptive ? '\n' + REASONING_INSTRUCTIONS : '') + (forced
+    const adaptive = this.options.adaptiveReasoning, delivery = this.options.deliveryRouting, calendar = this.options.calendarRouting;
+    const response = await this.request({ instructions: INTENT_INSTRUCTIONS + (delivery ? '\n' + DELIVERY_INSTRUCTIONS : '') + (calendar ? '\n' + CALENDAR_INTENT : '') + (adaptive ? '\n' + REASONING_INSTRUCTIONS : '') + (forced
       ? '\nThe user explicitly pressed Submit: do not return wait; ask a clarifying question via respond if needed.' : ''),
-      input: [...modelInput(history), { role: 'user', content: text }], max_output_tokens: this.options.intentTokens ?? 128,
+      input: [...modelInput(history), { role: 'user', content: text }], max_output_tokens: Math.max(this.options.intentTokens ?? 128, delivery ? 256 : 128),
       text: { format: { type: 'json_schema', name: 'turn_intent', strict: true,
         schema: { type: 'object', properties: { decision: { type: 'string', enum: ['respond', 'wait', 'exit', 'clarify_exit'] },
-          ...(adaptive ? { reasoning_effort: { type: 'string', enum: ['none', 'low', 'medium'] } } : {}) },
-          required: adaptive ? ['decision', 'reasoning_effort'] : ['decision'], additionalProperties: false } } }
+          ...(adaptive ? { reasoning_effort: { type: 'string', enum: ['none', 'low', 'medium'] } } : {}),
+          ...(delivery ? { delivery_action: { type: 'string', enum: deliveryActions } } : {}), ...(calendar ? { calendar_action: { type: 'string', enum: calendarActions } } : {}) },
+          required: ['decision', ...(adaptive ? ['reasoning_effort'] : []), ...(delivery ? ['delivery_action'] : []), ...(calendar ? ['calendar_action'] : [])], additionalProperties: false } } }
     }, signal);
     const result: any = await response.json();
     if (result.status !== 'completed') throw new Error('Incomplete decision');
     const output = result.output?.flatMap((item: any) => item.content ?? []).filter((item: any) => item.type === 'output_text').map((item: any) => item.text).join('');
     const parsed = JSON.parse(output), decision = parseDecision(parsed);
-    return { decision, ...(adaptive ? { reasoningEffort: decision === 'respond' ? safeReasoning(parsed.reasoning_effort) : 'none' as const } : {}) };
+    if (delivery && !deliveryActions.includes(parsed.delivery_action)) throw new Error('Invalid delivery intent');
+    if (calendar && !calendarActions.includes(parsed.calendar_action)) throw new Error('Invalid calendar intent');
+    if (calendar && decision === 'respond' && parsed.calendar_action !== 'none') return { decision, calendarAction: parsed.calendar_action, deliveryAction: 'none', reasoningEffort: 'none' };
+    return { decision, ...(delivery ? { deliveryAction: decision === 'respond' ? parsed.delivery_action : 'none' } : {}), ...(adaptive ? { reasoningEffort: decision === 'respond' ? safeReasoning(parsed.reasoning_effort) : 'none' as const } : {}) };
   }
   async reply(history: Message[], signal: AbortSignal, delta: (text: string) => void, update?: (event: ReplyUpdate) => void, effort?: ReasoningEffort) {
     signal.throwIfAborted();

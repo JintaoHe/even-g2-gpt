@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "calendar:authorize": "tsx scripts/google-calendar-auth.ts",
+    "calendar:check": "tsx scripts/google-calendar-check.ts",
     "audit:public": "node scripts/audit-public.mjs",
     "build:server": "node scripts/build-server.mjs",
     "conversation": "tsx src/conversation-server.ts",

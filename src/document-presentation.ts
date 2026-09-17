@@ -65,11 +65,12 @@ export function createDocumentRenderer(env: NodeJS.ProcessEnv = process.env, req
 }
 
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
-export function mailPresentation(value?: Presentation) {
+export function mailPresentation(value?: Presentation, attachmentNames?: string[]) {
   const metadata = value ? presentation(value.title, value.summary, value.kind) : presentation('谈话笔记', '这是一份已保存的谈话记录，完整内容和来源链接见附件。', 'excerpt');
-  const label = metadata.kind === 'summary' ? '谈话摘要' : '内容摘录（非 AI 总结）';
-  const footer = '这是你通过 Even 私人助理主动导出的笔记。摘要仅供快速回顾，请以附件中的完整对话及来源为准。无需登录或提供密码。';
-  const text = `你好，\n\n${metadata.title}\n\n${label}\n${metadata.summary}\n\n附件：${metadata.filename}\n\n${footer}`;
-  const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;line-height:1.7;color:#24352c"><p style="color:#53695c">Even · 私人助理</p><h1 style="font-size:22px">${escapeHtml(metadata.title)}</h1><p>你好，这是你保存的谈话笔记。</p><h2 style="font-size:16px">${label}</h2><p>${escapeHtml(metadata.summary)}</p><p>附件：<strong>${escapeHtml(metadata.filename)}</strong></p><hr><p style="font-size:12px;color:#53695c">${footer}</p></div>`;
+  const label = metadata.kind === 'summary' ? '内容摘要' : '内容摘录（非 AI 总结）';
+  const attachments = (attachmentNames ?? [metadata.filename]).join('、');
+  const footer = '这是你通过 Even 私人助理主动生成或导出的文件。摘要仅供快速回顾，请以附件中的完整文档及来源为准。无需登录或提供密码。';
+  const text = `Even Assistant · 系统通知\n\n你好，\n\n${metadata.title}\n\n${label}\n${metadata.summary}\n\n附件：${attachments}\n\n${footer}`;
+  const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;line-height:1.7;color:#24352c"><p style="color:#53695c">Even Assistant · 系统通知</p><h1 style="font-size:22px">${escapeHtml(metadata.title)}</h1><p>你好，这是你主动请求生成或导出的文件通知。</p><h2 style="font-size:16px">${label}</h2><p>${escapeHtml(metadata.summary)}</p><p>附件：<strong>${escapeHtml(attachments)}</strong></p><hr><p style="font-size:12px;color:#53695c">${footer}</p></div>`;
   return { subject: `Even 笔记｜${metadata.title}`, text, html, filename: metadata.filename };
 }

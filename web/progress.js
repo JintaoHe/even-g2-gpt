@@ -21,6 +21,8 @@ export function createProgress(render, clock = { now: () => Date.now(), every: f
     if (answerId === undefined || e.id !== answerId) return;
     if (e.type === 'answer.done' || e.type === 'answer.cancelled') { clear(); return; }
     if (e.type === 'answer.delta') { phase = '正在输出回答…'; paint(); }
+    if (e.type === 'artifact.status') { phase = e.status === 'sending' ? '正在提交邮件…' : '正在生成并保存文件…'; paint(); }
+    if (e.type === 'calendar.status') { phase = e.status === 'saving' ? '正在保存到 Google 日历…' : e.status === 'querying' ? '正在查询／核对日历…' : '正在理解日历请求…'; paint(); }
     if (e.type === 'search.status') {
       if (['in_progress', 'searching'].includes(e.status)) phase = '正在查资料…';
       else if (e.status === 'completed') phase = '查找结束，正在整理回答…';

@@ -12,6 +12,14 @@ import { TurnDetector } from './vad.js';
 import { JobStore } from './job-store.js';
 import { createMailSender, type MailSender } from './mail.js';
 import { createDocumentRenderer, mailPresentation } from './document-presentation.js';
+import { createDraftGenerator, type DraftGenerator } from './delivery-draft.js';
+import { DeliveryDialogue, deliveryResult, mailFallback } from './delivery-dialogue.js';
+import { calendarDetails, calendarAttachment, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
+import { GoogleCalendarService, loadCalendarTransport } from './google-calendar.js';
+import { CalendarControl } from './calendar-control.js';
+import { CalendarDialogue } from './calendar-dialogue.js';
+import { createCalendarPlanner, type CalendarPlanner } from './calendar-planner.js';
+import { createCalendarAnswerer, type CalendarAnswerer } from './calendar-answer.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
@@ -21,11 +29,16 @@ export function createConversationServer(options: {
   capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean };
   jobs?: JobStore;
   mail?: MailSender;
+  draftGenerator?: DraftGenerator;
+  calendar?: GoogleCalendarService;
+  calendarPlanner?: CalendarPlanner;
+  calendarAnswerer?: CalendarAnswerer;
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
+  const calendarTasks = new Set<Promise<void>>();
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript'], '/mic.js': ['mic.js', 'text/javascript'],
-    '/citations.js': ['citations.js', 'text/javascript'], '/progress.js': ['progress.js', 'text/javascript']
+    '/citations.js': ['citations.js', 'text/javascript'], '/progress.js': ['progress.js', 'text/javascript'], '/calendar.js': ['calendar.js', 'text/javascript']
   };
   const http = createServer(async (req, res) => {
     const host = req.headers.host ?? '';
@@ -34,12 +47,16 @@ export function createConversationServer(options: {
       const given = Buffer.from((req.headers.authorization ?? '').replace(/^Bearer /, ''));
       const expected = Buffer.from(options.token);
       if (given.length !== expected.length || !timingSafeEqual(given, expected)) { res.writeHead(401); res.end(); return; }
-      const match = /^\/artifacts\/([a-f0-9-]{36})$/.exec(req.url);
+      const match = /^\/artifacts\/([a-f0-9-]{36})(\/calendar)?$/.exec(req.url);
       try {
         if (!match || !options.jobs) throw new Error('Unavailable');
-        const bytes = await options.jobs.download(match[1]);
-        const filename = encodeURIComponent(mailPresentation(options.jobs.metadata(match[1])).filename).replace(/'/g, '%27');
-        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="conversation.md"; filename*=UTF-8''${filename}`,
+        const markdown = await options.jobs.download(match[1]);
+        const calendar = match[2] ? options.jobs.calendar(match[1]) : undefined;
+        if (match[2] && !calendar) throw new Error('Unavailable');
+        const file = calendar ? calendarAttachment(match[1], calendar, options.jobs.get(match[1])!.created) : undefined;
+        const bytes = file?.content ?? markdown;
+        const filename = encodeURIComponent(file?.filename ?? mailPresentation(options.jobs.metadata(match[1])).filename).replace(/'/g, '%27');
+        res.writeHead(200, { 'Content-Type': file?.contentType ?? 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="${file ? 'event.ics' : 'conversation.md'}"; filename*=UTF-8''${filename}`,
           'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" });
         res.end(bytes);
       } catch { res.writeHead(404); res.end('Artifact unavailable'); }
@@ -72,6 +89,10 @@ export function createConversationServer(options: {
     let current: Transcriber | undefined, lastActivity = Date.now(), totalBytes = 0, forced = false, segmentId = 0;
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
+    let mailApproval: { id: string; token: string; expires: number; retryAttempt?: number } | undefined;
+    let unsubscribeCalendarHealth: (() => void) | undefined;
+    const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
+      (jobId, result) => { if (!closed) { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); } }) : undefined;
     const send = (event: Event) => {
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 262144) client.send(JSON.stringify(event));
       else client.close(1013, 'Client too slow');
@@ -80,8 +101,12 @@ export function createConversationServer(options: {
       generation++; detector.reset(); current = undefined; forced = false;
       for (const slot of slots) slot.job.cancel(); slots = [];
     };
-    const conversation = new Conversation(options.model, event => {
-      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) clearCapture();
+    const calendarControl = options.calendar ? new CalendarControl(options.calendar, send) : undefined;
+    const calendarDialogue = options.calendar && options.calendarPlanner ? new CalendarDialogue(delivery ?? options.model, options.calendar, options.calendarPlanner,
+      text => { if (!closed) send({ type: 'notice', text }); }, Date.now, options.calendarAnswerer) : undefined;
+    const conversation = new Conversation(calendarDialogue ?? delivery ?? options.model, event => {
+      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) { clearCapture(); delivery?.invalidate(); mailApproval = undefined; calendarControl?.invalidate(); calendarDialogue?.invalidate(); }
+      if (event.type === 'state' && event.state === 'closed') calendarDialogue?.endSession();
       send(event);
       if (event.type === 'state' && event.state === 'closed') client.close(1000, 'Conversation ended');
     }, history => options.save?.(id, history) ?? Promise.resolve());
@@ -93,7 +118,7 @@ export function createConversationServer(options: {
       else send({ type: 'notice', text: '没有识别到文字；如误打断，可点“继续上一答”。' });
     };
     const detector = new TurnDetector(() => {
-      lastActivity = Date.now(); conversation.interrupt();
+      lastActivity = Date.now(); mailApproval = undefined; conversation.interrupt();
       if (slots.length >= 4) { conversation.pause(); send({ type: 'error', code: 'TRANSCRIPTION_BACKLOG' }); return; }
       const epoch = generation;
       const segment = ++segmentId;
@@ -138,36 +163,82 @@ export function createConversationServer(options: {
           if (msg.type !== 'hello' || given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Auth');
           if (owner && owner !== client) { send({ type: 'error', code: 'BUSY' }); client.close(); return; }
           owner = client; authenticated = true; clearTimeout(authTimer);
-          send({ type: 'ready', session_id: id, models: options.models, capabilities: { ...options.capabilities, email: !!options.mail } }); send({ type: 'state', state: conversation.state }); return;
+          send({ type: 'ready', session_id: id, models: options.models, capabilities: { ...options.capabilities, email: !!options.mail, calendar: !!options.calendar } }); send({ type: 'state', state: conversation.state });
+          if (options.calendar) {
+            let lastHealthState = '';
+            send({ type: 'calendar.health', health: options.calendar.health() });
+            unsubscribeCalendarHealth = options.calendar.subscribeHealth(health => {
+              if (closed) return;
+              send({ type: 'calendar.health', health });
+              if (health.state === 'retrying' && lastHealthState !== 'retrying') send({ type: 'notice', text: '日历读取异常，正在自动重试一次。' });
+              lastHealthState = health.state;
+            });
+          }
+          return;
         }
         lastActivity = Date.now();
+        if (typeof msg.type === 'string' && msg.type.startsWith('calendar.')) {
+          if (!calendarControl) send({ type: 'calendar.error', code: 'CALENDAR_DISABLED' });
+          else if (['closed', 'exit_pending'].includes(conversation.state)) send({ type: 'calendar.error', code: 'CALENDAR_SESSION_CLOSED' });
+          else {
+            const task = calendarControl.handle(msg);
+            calendarTasks.add(task); void task.finally(() => calendarTasks.delete(task));
+          }
+          return;
+        }
         switch (msg.type) {
-          case 'jobs.email':
+          case 'jobs.email.received':
+            if (!options.jobs || typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid receipt');
+            mailApproval = undefined; delivery?.invalidate();
+            try { options.jobs.acknowledgeReceipt(msg.id); send({ type: 'notice', text: '已记录你确认收到，不会再重发这份文件。' }); }
+            catch { send({ type: 'notice', text: '暂无可关联的发送记录，或发送仍在进行。' }); }
+            send({ type: 'jobs.list', jobs: options.jobs.list() }); break;
+          case 'jobs.email.cancel': mailApproval = undefined; send({ type: 'notice', text: '已取消本次发送确认，没有发送邮件。' }); break;
+          case 'jobs.email.prepare': {
             if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
-            if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid mail request');
+            if (typeof msg.id !== 'string' || (msg.retry !== undefined && typeof msg.retry !== 'boolean') || Object.keys(msg).some(key => !['type', 'id', 'retry'].includes(key))) throw new Error('Invalid mail request');
+            mailApproval = undefined; delivery?.invalidate();
+            if (options.jobs.get(msg.id)?.state !== 'completed' || options.jobs.superseded(msg.id) || (msg.retry ? !options.jobs.canRetryEmail(msg.id) : options.jobs.mailState(msg.id))) { send({ type: 'notice', text: '无法发送或重发：文件未完成、旧版失效、已收到或重发次数已用完。' + mailFallback }); break; }
+            const metadata = mailPresentation(options.jobs.metadata(msg.id)), calendar = options.jobs.calendar(msg.id);
+            mailApproval = { id: msg.id, token: randomUUID(), expires: Date.now() + 5 * 60000, retryAttempt: msg.retry ? options.jobs.mailAttempts(msg.id) : undefined };
+            send({ type: 'mail.confirmation_required', id: msg.id, confirmation: mailApproval.token,
+              calendar_confirmation: calendar ? calendarConfirmationPhrase(calendar, !!msg.retry) : undefined,
+              preview: (msg.retry ? mailFallback + '\n重发同一份文件，可能收到重复邮件。每份文件最多重发一次。\n\n' : '') + metadata.text + (calendar ? '\n\n' + calendarDetails(calendar) : '') });
+            break;
+          }
+          case 'jobs.email': {
+            if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
+            if (typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id', 'confirmation', 'calendar_confirmation'].includes(key))) throw new Error('Invalid mail request');
+            if (!mailApproval || mailApproval.id !== msg.id || mailApproval.token !== msg.confirmation || mailApproval.expires <= Date.now()) { send({ type: 'notice', text: '发送确认已失效，请重新预览并确认。' }); break; }
+            const retryAttempt = mailApproval.retryAttempt;
+            mailApproval = undefined; delivery?.invalidate();
+            const calendar = options.jobs.calendar(msg.id);
+            if (calendar && (typeof msg.calendar_confirmation !== 'string' || !calendarApprovalMatches(msg.calendar_confirmation, calendar, !!retryAttempt))) {
+              send({ type: 'notice', text: '日历日期／主时区未明确确认，没有发送。请重新预览并确认指定时区。' }); break;
+            }
             send({ type: 'notice', text: '正在处理邮件请求；收件人为服务器配置的固定邮箱。' });
-            void options.jobs.email(msg.id, options.mail).then(result => {
-              send({ type: 'notice', text: result === 'accepted' ? '邮件已由发送服务器接受，请检查收件箱或垃圾邮件。'
-                : result === 'sending' ? '邮件发送中，请勿重复提交。'
-                : result === 'failed' ? '邮件发送失败；文件仍已保存。请检查发件配置。'
-                : '邮件发送结果不确定，请先检查邮箱；为避免重复，不会自动重发。' });
+            void (retryAttempt ? options.jobs.retryEmail(msg.id, options.mail, retryAttempt) : options.jobs.email(msg.id, options.mail)).then(result => {
+              send({ type: 'notice', text: deliveryResult(result) });
               send({ type: 'jobs.list', jobs: options.jobs!.list() });
             }).catch(() => send({ type: 'notice', text: '暂时无法发送：请确认文件已完成、没有其他发送任务，且未达到每日 20 次上限。' }));
             break;
+          }
           case 'jobs.list': send({ type: 'jobs.list', jobs: options.jobs?.list() ?? [] }); break;
           case 'jobs.export':
+            mailApproval = undefined; delivery?.invalidate();
             if (!options.jobs) { send({ type: 'notice', text: '文件存储未启用。' }); break; }
             try {
-              const job = options.jobs.enqueue(conversation.history.map(m => ({ ...m })));
+              if (Object.keys(msg).some(key => !['type', 'calendar'].includes(key))) throw new Error('Invalid export request');
+              const job = options.jobs.enqueue(conversation.history.map(m => ({ ...m })), msg.calendar);
               send({ type: 'job.created', job });
-            } catch { send({ type: 'notice', text: '无法创建导出任务：请确认有对话内容且未超过存储或任务上限。' }); }
+            } catch { send({ type: 'notice', text: '无法创建导出任务：请检查日程日期、起止时间与时区偏移（含夏令时）是否一致，并确认有对话内容且未超过任务上限。' }); }
             break;
           case 'jobs.cancel':
             if (typeof msg.id !== 'string') throw new Error('Invalid job');
             options.jobs?.cancel(msg.id); send({ type: 'jobs.list', jobs: options.jobs?.list() ?? [] }); break;
           case 'text.submit':
             if (typeof msg.text !== 'string' || !msg.text.trim() || msg.text.length > 6000) throw new Error('Text');
-            if (conversation.acceptsInput) { clearCapture(); void conversation.submit(msg.text, true); } break;
+            if (conversation.acceptsInput) { mailApproval = undefined; clearCapture(); void conversation.submit(msg.text, true); } break;
           case 'turn.submit':
             if (!conversation.acceptsInput) break;
             forced = true; if (detector.active) detector.finish(); else flush(); break;
@@ -187,6 +258,7 @@ export function createConversationServer(options: {
     client.on('error', () => client.close());
     client.on('close', () => {
       closed = true; clearTimeout(authTimer); clearInterval(idle); clearTimeout(lifetime);
+      unsubscribeCalendarHealth?.();
       clearCapture(); conversation.close(); if (owner === client) owner = undefined;
     });
   });
@@ -194,6 +266,7 @@ export function createConversationServer(options: {
     for (const client of wss.clients) client.terminate();
     await new Promise<void>(resolve => wss.close(() => resolve()));
     await new Promise<void>(resolve => http.close(() => resolve()));
+    await Promise.allSettled(calendarTasks);
   } };
 }
 
@@ -219,9 +292,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const mail = createMailSender();
   const dataDirectory = resolve(process.env.EVEN_DATA_DIR ?? '.local');
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer());
+  let calendar: GoogleCalendarService | undefined;
+  if (process.env.GOOGLE_CALENDAR_ENABLED === 'true') {
+    try {
+      if (!process.env.EMAIL_TO?.trim()) throw new Error('Calendar creation requires a fixed invitation recipient');
+      const google = await loadCalendarTransport(dataDirectory);
+      calendar = await GoogleCalendarService.create(dataDirectory, google.calendarId, google.transport, Date.now, process.env.EMAIL_TO);
+    } catch { await jobs.close(); throw new Error('Google Calendar setup invalid; check private auth files and calendar binding.'); }
+  }
   const save = fileSaver(resolve(dataDirectory, 'conversations'));
   const app = createConversationServer({ token, ...hybrid,
-    jobs, mail,
+    jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner() : undefined,
+    calendarAnswerer: calendar && hybrid.provider === 'api' ? createCalendarAnswerer() : undefined,
+    draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key },
     transcriber: delta => {
       if (!key) throw new Error('Speech requires OPENAI_API_KEY');
@@ -242,6 +325,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const deadline = setTimeout(() => process.exit(1), 25000); deadline.unref();
       try {
         await Promise.allSettled([app.close()]);
+        await calendar?.close();
         await Promise.all([hybrid.close(), jobs.close(), save.flush()]);
       } finally { clearTimeout(deadline); }
     })().catch(() => { process.exitCode = 1; });

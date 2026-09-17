@@ -1,5 +1,8 @@
 /** Baseline energy gate, NOT a speaker recognizer. 16kHz PCM16, 20ms frames. */
 export class TurnDetector {
+  // Keep 800ms before triggering, including the 160ms onset confirmation.
+  // This replays captured audio; it does not add an 800ms wait before starting.
+  private readonly prefixFrames = 800 / 20;
   private rest = Buffer.alloc(0);
   private prefix: Buffer[] = [];
   private loudMs = 0;
@@ -17,7 +20,7 @@ export class TurnDetector {
       for (let i = 0; i < 640; i += 2) sum += (frame.readInt16LE(i) / 32768) ** 2;
       const loud = Math.sqrt(sum / 320) >= this.threshold;
       if (!this.active) {
-        this.prefix.push(frame); if (this.prefix.length > 15) this.prefix.shift();
+        this.prefix.push(frame); if (this.prefix.length > this.prefixFrames) this.prefix.shift();
         this.loudMs = loud ? this.loudMs + 20 : 0;
         if (this.loudMs < 160) continue;
         this.active = true; this.durationMs = 0; this.quietMs = 0;
