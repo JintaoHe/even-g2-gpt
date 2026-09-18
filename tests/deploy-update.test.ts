@@ -31,5 +31,8 @@ test('automatic updater is periodic, persistent, serialized, and filesystem cons
   assert.match(updateTimer, /Persistent=true/);
   assert.match(updateScript, /flock -n 9/);
   assert.match(updateService, /ProtectSystem=strict/);
+  assert.match(updateService, /UMask=0077/);
+  assert.match(updateService, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
+  assert.match(updateService, /RestrictNamespaces=true/);
   assert.match(updateService, /ReadWritePaths=\/opt\/even-agent \/var\/lib\/even-agent-updater \/run\/lock/);
 });
