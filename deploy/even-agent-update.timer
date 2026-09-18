@@ -1,0 +1,12 @@
+[Unit]
+Description=Check protected main for a verified Even Agent update
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+Persistent=true
+Unit=even-agent-update.service
+
+[Install]
+WantedBy=timers.target

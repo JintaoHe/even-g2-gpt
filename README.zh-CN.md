@@ -134,7 +134,7 @@ docs/                  配置、运维、设计与验收文档
 
 后端部署包不含网页实验室、SDK 前端、模拟器、测试、密钥或本地数据。SDK 单独构建；Linux 凭据与数据单独配置。当前服务监听 loopback，公网 HTTPS/WSS 与 Even Hub 网络配置仍待集成，不能直接开放端口当作生产部署。
 
-详见 [部署边界](docs/PROJECT_STRUCTURE.md)、[Linux 进程、存储与迁移](docs/LINUX_OPERATIONS.md)。
+详见 [部署边界](docs/PROJECT_STRUCTURE.md)、[Linux 进程、存储与迁移](docs/LINUX_OPERATIONS.md) 和 [Linux 自动更新与回滚](docs/setup/AUTOMATIC_UPDATES.md)。
 
 ## 安全与数据边界
 

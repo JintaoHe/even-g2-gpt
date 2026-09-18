@@ -134,7 +134,7 @@ docs/                  Setup, operations, design, and acceptance guides
 
 The server release excludes the browser lab, SDK frontend, simulator, tests, credentials, and local data. Build the SDK separately; configure Linux credentials and data separately. The current server listens on loopback. Public HTTPS/WSS and Even Hub network configuration still require integration; exposing a port is not a production deployment.
 
-See [deployment boundaries](docs/PROJECT_STRUCTURE.md) and [Linux lifecycle, storage, and migration](docs/LINUX_OPERATIONS.md).
+See [deployment boundaries](docs/PROJECT_STRUCTURE.md), [Linux lifecycle, storage, and migration](docs/LINUX_OPERATIONS.md), and [automatic Linux updates with rollback](docs/setup/AUTOMATIC_UPDATES.md).
 
 ## Security and data boundaries
 

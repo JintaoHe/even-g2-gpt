@@ -6,6 +6,7 @@
 2. [Google Calendar API 发布与长期授权](GOOGLE_API_PRODUCTION.md)：启用 Calendar API、配置 OAuth、从 Testing 发布到 Production、重新授权及排错。
 3. [Tailscale 私有管理通道](TAILSCALE_SETUP.md)：安装 Tailscale、加入私人 tailnet，并通过私网 SSH/WinSCP 管理服务器。
 4. [使用 WinSCP 登录 Lightsail](WINSCP_LIGHTSAIL.md)：Windows 安装、PEM 转 PPK、MagicDNS、首次 host key 核验、安全上传和换电脑流程。
+5. [Linux 自动更新与回滚](AUTOMATIC_UPDATES.md)：定时跟踪受保护的 main、低权限构建、原子切换、健康检查与失败回滚。
 
 ## 先理解三个边界
 
