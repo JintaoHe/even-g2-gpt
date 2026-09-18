@@ -11,9 +11,12 @@ log() {
   printf '%s even-agent-health: %s\n' "$(date --iso-8601=seconds)" "$*"
 }
 
-curl --fail --silent --show-error --output /dev/null --max-time 5 "${LOCAL_URL}"
+curl --fail --silent --show-error --output /dev/null --max-time 5 \
+  --retry 5 --retry-delay 1 --retry-all-errors "${LOCAL_URL}"
 curl --fail --silent --show-error --output /dev/null --max-time 10 \
+  --retry 5 --retry-delay 1 --retry-all-errors \
   --resolve "${PUBLIC_HOST}:443:127.0.0.1" "https://${PUBLIC_HOST}/healthz"
-curl --fail --silent --show-error --output /dev/null --max-time 15 "${CALENDAR_URL}"
+curl --fail --silent --show-error --output /dev/null --max-time 15 \
+  --retry 2 --retry-delay 1 --retry-all-errors "${CALENDAR_URL}"
 
 log 'local app, TLS ingress, and read-only Calendar probe passed'

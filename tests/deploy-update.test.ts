@@ -48,6 +48,7 @@ test('automatic updater is periodic, persistent, serialized, and filesystem cons
 test('production health monitoring exposes only a minimal public check and keeps Calendar probing local', () => {
   assert.match(caddy, /@backend path \/healthz \/ws\/conversation \/artifacts\/\*/);
   assert.match(healthScript, /http:\/\/127\.0\.0\.1:3001\/healthz/);
+  assert.match(healthScript, /--retry 5 --retry-delay 1 --retry-all-errors/);
   assert.match(healthScript, /--resolve "\$\{PUBLIC_HOST\}:443:127\.0\.0\.1"/);
   assert.match(healthScript, /http:\/\/127\.0\.0\.1:3001\/internal\/health\/calendar/);
   assert.match(healthService, /DynamicUser=true/);
