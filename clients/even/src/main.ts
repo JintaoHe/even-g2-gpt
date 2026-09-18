@@ -3,6 +3,7 @@ import { waitForEvenAppBridge, CreateStartUpPageContainer, TextContainerProperty
 import { ReadingHistory } from './reading-history';
 import { DisplaySession } from './display-session';
 import { conversationWebSocketUrl } from './backend-url';
+import { LocationController } from './location';
 
 const element = (id: string) => document.getElementById(id)!;
 const packagedBackendOrigin = typeof __EVEN_BACKEND_ORIGIN__ === 'string' ? __EVEN_BACKEND_ORIGIN__ : '';
@@ -12,6 +13,7 @@ let connecting = false;
 let shutdown: Promise<void> | undefined;
 pager.reset('请在伴随页面连接后端。\n连接后可输入文字或开启麦克风。');
 let bridge: EvenAppBridge | undefined, socket: WebSocket | undefined;
+let locationController: LocationController | undefined, locationAvailable = false;
 let connected = false, speech = false, audio = false, audioEpoch = 0, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
 const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
@@ -69,6 +71,7 @@ element('connect').onclick = async () => {
     const event = JSON.parse(data);
     if (event.type === 'ready') {
       connected = true; speech = event.capabilities?.speech === true;
+      locationAvailable = event.capabilities?.location === true;
       channel = event.capabilities?.provider === 'api' ? 'API' : event.capabilities?.provider === 'codex-cli' ? 'CLI' : '?';
       element('channel').textContent = `当前测试：${channel} · 模型 ${event.models?.reply ?? '?'} · 语音转录仍走 API`;
       pager.reset('已连接。\n可输入文字，或主动开启麦克风。');
@@ -92,6 +95,11 @@ element('connect').onclick = async () => {
     if (event.type === 'exit.confirmation_required') void exitDialog();
     if (event.type === 'error') { status = `错误：${event.code}`; void stopAudio(); }
     if (event.type === 'notice') status = event.text;
+    if (event.type === 'location.status') {
+      status = event.state === 'available'
+        ? `位置可用${typeof event.accuracy_m === 'number' ? ` · 精度约 ${event.accuracy_m}m` : ''}（未保存）`
+        : event.state === 'cleared' ? '位置已清除' : '位置不可用，请手动提供出发地';
+    }
     refresh();
   };
   ws.onclose = () => { if (socket !== ws) return; connected = false; state = 'closed'; answerId = undefined; token = ''; status = '已断开，请重新连接'; element('channel').textContent = '通道：已断开'; void stopAudio(); refresh(); };
@@ -119,6 +127,22 @@ element('exit').onclick = () => { if (connected) send({ type: 'exit.request' });
 element('prev').onclick = () => { pager.move(-1); refresh(); };
 element('next').onclick = () => { pager.move(1); refresh(); };
 element('latest').onclick = () => { pager.latest(); refresh(); };
+element('locate-once').onclick = async () => {
+  if (!connected || !bridge || !locationAvailable || !locationController) { status = '定位尚不可用或后端未连接'; refresh(); return; }
+  status = '正在获取一次性位置'; refresh();
+  const ok = await locationController.once().catch(() => false);
+  if (!ok) { status = '定位被拒绝、超时或结果无效'; refresh(); }
+};
+element('locate-start').onclick = async () => {
+  if (!connected || !bridge || !locationAvailable || !locationController) { status = '定位尚不可用或后端未连接'; refresh(); return; }
+  status = '正在请求连续定位'; refresh();
+  const ok = await locationController.start();
+  status = ok ? '连续定位已开启 · 15 秒/25 米更新' : '连续定位未开启'; refresh();
+};
+element('locate-stop').onclick = async () => {
+  const ok = await locationController?.stop(); send({ type: 'location.clear' });
+  status = ok === false ? '定位停止状态未确认，位置已从会话清除' : '连续定位已停止，位置已清除'; refresh();
+};
 element('preview').onwheel = event => {
   event.preventDefault();
   if (event.deltaY) { pager.move(event.deltaY < 0 ? -1 : 1); refresh(); }
@@ -169,6 +193,7 @@ void (async () => {
   const candidate = await waitForEvenAppBridge();
   if (disposed) return;
   bridge = candidate;
+  locationController = new LocationController(candidate, report => send(report));
   console.info('[even-agent] ready');
   candidate.onEvenHubEvent(event => {
     const system = event.sysEvent?.eventType;
@@ -195,7 +220,7 @@ void (async () => {
   });
   await restoreDisplay();
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
-window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void stopAudio(); socket?.close(); });
+window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void stopAudio(); void locationController?.stop(); socket?.close(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) { void stopAudio(); send({ type: 'pause' }); } });
 if (import.meta.env.DEV) {
   void import('../dev/reading-demo').then(({ installReadingDemo }) => installReadingDemo(events => {

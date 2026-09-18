@@ -47,6 +47,12 @@ local and Git-ignored. Package-ID availability needs an explicit CLI login;
 portal upload, packaged WebView Origin validation, Private Testing and physical
 G2/R1 acceptance remain outstanding.
 
+After adding the manual location transport POC, the same pinned CLI produced a
+47,024-byte `0.2.0` candidate with `min_app_version 2.2.9` and SHA-256
+`C227476FA2AB398A0C5382EAD325C4BDE3ED0ECCD443995077E2DFA4E3FA96E6`.
+It is also local and Git-ignored; this build has not been uploaded or certified
+on a real phone/G2.
+
 ## Recurring meetings: bounded first implementation
 
 Google supports a recurring parent event with `recurrence` (RRULE), an IANA
@@ -102,9 +108,10 @@ safe arbitrary-self-host client. Each self-hoster must rebuild with their own ex
 origin unless the platform later provides a reviewable endpoint-configuration model.
 Wildcards, open Origin checks and a shared maintainer token are not acceptable.
 
-The phone companion text box is already present. Location remains unrequested in
-`0.1.0`; add the manifest permission only with an on-demand one-shot design, denial
-fallback, no-default-retention rule and physical-device validation. See
+The phone companion text box is already present. The `0.2.0` source candidate adds
+manual one-shot and continuous location transport with validation and session-only
+retention. It does not provide reverse geocoding, traffic routes, or LLM location
+context yet and still requires physical-device permission/lifecycle validation. See
 [companion input, location, and safe distribution](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md).
 
 Even Hub publication requires platform review; no approval is implied here.

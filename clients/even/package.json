@@ -2,15 +2,15 @@
   "name": "even-agent-client",
   "private": true,
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/verify-build.mjs",
-    "pack:hub": "npm run build && evenhub pack app.json dist -o glass-assistant-0.1.0.ehpk --sdk-ver 0.0.14",
-    "pack:hub:check": "npm run build && evenhub pack app.json dist -o glass-assistant-0.1.0.ehpk --sdk-ver 0.0.14 -c",
+    "pack:hub": "npm run build && evenhub pack app.json dist -o glass-assistant-0.2.0.ehpk --sdk-ver 0.0.14",
+    "pack:hub:check": "npm run build && evenhub pack app.json dist -o glass-assistant-0.2.0.ehpk --sdk-ver 0.0.14 -c",
     "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {

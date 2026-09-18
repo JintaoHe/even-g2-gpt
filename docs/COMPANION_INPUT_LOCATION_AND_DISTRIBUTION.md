@@ -1,8 +1,9 @@
 # Companion input, location, and safe distribution
 
 Status: design decision recorded on 2026-09-18. The phone text input already
-exists in the SDK client. Location and arbitrary-recipient delivery are planned,
-not implemented in the current `0.1.0` package.
+exists in the SDK client. Version `0.2.0` now contains a manual location transport
+POC. Arbitrary-recipient delivery, address lookup, routing, and LLM location context
+remain disabled.
 
 ## Product identity
 
@@ -55,29 +56,55 @@ SDK `0.0.14` exposes one-shot and continuous phone location through
 location can include latitude, longitude, accuracy, altitude, speed, heading, and
 timestamp.
 
-The first implementation should be deliberately narrower than the SDK permits:
+The `0.2.0` transport POC is deliberately narrower than the SDK permits:
 
-1. request a **one-shot** high-accuracy location only after an explicit route,
-   nearby-place, or current-location question;
-2. show a clear phone permission prompt and a concise glasses status;
-3. apply a short timeout and ask the user for a city or starting point if location
-   is denied, stale, inaccurate, or unavailable;
-4. send coordinates to a server-side routing provider over WSS; do not place a map
-   key in the `.ehpk`;
-5. give the LLM a structured route result (origin label, destination, duration,
+1. offer separate phone buttons for a **one-shot** high-accuracy fix and explicit
+   continuous updates; continuous mode uses a 15-second / 25-metre request policy
+   and always has a visible stop-and-clear control;
+2. rely on the host permission prompt and show only availability / reported
+   accuracy in the companion status, never the raw coordinates;
+3. apply a 10-second SDK timeout; the WSS boundary rejects invalid coordinates,
+   fixes older than two minutes, excessive clock skew, unexpected fields, and
+   implausible accuracy;
+4. keep accepted fixes only in the current authenticated WSS connection and clear
+   them on request or disconnect;
+5. when route support is added, send coordinates only to a server-side routing or
+   reverse-geocoding provider; do not place a map key in the `.ehpk`;
+6. give the LLM a structured route result (origin label, destination, duration,
    distance, traffic basis, and observation time) instead of raw coordinates unless
    raw coordinates are genuinely required;
-6. do not retain exact location in conversation history, logs, analytics, or MD
+7. do not retain exact location in conversation history, logs, analytics, or MD
    exports by default; redact coordinates from errors;
-7. do not start continuous/background tracking in the first release.
+8. never start continuous/background tracking automatically.
 
 The SDK provides coordinates, not traffic-aware travel time. “How long to Costco
 from here?” additionally needs a route provider. A provider choice must be evaluated
 for current-traffic coverage, cost caps, key restrictions, retention terms, China
 availability, and travel-region behavior before implementation.
 
-The current `0.1.0` manifest does **not** request location. Add it only when the
-feature, denial fallback, privacy text, and real-device tests are ready.
+Do not promise a “within two metres” address. Phone GPS accuracy varies with the
+device, buildings, weather, and permission mode, while reverse geocoding returns an
+estimated nearest addressable place rather than proof that the user is at that
+address. The intended disclosure policy is:
+
+- use the exact fix only inside the server-side route/geocoding request;
+- if reported accuracy is roughly 30 metres or better, show “near” the returned
+  street/address together with the accuracy radius;
+- for a weaker fix, downgrade to neighbourhood/city or ask for a starting point;
+- provide the LLM only a human-readable origin label, accuracy radius, observation
+  time, and route result — never the raw latitude/longitude by default.
+
+Google Routes can provide distance, duration, and traffic-aware routing; reverse
+geocoding is a separate Google Maps Platform request. Both require a separately
+enabled, billed server-side Maps key restricted to the required APIs and production
+server IP. The existing Google Calendar OAuth client is not that key. No Maps API is
+enabled or called by the current POC.
+
+The `0.2.0` manifest requests `location` for this manual POC. It does not inject
+coordinates into the model and does not yet answer route or nearby-place questions.
+Real-device tests must verify the permission prompt, denial/timeout behavior,
+foreground/background lifecycle, reported accuracy, and stop semantics before the
+feature is described as generally available.
 
 ## Safe self-hosted distribution
 
@@ -113,10 +140,10 @@ not after a user has already shared data.
   typed email/URL/Unicode input, authentication, empty/oversized input, and display
   history. Design structured recipient entry and confirmation without enabling
   arbitrary delivery yet.
-- **V1.3 real G2:** validate the phone text box inside the packaged WebView. Add a
-  location proof of concept only after the voice/WSS/lifecycle matrix passes; test
-  allow/deny, stale/low-accuracy fixes, timeout, network switching, travel-region
-  behavior, and proof that exact coordinates are not persisted.
+- **V1.3 real G2:** validate the phone text box and the `0.2.0` location transport
+  POC inside the packaged WebView. Test allow/deny, stale/low-accuracy fixes,
+  timeout, continuous stop, network switching, travel-region behavior, and proof
+  that exact coordinates are not persisted.
 - **Post-V1 safety action:** add fixed/allowlisted To/CC recipients with an explicit
   per-send preview and confirmation. Do not let free-form model output directly
   address email.
@@ -128,3 +155,6 @@ Official references:
 - [Networking](https://hub.evenrealities.com/docs/build/networking)
 - [Packaging](https://hub.evenrealities.com/docs/ship/packaging)
 - [App Submission and QA](https://hub.evenrealities.com/docs/ship/app-submission)
+- [Google Routes API overview](https://developers.google.com/maps/documentation/routes)
+- [Google reverse geocoding](https://developers.google.com/maps/documentation/geocoding/reverse-geocoding)
+- [Google Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing)

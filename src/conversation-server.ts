@@ -20,13 +20,14 @@ import { CalendarControl } from './calendar-control.js';
 import { CalendarDialogue } from './calendar-dialogue.js';
 import { createCalendarPlanner, type CalendarPlanner } from './calendar-planner.js';
 import { createCalendarAnswerer, type CalendarAnswerer } from './calendar-answer.js';
+import { locationStatus, parseLocationReport, type EphemeralLocation } from './location.js';
 
 type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
 export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
   models?: { intent: string; reply: string };
-  capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean };
+  capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean; location?: boolean };
   jobs?: JobStore;
   mail?: MailSender;
   draftGenerator?: DraftGenerator;
@@ -130,6 +131,7 @@ export function createConversationServer(options: {
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
     let mailApproval: { id: string; token: string; expires: number; retryAttempt?: number } | undefined;
+    let latestLocation: EphemeralLocation | undefined;
     let unsubscribeCalendarHealth: (() => void) | undefined;
     const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
       (jobId, result) => { if (!closed) { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); } }) : undefined;
@@ -233,6 +235,20 @@ export function createConversationServer(options: {
             try { options.jobs.acknowledgeReceipt(msg.id); send({ type: 'notice', text: '已记录你确认收到，不会再重发这份文件。' }); }
             catch { send({ type: 'notice', text: '暂无可关联的发送记录，或发送仍在进行。' }); }
             send({ type: 'jobs.list', jobs: options.jobs.list() }); break;
+          case 'location.report': {
+            if (options.capabilities?.location !== true) { send({ type: 'location.status', state: 'disabled' }); break; }
+            try {
+              const report = parseLocationReport(msg);
+              latestLocation = report.location;
+              send(locationStatus(report.location));
+            } catch {
+              send({ type: 'location.status', state: 'unavailable', reason: 'invalid_or_stale' });
+            }
+            break;
+          }
+          case 'location.clear':
+            if (Object.keys(msg).some(key => key !== 'type')) throw new Error('Invalid location clear');
+            latestLocation = undefined; send({ type: 'location.status', state: 'cleared' }); break;
           case 'jobs.email.cancel': mailApproval = undefined; send({ type: 'notice', text: '已取消本次发送确认，没有发送邮件。' }); break;
           case 'jobs.email.prepare': {
             if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
@@ -299,7 +315,7 @@ export function createConversationServer(options: {
     client.on('close', () => {
       closed = true; clearTimeout(authTimer); clearInterval(idle); clearTimeout(lifetime);
       unsubscribeCalendarHealth?.();
-      clearCapture(); conversation.close(); if (owner === client) owner = undefined;
+      latestLocation = undefined; clearCapture(); conversation.close(); if (owner === client) owner = undefined;
     });
   });
   return { http, wss, close: async () => {
@@ -347,7 +363,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner() : undefined,
     calendarAnswerer: calendar && hybrid.provider === 'api' ? createCalendarAnswerer() : undefined,
     draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
-    capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key },
+    capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key, location: true },
     ingress: publicHost ? { publicHosts: [publicHost], allowedOrigins: publicOrigin ? [publicOrigin] : undefined } : undefined,
     transcriber: delta => {
       if (!key) throw new Error('Speech requires OPENAI_API_KEY');

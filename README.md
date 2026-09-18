@@ -27,6 +27,7 @@ This is a development build. The browser conversation lab and Even SDK simulator
 | --- | --- |
 | Conversation | Mixed Chinese/English transcription, automatic utterance detection, contextual follow-ups, streamed text replies, interruption cancellation, and intent-based exit; no send button required for every utterance |
 | Companion input | Optional phone text box for questions and exact strings such as email addresses, URLs, and IDs; the glasses themselves do not provide a keyboard |
+| Location POC | Explicit phone controls for one-shot or continuous SDK location; authenticated WSS validation is implemented, but raw coordinates are not sent to the LLM or persisted, and address/traffic routing is not enabled yet |
 | Audio buffering | 800ms pre-trigger buffer preserves captured speech onset without adding an 800ms wait; it cannot eliminate every transcription omission |
 | Glasses reading | Live user transcription and final questions/answers; manual pagination and session history; link syntax removed from the display while original sources remain available for export |
 | Dialogue channels | OpenAI API by default; optional Codex CLI with waiting feedback, actual search events, timeout, and cancellation handling |

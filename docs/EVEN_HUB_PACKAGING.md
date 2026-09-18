@@ -6,7 +6,7 @@
 
 - 显示名称：`Glass Assistant`
 - Package ID：`com.eveng2assistant.glassassistant`
-- App 版本：`0.1.0`
+- App 版本：`0.2.0`（定位传输 POC；首个已验证本地包为 `0.1.0`）
 - SDK：`@evenrealities/even_hub_sdk@0.0.14`
 - CLI：`@evenrealities/evenhub-cli@0.1.14`
 - CLI 自动写入的最低 Even App 版本：`2.2.9`
@@ -21,10 +21,11 @@
 
 1. `g2-microphone`：用户主动开始对话后才收音；退出、暂停、页面隐藏或断线会停收音。
 2. `network`：只允许 `https://calendar.eveng2assistant.com` 与 `wss://calendar.eveng2assistant.com`。
+3. `location`：仅在用户点击一次定位或连续定位后读取手机位置；连续定位可显式停止并清除。
 
 OpenAI、Google、Gmail 和 OAuth 凭据全部留在 Linux 后端。`.ehpk` 内只有公开后端地址，没有 `G2_CLIENT_TOKEN`、API key、OAuth refresh token 或邮箱密码。访问 token 由用户在手机伴随页面输入，只保存在当前 WebView 内存；页面关闭后需要重新输入。
 
-手机伴随页已经包含文字输入框，适合输入邮箱、URL、ID 或在不方便说话时发问；眼镜本身没有键盘。当前包没有申请定位权限。后续定位／路线功能与任意 To/CC 收件人都必须先完成显式授权、预览确认、最小留存和真机测试，详见 [伴随输入、定位与安全分发](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)。
+手机伴随页已经包含文字输入框，适合输入邮箱、URL、ID 或在不方便说话时发问；眼镜本身没有键盘。`0.2.0` 增加手动定位传输 POC：后端只校验当前 WSS 会话中的坐标，不写入对话／日志／MD，也不发送给 LLM。地址、路线和任意 To/CC 收件人仍须完成显式授权、预览确认、最小留存和真机测试，详见 [伴随输入、定位与安全分发](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)。
 
 Even 的 network whitelist 与浏览器的 Origin/CORS 是两道独立检查。当前后端继续严格校验 Host 与 Origin。真实 `.ehpk` 第一次连接时，如果 WebView 使用了不同的稳定 Origin，先从安全日志确认精确值，再决定是否加入后端 allowlist；不得为了跑通而允许任意 Origin、通配符或公开 3001 端口。
 
@@ -45,7 +46,7 @@ npm run pack:hub
 
 这意味着当前 `.ehpk` 只能作为个人 Private Testing 包。不得把它当作“每个用户填写自己服务器即可”的公共二进制：manifest 的精确 network whitelist 不会随输入框动态改变。自建用户需要用自己的域名重建 `.ehpk`；不能为方便公开发行而改成 wildcard whitelist、开放 Origin 或共享维护者服务器 token。
 
-`npm run build` 完成后会扫描 `dist/`：拒绝 source map、测试／开发目录、意外文件类型、私钥头和常见 secret assignment。`npm run pack:hub` 使用固定 SDK 版本推导最低 Even App 版本，输出 `glass-assistant-0.1.0.ehpk`。`.ehpk` 和 `dist/` 都被 Git 忽略。
+`npm run build` 完成后会扫描 `dist/`：拒绝 source map、测试／开发目录、意外文件类型、私钥头和常见 secret assignment。`npm run pack:hub` 使用固定 SDK 版本推导最低 Even App 版本，输出 `glass-assistant-0.2.0.ehpk`。`.ehpk` 和 `dist/` 都被 Git 忽略。
 
 若 Windows 系统 Node 不是 24，先安装／切换 Node 24。不要把 `--use-system-ca` 放进旧 Node 的 `NODE_OPTIONS`；企业证书环境可直接用 Node 24 的 `node.exe --use-system-ca` 启动 npm/CLI。不要关闭 TLS 验证。
 
@@ -67,7 +68,7 @@ npm run pack:hub:check
 3. 将 build 从 Draft 移到 Test；不要在真机验收前提交公开审核。
 4. 手机 Even Realities App 开启 Developer Mode，进入 `Me → Apps → Private builds` 并安装。
 5. 从眼镜主菜单启动。手机伴随页输入服务器配置的助手访问 token；不要输入 OpenAI key。
-6. 首次触发麦克风时核对真实权限提示，只应出现网络和 G2 麦克风权限。
+6. 首次触发麦克风与定位时分别核对真实权限提示；定位被拒绝时应用必须继续支持非定位对话。
 
 Private Testing 能验证真实包、manifest、权限和启动流程，但不等同于 Beta 的锁屏生命周期。平台目前也不提供自动安装测试，每轮上传／安装需要手动完成。
 
@@ -82,6 +83,7 @@ Private Testing 能验证真实包、manifest、权限和启动流程，但不�
 - MD 邮件发送确认与成功回执。
 - 单击收音／暂停、滑动阅读、双击系统退出框、取消退出、确认退出后重开。
 - Wi-Fi、蜂窝网络及二者切换；断网后的安全失败和恢复。
+- 一次定位、连续定位、停止／清除、拒绝、超时、低精度和页面退出；确认未自动开始后台跟踪。
 - 手机前台、后台、锁屏；Private build 先 smoke，Beta 再做 5 分钟锁屏 reviewer-parity 测试。
 - 30 分钟、1 小时、2 小时稳定性、延迟、电量与温度。
 - 退出后能正常启动 Conversate 等第一方应用。
@@ -93,7 +95,7 @@ Private Testing 能验证真实包、manifest、权限和启动流程，但不�
 ```powershell
 git status --short
 npm run build
-Get-FileHash .\glass-assistant-0.1.0.ehpk -Algorithm SHA256
+Get-FileHash .\glass-assistant-0.2.0.ehpk -Algorithm SHA256
 Set-Location ..\..
 node scripts/audit-public.mjs --worktree
 ```
