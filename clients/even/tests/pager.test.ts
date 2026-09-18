@@ -1,11 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { paginate, Pager } from '../src/pager.ts';
+import { paginate, Pager, wrapLines } from '../src/pager.ts';
 test('mixed Chinese/English paginates without losing content or splitting surrogate pairs', () => {
   const text = '你好 Even hello 🌍 '.repeat(80);
   assert.equal(paginate(text).join('').replaceAll('\n', ''), text);
   assert.ok(paginate(text).length > 1);
   for (const page of paginate(text)) assert.ok(page.split('\n').length <= 5);
+});
+test('short Latin words stay intact in mixed Chinese text when they fit a line', () => {
+  const lines = wrapLines('中文中文 Coinbase 和 lemon juice', 12);
+  assert.ok(lines.some(line => line.includes('Coinbase')));
+  assert.ok(lines.some(line => line.includes('lemon')));
+  assert.ok(!lines.some(line => /^(?:base|mon)$/.test(line.trim())));
+  assert.equal(lines.join(''), '中文中文 Coinbase 和 lemon juice');
 });
 test('streaming keeps completed pages and selected page stable; navigation is bounded', () => {
   const pager = new Pager(); pager.append('a'.repeat(900)); pager.move(1);

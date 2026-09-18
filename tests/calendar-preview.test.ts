@@ -7,8 +7,14 @@ test('normal time and location edit fits one actual SDK page, no repeated zones/
   const preview = compactCalendarPreview('update', { ...before, start: '2026-09-17T09:00-05:00', end: '2026-09-17T09:30-05:00', location: '园区咖啡馆' }, before);
   assert.equal(paginate(preview).length, 1);
   assert.match(preview, /原 2026-09-16 18:00–19:00/); assert.match(preview, /新 2026-09-17 09:00–09:30/);
-  assert.match(preview, /地点：家 → 园区咖啡馆/); assert.match(preview, /其余不变/);
+  assert.match(preview, /地点：家 → 园区咖啡馆/); assert.doesNotMatch(preview, /其余不变|时间不变/);
   assert.doesNotMatch(preview, /洛杉矶|纽约|这段没有变化/);
+});
+test('an appended note shows only the addition and keeps unchanged fields off the glasses', () => {
+  const preview = compactCalendarPreview('update', { ...before, notes: before.notes + ' 新增 lemon juice' }, before, [], true);
+  assert.match(preview, /备注：新增 lemon juice/);
+  assert.doesNotMatch(preview, /时间不变|这段没有变化的备注不需要在预览中重复.*→/);
+  assert.equal(paginate(preview).length, 1);
 });
 test('conflict and guest notification fit two pages; oversized changes are not silently truncated', () => {
   const preview = compactCalendarPreview('update', { ...before, location: '园区咖啡馆' }, before, ['重叠事件', '另一事件'], true);

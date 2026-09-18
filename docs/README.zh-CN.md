@@ -25,6 +25,8 @@
 
 ## 部署、安全与贡献
 
+- [部署与账号设置指南](setup/README.md)：面向初次运维者的 Linux、Google OAuth Production 和 Tailscale 分步手册。
+- [使用 WinSCP 登录 Lightsail](setup/WINSCP_LIGHTSAIL.md)：通过 Tailscale 私网登录 SFTP、转换密钥、核对 host key 及安全上传的逐步指南。
 - [项目结构与部署边界](PROJECT_STRUCTURE.md)：后端白名单构建、客户端／模拟器隔离。
 - [Linux 运维](LINUX_OPERATIONS.md)：进程、systemd、任务存储、备份和迁移。
 - [发布准备清单](RELEASE_READINESS.md)：已验证范围与真机／Linux／Even Hub 验收。

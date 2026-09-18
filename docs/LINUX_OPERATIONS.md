@@ -1,6 +1,6 @@
 # Linux lifecycle, durable jobs and artifacts
 
-Implemented foundation, single-host/single-user deployment. Windows automated tests pass; an actual Linux deployment is still required before claiming production readiness. Requires Node 24+ (built-in SQLite).
+Implemented foundation for a single-host/single-user deployment. Windows automated tests pass, and the backend has passed host-level deployment checks on Ubuntu 24.04. Physical G2/R1 end-to-end acceptance and Even Hub publication are still required before product release. Requires Node 24+ (built-in SQLite). For a first-time walkthrough, start with the [deployment and account setup hub](setup/README.md).
 
 ## Process lifecycle
 
@@ -43,7 +43,7 @@ Build with `npm run build:server` and deploy only the resulting successful `dist
 2. Create `/home/even-agent/.codex` with permissions 0700 owned by that user. Log in as that same user using `codex login --device-auth`, then verify `codex login status`. Do not copy a Windows credential file into the repository or image. Login storage must be persistent and writable for credential refresh.
 3. Create `/etc/even-agent.env` with mode 0600, readable by the service manager, containing G2_CLIENT_TOKEN and selected provider/model settings. Include OPENAI_API_KEY only when API dialogue or speech is desired. Use an absolute CODEX_CLI_PATH if CLI is not on the service PATH. The unit's ReadWritePaths assumes the Codex auth directory above; adjust explicitly if your installation differs.
 4. Review/install the systemd unit, reload the manager and start the service. The listener remains bound to `127.0.0.1`. For production, set `EVEN_PUBLIC_HOST=calendar.eveng2assistant.com` and `EVEN_PUBLIC_ORIGIN=https://calendar.eveng2assistant.com`, then place the included Caddy configuration in front of it. Only ports 80/443 should be public; never expose port 3001. The root domain and unrelated subdomains remain unassigned.
-5. Confirm text conversation, job export/download, disconnect/reconnect, SIGTERM shutdown, forced service restart, login persistence and absence of leftover CLI children on Linux. Host bootstrap, security updates, reboot recovery, SSH hardening, UFW, Node 24 and Caddy installation were verified on the target Lightsail instance on 2026-09-17; application secrets, service startup, public TLS and end-to-end client behavior remain pending.
+5. Confirm text conversation, job export/download, disconnect/reconnect, SIGTERM shutdown, forced service restart, login persistence and absence of leftover CLI children on Linux. On the target Lightsail instance on 2026-09-17, host bootstrap, security updates, reboot recovery, SSH hardening, UFW, Node 24, Caddy, production secrets, service startup/restart, Calendar refresh, SMTP authentication, authenticated WebSocket handshake, public TLS/security headers and unauthenticated access rejection were verified. The deployment smoke sent no email and changed no calendar event. Physical G2/R1 end-to-end behavior remains pending.
 6. Back up while stopped, or use a SQLite-aware consistent backup; do not blindly copy only the main SQLite file while WAL is active. Protect snapshots, transcripts and documents as private data. Container installations must mount persistent data/auth volumes and forward termination signals.
 
 ## Production ingress boundary

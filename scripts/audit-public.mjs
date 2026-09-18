@@ -44,7 +44,7 @@ for (const entry of entries) {
     || /(^|\/)(google-oauth-client|google-calendar-auth|client_secret[^/]*)\.json$/i.test(path)
     || /(^|\/)\.env(?:\.|$)/.test(path) && path !== '.env.example'
     || path === 'tests/recording-regression.md') report('Private/generated path');
-  if (!/\.(?:ts|js|mjs|json|md|html|css|service|yml|yaml)$/.test(path)
+  if (!/\.(?:ts|js|mjs|sh|json|md|html|css|service|timer|yml|yaml)$/.test(path)
     && !['.gitignore', '.env.example', '.github/CODEOWNERS', 'deploy/Caddyfile'].includes(path)) report('Not an allowed source/document file');
   if (working) {
     let stat;

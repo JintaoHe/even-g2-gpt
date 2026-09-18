@@ -17,8 +17,18 @@ export function naturalMailApproval(text: string) {
     && !/发给\s*(?!我|自己|固定邮箱)[^\s，。！]|发(?:送)?到\s*(?!我的邮箱|我邮箱|固定邮箱)[^\s，。！]|\bto\s+(?!me\b|my\b|the fixed\b)/i.test(s);
 }
 export const mailFallback = '请先稍等片刻，检查垃圾邮件、所有邮件，并搜索“Even 笔记”。也可到网页文件列表直接下载 MD／ICS；无需重新生成文件或开放收件箱权限。';
+function clipForGlasses(text: string, cells: number) {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  let result = '', used = 0;
+  for (const char of clean) {
+    const width = /^[\x20-\x7e]$/.test(char) ? 1 : 2;
+    if (used + width > cells) return result.trimEnd() + '…';
+    result += char; used += width;
+  }
+  return result;
+}
 export function deliveryResult(result: string): string {
-  return result === 'accepted' ? '邮件已成功提交发送（邮件服务器已接受），请确认是否收到？你可以说“收到了”或“没收到”。我无法直接核实收件箱送达情况。'
+  return result === 'accepted' ? '邮件服务器已接受。请确认是否收到，可说“收到了”或“没收到”；我无法查看收件箱。'
     : result === 'sending' ? '邮件正在发送，请勿重复确认。'
     : result === 'failed' ? '邮件发送失败，文件仍已保存。可以要求重发并再次确认，或在网页直接下载。不会自动重发。'
     : '发送结果暂时无法确定，可能已经发出。请先检查邮箱；确认没收到后可以要求重发，或在网页直接下载。不会自动重发。';
@@ -48,9 +58,9 @@ export class DeliveryDialogue implements DialogueModel {
     const prior = this.jobs.mailState(this.jobId);
     if (prior) { delta(deliveryResult(prior)); return; }
     const metadata = this.draft.document.presentation;
-    const prompt = prefix + `文件已经生成：${metadata.filename}\n${metadata.summary}` +
+    const prompt = prefix + `文件已生成：${clipForGlasses(metadata.filename, 52)}\n摘要：${clipForGlasses(metadata.summary, 72)}` +
       (this.draft.calendar ? `\n\n日历文件：\n${calendarDetails(this.draft.calendar)}\n不包含自动通知或闹钟。` : '') +
-      (this.sender ? `\n\n${this.draft.calendar ? '请核对以上日期与主时区。' : ''}确认发送到固定邮箱吗？可以说“可以，发给我吧”，也可以要求修改、查看全文或说“取消发送”。` : '\n\n邮件发送未启用。文件已保存，可在网页下载；没有发送邮件。');
+      (this.sender ? `\n\n${this.draft.calendar ? '请核对日期与主时区。' : ''}发送到固定邮箱？说“确认发送”或“取消发送”。` : '\n\n邮件发送未启用。文件已保存，可在网页下载；没有发送邮件。');
     delta(prompt);
     if (this.sender) this.approval = { id: this.jobId, prompt, expires: this.now() + 5 * 60000 };
   }

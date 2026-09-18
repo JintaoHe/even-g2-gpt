@@ -6,7 +6,7 @@
 
 **用户自建后端，个人单用户使用。** API 是默认对话通道，也可选 Codex CLI。密钥、日历授权与邮件凭据只保存在自己的后端，不进入眼镜客户端或公开仓库。
 
-当前为开发测试版：网页对话实验室与 Even SDK 模拟器已接通；**真实 G2/R1、Linux 部署和 Even Hub 发布仍待验收**。本仓库不是已上架应用，也不提供托管的多用户服务。
+当前为开发测试版：网页对话实验室与 Even SDK 模拟器已接通，单用户 Linux 后端已通过主机级部署检查；**真实 G2/R1 端到端测试和 Even Hub 发布仍待验收**。本仓库不是已上架应用，也不提供托管的多用户服务。
 
 ## 目录
 
@@ -134,7 +134,7 @@ docs/                  配置、运维、设计与验收文档
 
 后端部署包不含网页实验室、SDK 前端、模拟器、测试、密钥或本地数据。SDK 单独构建；Linux 凭据与数据单独配置。当前服务监听 loopback，公网 HTTPS/WSS 与 Even Hub 网络配置仍待集成，不能直接开放端口当作生产部署。
 
-详见 [部署边界](docs/PROJECT_STRUCTURE.md)、[Linux 进程、存储与迁移](docs/LINUX_OPERATIONS.md)。
+详见 [部署边界](docs/PROJECT_STRUCTURE.md)、[Linux 进程、存储与迁移](docs/LINUX_OPERATIONS.md) 和 [Linux 自动更新与回滚](docs/setup/AUTOMATIC_UPDATES.md)。
 
 ## 安全与数据边界
 

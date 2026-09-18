@@ -61,3 +61,25 @@ test('manual question/history reading is not stolen when answer starts', () => {
   h.move(-1); h.event({ type: 'answer.start', id: 1 }); assert.equal(h.current, 'ready');
   h.latest(); assert.equal(h.selected?.role, 'Even');
 });
+
+test('long content uses an overlapping line window while short content keeps pages', () => {
+  const h = new ReadingHistory();
+  h.event({ type: 'answer.start', id: 1 });
+  h.event({ type: 'answer.delta', id: 1, text: Array.from({ length: 14 }, (_, i) => `第${i + 1}行`).join('\n') });
+  h.event({ type: 'answer.done', id: 1 });
+  assert.equal(h.scrolling, true);
+  assert.match(h.label, /滚动 1–5\/14行/);
+  assert.match(h.current, /第1行[\s\S]*第5行/);
+  h.move(1);
+  assert.match(h.label, /滚动 4–8\/14行/);
+  assert.match(h.current, /第4行[\s\S]*第8行/);
+  h.move(-1);
+  assert.match(h.label, /滚动 1–5\/14行/);
+
+  const short = new ReadingHistory();
+  short.event({ type: 'answer.start', id: 2 });
+  short.event({ type: 'answer.delta', id: 2, text: '短回答' });
+  short.event({ type: 'answer.done', id: 2 });
+  assert.equal(short.scrolling, false);
+  assert.match(short.label, /1\/1页/);
+});

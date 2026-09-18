@@ -11,7 +11,32 @@
 - Source-only repository; separate SDK/simulator dependencies and server-only build.
 
 This is a development checkpoint, not a production or Even Hub approval claim.
-Linux deployment and physical G2/R1 acceptance remain outstanding.
+The single-user Linux backend has passed host-level deployment and security checks;
+physical G2/R1 end-to-end acceptance remains outstanding.
+
+## Ordered deployment acceptance
+
+Keep this sequence so backend, development tooling and the eventual Hub package
+remain separate:
+
+1. Run read-only production ingress checks first: HTTPS, authenticated WSS,
+   rejected invalid Origin/token, closed public port 3001 and Calendar health.
+2. Keep the official simulator local and point its development-only Vite proxy
+   at `wss://calendar.eveng2assistant.com`. Exercise text, bilingual speech,
+   search, Calendar read, exit and reconnect without opening another server port.
+3. Add the packaged client's production WSS endpoint and exact `network`
+   whitelist only after the simulator path passes. Do not bundle a client token
+   or provider credential.
+4. Select the permanent reverse-domain package ID, build and pack an `.ehpk`,
+   then use Even Hub Private Testing to validate real manifest permissions.
+5. Finish with physical G2/R1 acceptance for microphone, BLE/input timing,
+   phone backgrounding and lifecycle behavior before Beta or submission.
+
+The public backend transport and security checks passed on 2026-09-17. A local
+Vite-to-production-WSS authenticated handshake and an interactive simulator
+text request/response rendered on the glasses display also passed. Bilingual
+speech, search, Calendar read, exit and reconnect remain separate step-2
+acceptance cases; this text smoke test does not certify them or real hardware.
 
 ## Recurring meetings: bounded first implementation
 
@@ -50,7 +75,7 @@ References checked 2026-09-16:
 
 Keep the packaged SDK client separate from the private server runtime. Before
 submission: validate real-device lifecycle, configure a production HTTPS/WSS
-endpoint, remove local debug configuration, and document data flows, retention,
+endpoint in the packaged client, remove local debug configuration, and document data flows, retention,
 deletion, permissions, support and privacy practices. Never ship provider keys,
 OAuth refresh tokens or operator email credentials in the client package.
 

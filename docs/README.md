@@ -25,6 +25,8 @@ The overview and this index are bilingual. Detailed guides below retain their ex
 
 ## Deployment, security, and contributions
 
+- [Deployment and account setup hub (Chinese)](setup/README.md): step-by-step Linux, Google OAuth production, and Tailscale guides for first-time operators.
+- [WinSCP to Lightsail (Chinese)](setup/WINSCP_LIGHTSAIL.md): step-by-step private SFTP login over Tailscale, key conversion, host-key verification, and safe uploads.
 - [Project and deployment boundaries](PROJECT_STRUCTURE.md): allowlisted server builds and client/simulator separation.
 - [Linux operations](LINUX_OPERATIONS.md): processes, systemd, task storage, backups, and migration.
 - [Release readiness](RELEASE_READINESS.md): verified scope and physical-device/Linux/Even Hub acceptance gates.

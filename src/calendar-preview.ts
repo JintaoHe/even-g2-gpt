@@ -17,6 +17,12 @@ function clip(text: string, cells: number) {
   for (const c of text) { const width = /[\x20-\x7e]/.test(c) ? 1 : 2; if (used + width > cells) return result + '…'; result += c; used += width; }
   return result;
 }
+function appendedNote(before: string, after: string) {
+  const prior = before.trim();
+  if (!prior || !after.startsWith(prior)) return undefined;
+  const addition = after.slice(prior.length).replace(/^[\s,，;；。.、:：]+/, '').trim().replace(/^新增[\s:：]*/, '');
+  return addition || undefined;
+}
 export function previewLineCount(text: string, columns = 40) {
   let lines = 1, width = 0;
   for (const c of text) {
@@ -53,7 +59,6 @@ export function compactCalendarPreview(kind: CalendarKind, event: CalendarEvent,
   if (before && kind === 'update') {
     const oldTime = when(before, zone), newTime = when(event, zone);
     if (oldTime !== newTime || before.allDay !== event.allDay) lines.push(`原 ${oldTime}`, `新 ${newTime}`);
-    else lines.push(`时间不变：${newTime}`);
     if (before.timezone !== event.timezone) lines.push(`时区：${zones[before.timezone] ?? (before.timezone || '全天')}→${label}`);
     for (const [key, name] of [['location', '地点'], ['title', '标题'], ['notes', '备注']] as const) {
       if (key === 'notes' && before.notes !== event.notes && /【期限】/.test(event.notes)) {
@@ -62,7 +67,10 @@ export function compactCalendarPreview(kind: CalendarKind, event: CalendarEvent,
         lines.push(event.notes.match(/【期限】[^。]*。/)![0]);
         continue;
       }
-      if (before[key] !== event[key]) lines.push(`${name}：${before[key] || '无'} → ${event[key] || '无'}`);
+      if (before[key] !== event[key]) {
+        const addition = key === 'notes' ? appendedNote(before.notes, event.notes) : undefined;
+        lines.push(addition ? `备注：新增 ${addition}` : `${name}：${before[key] || '无'} → ${event[key] || '无'}`);
+      }
     }
   } else {
     lines.push(when(event, zone));
@@ -73,7 +81,7 @@ export function compactCalendarPreview(kind: CalendarKind, event: CalendarEvent,
   if (alternative) lines.push(alternative);
   if (notifyGuests) lines.push(kind === 'create' ? '将邀请你的固定邮箱' : '将通知原受邀人');
   if (event.allDay) lines.push('未检查全天日程重叠');
-  lines.push(`${kind === 'update' ? '其余不变；' : ''}${alternative ? '保留原时间，' : ''}说“${shortConfirmation(kind)}”`);
+  lines.push(`${alternative ? '保留原时间，' : ''}说“${shortConfirmation(kind)}”`);
   const preview = lines.join('\n');
   if (previewLineCount(preview) > 10) throw new Error('CALENDAR_PREVIEW_TOO_LONG');
   return preview;

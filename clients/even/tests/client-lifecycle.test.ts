@@ -8,7 +8,7 @@ import { DisplaySession } from '../src/display-session.ts';
 
 // Run the actual browser entry point against deterministic SDK/DOM/socket doubles.
 // No network, credentials, microphone or simulator process is used by these tests.
-async function fixture() {
+async function fixture(startupResult = 0) {
   const elements = new Map<string, any>();
   const element = (id: string) => {
     if (!elements.has(id)) elements.set(id, { value: '', textContent: '' });
@@ -25,7 +25,7 @@ async function fixture() {
     close() { this.readyState = 3; this.onclose?.(); }
   }
   const bridge = {
-    createStartUpPageContainer: async () => { creates++; return 0; },
+    createStartUpPageContainer: async () => { creates++; return startupResult; },
     shutDownPageContainer: async () => { exits++; return true; },
     textContainerUpgrade: async (value: any) => { writes.push(value.content); return true; },
     audioControl: async (enabled: boolean) => { audio.push(enabled); return true; },
@@ -58,6 +58,13 @@ async function fixture() {
   return { element, connect, flush, tick: () => tick(), audio, writes, sockets,
     counts: () => ({ creates, exits }), systemExit: () => hub({ sysEvent: { eventType: events.SYSTEM_EXIT_EVENT } }) };
 }
+
+test('hot reload adopts an existing glasses container instead of splitting the displays', async () => {
+  const f = await fixture(1);
+  assert.deepEqual(f.counts(), { creates: 1, exits: 0 });
+  assert.match(f.writes[0], /请在伴随页面连接后端/);
+  assert.equal(f.element('bridge').textContent, 'Even SDK 已连接 · 576 × 288 显示');
+});
 
 for (const systemEvent of [false, true]) test(`exit then reconnect redraws with system exit event=${systemEvent}`, async () => {
   const f = await fixture();
