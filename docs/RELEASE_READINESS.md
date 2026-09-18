@@ -11,7 +11,8 @@
 - Source-only repository; separate SDK/simulator dependencies and server-only build.
 
 This is a development checkpoint, not a production or Even Hub approval claim.
-Linux deployment and physical G2/R1 acceptance remain outstanding.
+The single-user Linux backend has passed host-level deployment and security checks;
+physical G2/R1 end-to-end acceptance remains outstanding.
 
 ## Recurring meetings: bounded first implementation
 
@@ -50,7 +51,7 @@ References checked 2026-09-16:
 
 Keep the packaged SDK client separate from the private server runtime. Before
 submission: validate real-device lifecycle, configure a production HTTPS/WSS
-endpoint, remove local debug configuration, and document data flows, retention,
+endpoint in the packaged client, remove local debug configuration, and document data flows, retention,
 deletion, permissions, support and privacy practices. Never ship provider keys,
 OAuth refresh tokens or operator email credentials in the client package.
 

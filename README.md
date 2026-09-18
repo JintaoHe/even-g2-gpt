@@ -6,7 +6,7 @@ A personal AI assistant for Even Realities G2: bilingual Chinese/English voice c
 
 **Bring your own backend, for one trusted user.** OpenAI API is the default dialogue channel; Codex CLI is optional. Model keys, calendar authorization, and email credentials remain on your backend, never in the glasses client or public repository.
 
-This is a development build. The browser conversation lab and Even SDK simulator are connected; **physical G2/R1 testing, Linux deployment acceptance, and Even Hub publication are still pending**. This is not a published Even Hub app or a hosted multi-user service.
+This is a development build. The browser conversation lab and Even SDK simulator are connected, and the single-user Linux backend has passed host-level deployment checks; **physical G2/R1 end-to-end testing and Even Hub publication are still pending**. This is not a published Even Hub app or a hosted multi-user service.
 
 ## Contents
 
