@@ -25,7 +25,7 @@ fail() {
 }
 
 run_as_deployer() {
-  runuser -u "${UPDATE_USER}" -- env -i \
+  /usr/sbin/runuser -u "${UPDATE_USER}" -- env -i \
     HOME="${UPDATE_ROOT}/home" \
     PATH='/usr/local/bin:/usr/bin:/bin' \
     npm_config_cache="${UPDATE_ROOT}/npm-cache" \

@@ -9,7 +9,7 @@ const runtimeService = await readFile(new URL('../deploy/even-agent.service', im
 
 test('automatic updater follows only protected main and builds without service secrets', () => {
   assert.match(updateScript, /readonly UPDATE_BRANCH='main'/);
-  assert.match(updateScript, /runuser -u "\$\{UPDATE_USER\}" -- env -i/);
+  assert.match(updateScript, /\/usr\/sbin\/runuser -u "\$\{UPDATE_USER\}" -- env -i/);
   assert.match(updateScript, /npm --prefix "\$\{build_dir\}" test/);
   assert.match(updateScript, /run audit:public -- --worktree/);
   assert.match(updateScript, /ci --ignore-scripts/);
