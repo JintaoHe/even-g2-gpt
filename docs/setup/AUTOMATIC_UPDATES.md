@@ -6,7 +6,7 @@
 
 - 只拉取固定公开仓库的 `main`，不执行 PR 分支、fork 或任意 URL。
 - GitHub 的 branch protection 与 CI 是第一道门；服务器会再次运行 typecheck、完整测试和公开源码扫描。
-- 仓库代码和 npm 命令以无登录权限的 `even-deploy` 用户运行。该用户不能读取 `/etc/even-agent.env`、日历 OAuth 文件、对话或生成文档。
+- 仓库代码和 npm 命令以无登录权限的 `even-deploy` 用户运行。root updater 只负责完成这次 UID/GID 下降；`setpriv --no-new-privs` 在 Git/npm 执行前恢复不可提权边界。该用户不能读取 `/etc/even-agent.env`、日历 OAuth 文件、对话或生成文档。
 - `npm ci` 使用 lockfile、`--ignore-scripts`、`--no-audit` 和 `--no-fund`。生产 Secret 不进入构建环境。
 - root 只负责把已验证的发布包复制到 root-owned release 目录、切换 symlink、重启服务和失败回滚。
 - timer 每 6 小时检查一次，并加入最多 30 分钟随机延迟；无新 commit 时不重启。
