@@ -6,6 +6,6 @@
     "start": "evenhub-simulator http://127.0.0.1:5173 --automation-port 9898"
   },
   "devDependencies": {
-    "@evenrealities/evenhub-simulator": "0.9.3"
+    "@evenrealities/evenhub-simulator": "0.9.5"
   }
 }
