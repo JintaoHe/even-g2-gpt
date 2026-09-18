@@ -32,11 +32,20 @@ remain separate:
 5. Finish with physical G2/R1 acceptance for microphone, BLE/input timing,
    phone backgrounding and lifecycle behavior before Beta or submission.
 
-The public backend transport and security checks passed on 2026-09-17. A local
-Vite-to-production-WSS authenticated handshake and an interactive simulator
-text request/response rendered on the glasses display also passed. Bilingual
-speech, search, Calendar read, exit and reconnect remain separate step-2
-acceptance cases; this text smoke test does not certify them or real hardware.
+The public backend transport and security checks passed on 2026-09-17. The
+local simulator-to-production-WSS path subsequently passed bilingual speech,
+search, Calendar read/create/update/cancel, confirmed email delivery, exit and
+reconnect on 2026-09-18. Production monitoring, automatic updates, verified
+daily backup and an isolated restore drill also passed. These results still do
+not certify physical hardware or phone lifecycle behavior.
+
+The packaged client now has an exact production HTTPS/WSS whitelist, a direct
+production WSS target, release-safe display name and reverse-domain identity.
+SDK tests and release-content scanning pass, and the official CLI produced a
+45,803-byte `0.1.0` `.ehpk` with `min_app_version 2.2.9`. The artifact remains
+local and Git-ignored. Package-ID availability needs an explicit CLI login;
+portal upload, packaged WebView Origin validation, Private Testing and physical
+G2/R1 acceptance remain outstanding.
 
 ## Recurring meetings: bounded first implementation
 
@@ -73,10 +82,10 @@ References checked 2026-09-16:
 
 ## Even Hub publication target
 
-Keep the packaged SDK client separate from the private server runtime. Before
-submission: validate real-device lifecycle, configure a production HTTPS/WSS
-endpoint in the packaged client, remove local debug configuration, and document data flows, retention,
-deletion, permissions, support and privacy practices. Never ship provider keys,
+Keep the packaged SDK client separate from the private server runtime. The
+production endpoint, manifest whitelist and debug-free bundle are now configured.
+Before submission: validate real-device lifecycle and document data flows, retention,
+deletion, support and privacy practices. Never ship provider keys,
 OAuth refresh tokens or operator email credentials in the client package.
 
 The current backend is a personal, single-owner deployment. The selected public
@@ -84,6 +93,19 @@ distribution model is user-operated backends, not a shared multi-user service.
 Each operator manages their own credentials, storage and quotas. Publishing
 the client must not expose the operator's private calendar or shared access token.
 Google public OAuth readiness is a separate gate from Even Hub review.
+
+The current `.ehpk` is pinned to the maintainer's exact backend origin and is for
+personal Private Testing only. It must not be uploaded as a general public binary:
+an installer would otherwise be directed to the maintainer's service. Even Hub's
+static network whitelist also means a text field cannot turn this package into a
+safe arbitrary-self-host client. Each self-hoster must rebuild with their own exact
+origin unless the platform later provides a reviewable endpoint-configuration model.
+Wildcards, open Origin checks and a shared maintainer token are not acceptable.
+
+The phone companion text box is already present. Location remains unrequested in
+`0.1.0`; add the manifest permission only with an on-demand one-shot design, denial
+fallback, no-default-retention rule and physical-device validation. See
+[companion input, location, and safe distribution](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md).
 
 Even Hub publication requires platform review; no approval is implied here.
 - [Even Hub developer terms](https://support.evenrealities.com/hc/en-us/articles/15606676690703-Even-Hub-Developer-Platform-Terms-of-Service)

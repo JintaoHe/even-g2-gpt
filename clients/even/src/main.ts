@@ -2,8 +2,10 @@ import { waitForEvenAppBridge, CreateStartUpPageContainer, TextContainerProperty
   OsEventTypeList, type EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { ReadingHistory } from './reading-history';
 import { DisplaySession } from './display-session';
+import { conversationWebSocketUrl } from './backend-url';
 
 const element = (id: string) => document.getElementById(id)!;
+const packagedBackendOrigin = typeof __EVEN_BACKEND_ORIGIN__ === 'string' ? __EVEN_BACKEND_ORIGIN__ : '';
 const pager = new ReadingHistory();
 const display = new DisplaySession();
 let connecting = false;
@@ -60,7 +62,7 @@ element('connect').onclick = async () => {
       await stopAudio();
       if (!await restoreDisplay()) return;
     }
-  const ws = socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/conversation`);
+  const ws = socket = new WebSocket(conversationWebSocketUrl(location, packagedBackendOrigin));
   ws.onopen = () => { if (socket !== ws) { token = ''; ws.close(); return; } ws.send(JSON.stringify({ type: 'hello', token })); token = ''; (element('token') as HTMLInputElement).value = ''; };
   ws.onmessage = ({ data }) => {
     if (socket !== ws) return;
@@ -94,6 +96,8 @@ element('connect').onclick = async () => {
   };
   ws.onclose = () => { if (socket !== ws) return; connected = false; state = 'closed'; answerId = undefined; token = ''; status = '已断开，请重新连接'; element('channel').textContent = '通道：已断开'; void stopAudio(); refresh(); };
   ws.onerror = () => { if (socket !== ws) return; status = '连接失败，请检查后端'; refresh(); };
+  } catch {
+    status = '连接配置无效或后端不可用'; refresh();
   } finally { connecting = false; }
 };
 element('form').onsubmit = event => {
@@ -140,7 +144,7 @@ async function restoreDisplay() {
   if (disposed) return false;
   if (!bridge) { exiting = false; return true; }
   try {
-  const initialContent = 'Even Agent\n请在伴随页面连接后端。';
+  const initialContent = 'Glass Assistant\n请在伴随页面连接后端。';
   const ok = await display.restore(async () => {
     const created = await bridge!.createStartUpPageContainer(new CreateStartUpPageContainer({ containerTotalNum: 1,
       textObject: [new TextContainerProperty({ containerID: 1, containerName: 'conversation', xPosition: 8, yPosition: 4,

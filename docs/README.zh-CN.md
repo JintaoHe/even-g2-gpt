@@ -12,6 +12,7 @@
 
 - [连续对话实验室](CONVERSATION_LAB.md)：网页启动、收音、追问、搜索与限制。
 - [Even SDK 前端](../clients/even/README.md)：连接、分页、用户转录、历史与退出恢复。
+- [Even Hub 打包与 Private Testing](EVEN_HUB_PACKAGING.md)：发布身份、权限、`.ehpk`、Portal 上传和真机验收。
 - [官方模拟器](../tools/even-simulator/README.md)：启动、独立依赖与已知平台问题。
 - [早期单轮 POC](POC.md)：音频注入与初始转录链路，不是当前连续对话入口。
 

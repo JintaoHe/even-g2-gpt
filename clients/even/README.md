@@ -1,4 +1,4 @@
-# Even SDK client (local simulator integration)
+# Glass Assistant client
 
 Independent package, lockfile, TypeScript and Vite build. No API key belongs here.
 
@@ -8,7 +8,7 @@ Independent package, lockfile, TypeScript and Vite build. No API key belongs her
 4. In the simulator's **Browser** companion window enter the local G2_CLIENT_TOKEN and connect. Disconnect any old browser conversation first; the backend permits one active owner. The **Glasses Display** window is the actual SDK output, not the HTML preview.
 5. Send text. Short answers use stable pages; answers longer than two pages switch to an overlapping five-line reading window. Use Up/Down on G2 or R1 to scroll three lines at a time, or use the mouse wheel over the simulator preview. Explicitly enable the mic to test continuous voice; entering the app does not start recording. Click toggles capture; Double Click stops capture and requests the native system exit dialog. If cancelled, use the companion resume control; capture never restarts automatically.
 
-The channel label comes from the authenticated backend. API keys stay there; audio is still API STT. A local Vite proxy connects to port 3001 without relaxing backend origin checks. This proxy is development-only and **not included in the client build**. The app manifest is a local development identity, not a production-ready Hub submission. Remote hosting, network permission allowlists, TLS and packaged WebSocket URL configuration remain separate work.
+The channel label comes from the authenticated backend. API keys stay there; audio is still API STT. A local Vite proxy connects to port 3001 without relaxing backend origin checks. This proxy is development-only and **not included in the client build**. Production builds connect directly to `wss://calendar.eveng2assistant.com`, and the manifest allowlists only that HTTPS/WSS origin plus the G2 microphone permission.
 
 To run the simulator against the deployed backend without exposing its loopback listener, set the development proxy target for the current shell before `npm run dev`:
 
@@ -21,7 +21,15 @@ The browser and simulator still connect only to `127.0.0.1:5173`; Vite forwards 
 
 Use Node 24 or newer. On a Windows machine whose TLS inspection root is available only through the system certificate store, start Vite with that same Node binary as `node --use-system-ca .\node_modules\vite\bin\vite.js`; do not disable certificate validation. Older Node versions reject this flag and must not run this project.
 
-`npm run build` emits only this client's dist. `npm test` tests bilingual pagination. The `dev/` fixture is dynamically imported only in Vite development mode and removed in production; no mock data is mixed into actual connected conversations. After SDK code changes, restart the simulator if hot reload reports startup-page rejection (the host may retain its old page).
+`npm run build` emits only this client's `dist/` and then rejects source maps, debug/test directories, unexpected file types, private-key markers and obvious credential assignments. `npm test` tests connection URL validation, lifecycle and bilingual pagination. The `dev/` fixture is dynamically imported only in Vite development mode and removed in production; no mock data is mixed into actual connected conversations. After SDK code changes, restart the simulator if hot reload reports startup-page rejection (the host may retain its old page).
+
+## Even Hub package
+
+Use Node 24+, then run `npm run pack:hub`. The pinned official CLI builds `glass-assistant-0.1.0.ehpk` with SDK `0.0.14` and derives the corresponding Even App floor. The package is ignored by Git. It contains no client token or provider credential; the user supplies the backend access token at runtime and it remains in memory only.
+
+The release identity is `Glass Assistant` / `com.eveng2assistant.glassassistant`. The name intentionally does not contain “Even”, which the current Hub review rules reserve for affiliated apps. `npm run pack:hub:check` additionally checks package-ID availability, but first requires an explicit local `evenhub login`; it does not upload or reserve the ID. See [the packaging and Private Testing guide](../../docs/EVEN_HUB_PACKAGING.md) before uploading.
+
+The phone companion already includes an optional text box for exact content such as email addresses, URLs and IDs; the glasses do not provide a keyboard. Location is not requested in `0.1.0`. The current package is pinned to the maintainer's exact backend and is personal Private Testing only, not a universal public binary. A self-hoster must rebuild with their own exact backend origin and manifest whitelist. See [companion input, location, and safe distribution](../../docs/COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md).
 
 Display: conservative five-line body plus two status lines; updates coalesced at 300ms, one SDK write in flight, no auto-page jumps. Full answers remain on the backend. This is not pixel-perfect typography: long URLs, emoji/unsupported glyphs and real hardware fonts still need visual validation. Tokens stay in memory only, never URL/storage/logs. Exit/unload, foreground loss and connection loss stop forwarding audio.
 
