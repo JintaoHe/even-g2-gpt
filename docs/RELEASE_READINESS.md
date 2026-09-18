@@ -94,6 +94,19 @@ Each operator manages their own credentials, storage and quotas. Publishing
 the client must not expose the operator's private calendar or shared access token.
 Google public OAuth readiness is a separate gate from Even Hub review.
 
+The current `.ehpk` is pinned to the maintainer's exact backend origin and is for
+personal Private Testing only. It must not be uploaded as a general public binary:
+an installer would otherwise be directed to the maintainer's service. Even Hub's
+static network whitelist also means a text field cannot turn this package into a
+safe arbitrary-self-host client. Each self-hoster must rebuild with their own exact
+origin unless the platform later provides a reviewable endpoint-configuration model.
+Wildcards, open Origin checks and a shared maintainer token are not acceptable.
+
+The phone companion text box is already present. Location remains unrequested in
+`0.1.0`; add the manifest permission only with an on-demand one-shot design, denial
+fallback, no-default-retention rule and physical-device validation. See
+[companion input, location, and safe distribution](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md).
+
 Even Hub publication requires platform review; no approval is implied here.
 - [Even Hub developer terms](https://support.evenrealities.com/hc/en-us/articles/15606676690703-Even-Hub-Developer-Platform-Terms-of-Service)
 - [Even Hub documentation](https://hub.evenrealities.com/docs/guides/networking)

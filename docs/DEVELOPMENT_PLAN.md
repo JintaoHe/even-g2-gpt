@@ -272,7 +272,9 @@ Gate：
 - network whitelist + G2 microphone permission；
 - HUD projection、render throttle、pause/resume/exit；
 - disconnect/reconnect state；
-- client 与 server state machine tests。
+- client 与 server state machine tests；
+- 保留手机伴随页文字输入作为语音的补充，用于邮箱、URL、ID 和不方便说话的场景；
+- 覆盖 typed Unicode／邮箱／URL、空输入、超长输入、认证和眼镜历史显示测试。文字输入已经存在于当前客户端，但任意收件人发送仍须独立的安全确认设计。
 
 #### V1.3 Real G2
 
@@ -280,7 +282,9 @@ Gate：
 - English/Mandarin/code-switch；
 - 30 min、1 h、2 h battery/lifecycle test；
 - foreground/background/lock/unlock；
-- 两小时 server soak。
+- 两小时 server soak；
+- 验证 packaged phone WebView 中的文字输入、软键盘和眼镜回显；
+- 在基础真机 matrix 通过后验证按需单次定位 POC：只在明确路线／当前位置问题中请求，覆盖授权拒绝、超时、低精度／过期位置和网络切换；默认不持续跟踪、不保存精确坐标。路线时间和实时交通由独立的 server-side routing provider 提供，不把地图 key 放进 `.ehpk`。
 
 V1 release gate：
 
@@ -490,5 +494,7 @@ audit_events
 3. 在 G2/R1 上完成语音、手势、退出重连、网络切换与 30m/1h/2h 测试；
 4. 进入 Beta，完成 5 分钟锁屏与后台 reviewer-parity 测试；
 5. 通过 V1 gate 后，再扩展长期上下文／显式记忆等 V2 能力并准备公开提交材料。
+
+发布边界：当前 Private Testing 包固定连接个人后端，只适合本人安装。公开源码的自建用户必须使用自己的域名、精确 network whitelist、访问 token 和后端凭据重新构建；在平台没有可审核的用户自定义 endpoint 方案之前，不能把连接维护者个人服务器的通用二进制发布给公众，也不能用 wildcard Origin／whitelist 绕过限制。手机文字输入、动态收件人和定位的详细安全设计见 [伴随输入、定位与安全分发](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)。
 
 具体操作与记录模板见 [Even Hub 打包与 Private Testing](EVEN_HUB_PACKAGING.md) 和 [发布准备清单](RELEASE_READINESS.md)。

@@ -29,6 +29,8 @@ Use Node 24+, then run `npm run pack:hub`. The pinned official CLI builds `glass
 
 The release identity is `Glass Assistant` / `com.eveng2assistant.glassassistant`. The name intentionally does not contain “Even”, which the current Hub review rules reserve for affiliated apps. `npm run pack:hub:check` additionally checks package-ID availability, but first requires an explicit local `evenhub login`; it does not upload or reserve the ID. See [the packaging and Private Testing guide](../../docs/EVEN_HUB_PACKAGING.md) before uploading.
 
+The phone companion already includes an optional text box for exact content such as email addresses, URLs and IDs; the glasses do not provide a keyboard. Location is not requested in `0.1.0`. The current package is pinned to the maintainer's exact backend and is personal Private Testing only, not a universal public binary. A self-hoster must rebuild with their own exact backend origin and manifest whitelist. See [companion input, location, and safe distribution](../../docs/COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md).
+
 Display: conservative five-line body plus two status lines; updates coalesced at 300ms, one SDK write in flight, no auto-page jumps. Full answers remain on the backend. This is not pixel-perfect typography: long URLs, emoji/unsupported glyphs and real hardware fonts still need visual validation. Tokens stay in memory only, never URL/storage/logs. Exit/unload, foreground loss and connection loss stop forwarding audio.
 
 Official references: https://hub.evenrealities.com/docs/get-started/quickstart/first-app and https://hub.evenrealities.com/docs/build/device-apis

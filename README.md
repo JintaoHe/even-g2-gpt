@@ -4,6 +4,8 @@
 
 A personal AI assistant for Even Realities G2: bilingual Chinese/English voice conversations, text on glasses, web search, Google Calendar management, and confirmation-gated Markdown email delivery.
 
+**Independent community project. Not affiliated with, endorsed by, or published by Even Realities.** The packaged working name is **Glass Assistant** so the application itself does not present as an official Even product.
+
 **Bring your own backend, for one trusted user.** OpenAI API is the default dialogue channel; Codex CLI is optional. Model keys, calendar authorization, and email credentials remain on your backend, never in the glasses client or public repository.
 
 This is a development build. The browser conversation lab and Even SDK simulator are connected, and the single-user Linux backend has passed host-level deployment checks; **physical G2/R1 end-to-end testing and Even Hub publication are still pending**. This is not a published Even Hub app or a hosted multi-user service.
@@ -24,6 +26,7 @@ This is a development build. The browser conversation lab and Even SDK simulator
 | Area | Implemented scope |
 | --- | --- |
 | Conversation | Mixed Chinese/English transcription, automatic utterance detection, contextual follow-ups, streamed text replies, interruption cancellation, and intent-based exit; no send button required for every utterance |
+| Companion input | Optional phone text box for questions and exact strings such as email addresses, URLs, and IDs; the glasses themselves do not provide a keyboard |
 | Audio buffering | 800ms pre-trigger buffer preserves captured speech onset without adding an 800ms wait; it cannot eliminate every transcription omission |
 | Glasses reading | Live user transcription and final questions/answers; manual pagination and session history; link syntax removed from the display while original sources remain available for export |
 | Dialogue channels | OpenAI API by default; optional Codex CLI with waiting feedback, actual search events, timeout, and cancellation handling |
