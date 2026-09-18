@@ -10,7 +10,7 @@ import { sse, parseDecision, OpenAIDialogue } from '../src/dialogue-model.js';
 import { TurnDetector } from '../src/vad.js';
 import { createConversationServer, fileSaver } from '../src/conversation-server.js';
 import { LiveTranscriber } from '../src/live-transcriber.js';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import { runInNewContext } from 'node:vm';
 
 const immediate: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => { delta('收到'); } };
@@ -216,6 +216,18 @@ test('production ingress accepts only the configured public host and origin', { 
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
   try {
+    const localHealth = await fetch(url.replace('ws://', 'http://').replace('/ws/conversation', '/healthz'));
+    assert.equal(localHealth.status, 200); assert.deepEqual(await localHealth.json(), { status: 'ok' });
+    assert.equal(localHealth.headers.get('cache-control'), 'no-store');
+    const calendarHealth = await fetch(url.replace('ws://', 'http://').replace('/ws/conversation', '/internal/health/calendar'));
+    assert.equal(calendarHealth.status, 200); assert.deepEqual(await calendarHealth.json(), { status: 'ok', calendar: 'disabled' });
+    const address = app.http.address() as { port: number };
+    const blockedInternal = await new Promise<number>((resolve, reject) => {
+      const req = request({ hostname: '127.0.0.1', port: address.port, path: '/internal/health/calendar',
+        headers: { host: 'calendar.eveng2assistant.com' } }, response => { response.resume(); resolve(response.statusCode ?? 0); });
+      req.on('error', reject); req.end();
+    });
+    assert.equal(blockedInternal, 404);
     const trusted = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'calendar.eveng2assistant.com' } });
     await once(trusted, 'open'); trusted.close(); await once(trusted, 'close');
     const wrongOrigin = new WebSocket(url, { origin: 'https://evil.example', headers: { host: 'calendar.eveng2assistant.com' } });

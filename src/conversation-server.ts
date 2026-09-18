@@ -59,6 +59,30 @@ export function createConversationServer(options: {
   const http = createServer(async (req, res) => {
     const host = req.headers.host ?? '';
     if (!hostAllowed(host)) { res.writeHead(403); res.end(); return; }
+    if (req.method === 'GET' && req.url === '/healthz') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff' });
+      res.end('{"status":"ok"}');
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/internal/health/calendar') {
+      if (!localHost.test(host)) { res.writeHead(404); res.end(); return; }
+      if (!options.calendar) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('{"status":"ok","calendar":"disabled"}');
+        return;
+      }
+      try {
+        const health = await options.calendar.checkHealth();
+        const healthy = health.state === 'healthy';
+        res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ status: healthy ? 'ok' : 'unavailable', calendar: health.state }));
+      } catch {
+        res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('{"status":"unavailable","calendar":"error"}');
+      }
+      return;
+    }
     if (req.method === 'GET' && req.url?.startsWith('/artifacts/')) {
       const given = Buffer.from((req.headers.authorization ?? '').replace(/^Bearer /, ''));
       const expected = Buffer.from(options.token);

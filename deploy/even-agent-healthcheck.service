@@ -1,0 +1,31 @@
+[Unit]
+Description=Verify Even Agent app, TLS ingress, and read-only Calendar health
+After=network-online.target even-agent.service caddy.service
+Wants=network-online.target
+OnFailure=even-agent-health-failure@%n.service
+
+[Service]
+Type=oneshot
+DynamicUser=true
+ExecStart=/usr/local/sbin/even-agent-healthcheck
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

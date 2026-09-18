@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Even Agent production health check hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=even-agent-healthcheck.service
+
+[Install]
+WantedBy=timers.target

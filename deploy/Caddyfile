@@ -1,7 +1,7 @@
 calendar.eveng2assistant.com {
 	encode zstd gzip
 
-	@backend path /ws/conversation /artifacts/*
+	@backend path /healthz /ws/conversation /artifacts/*
 	reverse_proxy @backend 127.0.0.1:3001
 
 	root * /var/www/even-calendar
