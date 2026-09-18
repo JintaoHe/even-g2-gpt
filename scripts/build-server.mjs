@@ -12,9 +12,12 @@ const result = spawnSync(process.execPath, [join(root, 'node_modules/typescript/
   '-p', join(root, 'tsconfig.server.json'), '--outDir', join(output, 'src')],
   { cwd: root, stdio: 'inherit', shell: false });
 if (result.error || result.status !== 0) throw new Error('Server compilation failed; do not deploy this incomplete directory');
-for (const path of ['src/codex-instructions.md', 'src/codex-intent.schema.json', 'package-lock.json', 'deploy/even-agent.service',
-  'deploy/even-agent-update.sh', 'deploy/even-agent-update.service', 'deploy/even-agent-update.timer',
-  'deploy/Caddyfile', 'deploy/site/calendar/index.html', 'deploy/site/calendar/privacy.html']) {
+for (const path of ['src/codex-instructions.md', 'src/codex-intent.schema.json', 'package-lock.json',
+  'deploy/even-agent.service', 'deploy/even-agent-update.sh', 'deploy/even-agent-update.service', 'deploy/even-agent-update.timer',
+  'deploy/even-agent-healthcheck.sh', 'deploy/even-agent-healthcheck.service', 'deploy/even-agent-healthcheck.timer',
+  'deploy/even-agent-health-failure@.service', 'deploy/even-agent-backup.sh', 'deploy/even-agent-backup.service',
+  'deploy/even-agent-backup.timer', 'deploy/even-agent-restore-check.sh', 'deploy/even-agent-journald.conf',
+  'deploy/verify-backup.mjs', 'deploy/Caddyfile', 'deploy/site/calendar/index.html', 'deploy/site/calendar/privacy.html']) {
   await mkdir(dirname(join(output, path)), { recursive: true });
   await copyFile(join(root, path), join(output, path));
 }
@@ -34,7 +37,7 @@ async function list(directory) {
 }
 const paths = await list(output);
 for (const path of paths) {
-  if (!/^(src\/[a-z0-9-]+\.js|src\/codex-instructions\.md|src\/codex-intent\.schema\.json|package(?:-lock)?\.json|deploy\/(even-agent\.service|even-agent-update\.(?:sh|service|timer)|Caddyfile|site\/calendar\/(index|privacy)\.html))$/.test(path)) {
+  if (!/^(src\/[a-z0-9-]+\.js|src\/codex-instructions\.md|src\/codex-intent\.schema\.json|package(?:-lock)?\.json|deploy\/(even-agent(?:-update|-healthcheck|-backup)?\.(?:sh|service|timer)|even-agent-health-failure@\.service|even-agent-restore-check\.sh|even-agent-journald\.conf|verify-backup\.mjs|Caddyfile|site\/calendar\/(index|privacy)\.html))$/.test(path)) {
     throw new Error(`Unexpected deploy file: ${path}`);
   }
 }

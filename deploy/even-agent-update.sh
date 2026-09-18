@@ -123,7 +123,7 @@ systemctl restart "${SERVICE_NAME}"
 healthy=false
 for _ in 1 2 3 4 5; do
   if systemctl is-active --quiet "${SERVICE_NAME}" && \
-    curl --silent --show-error --output /dev/null --max-time 3 http://127.0.0.1:3001/; then
+    curl --fail --silent --show-error --output /dev/null --max-time 3 http://127.0.0.1:3001/healthz; then
     healthy=true
     break
   fi

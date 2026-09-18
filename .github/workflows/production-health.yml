@@ -1,0 +1,23 @@
+name: Production health
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: production-health
+  cancel-in-progress: true
+jobs:
+  endpoint:
+    name: Public HTTPS endpoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify the minimal public health response
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          body="$(curl --fail --silent --show-error --max-time 15 --retry 2 --retry-all-errors \
+            https://calendar.eveng2assistant.com/healthz)"
+          [[ "${body}" == '{"status":"ok"}' ]]

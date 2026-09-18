@@ -1,0 +1,27 @@
+[Unit]
+Description=Record an Even Agent health failure for %i
+
+[Service]
+Type=oneshot
+DynamicUser=true
+ExecStart=/usr/bin/logger -p daemon.err -t even-agent-health Health check failed for %i - inspect journalctl for the failed unit
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX

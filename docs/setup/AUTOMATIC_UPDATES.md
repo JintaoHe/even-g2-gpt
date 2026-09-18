@@ -72,7 +72,7 @@ systemctl list-timers even-agent-update.timer --all
 ```bash
 cat /opt/even-agent/current/RELEASE-COMMIT
 sudo systemctl is-active even-agent caddy
-curl -sS -o /dev/null http://127.0.0.1:3001/
+curl --fail -sS -o /dev/null http://127.0.0.1:3001/healthz
 sudo ss -lntup
 sudo journalctl -u even-agent-update.service -n 100 --no-pager
 ```
