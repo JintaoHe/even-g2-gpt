@@ -32,11 +32,20 @@ remain separate:
 5. Finish with physical G2/R1 acceptance for microphone, BLE/input timing,
    phone backgrounding and lifecycle behavior before Beta or submission.
 
-The public backend transport and security checks passed on 2026-09-17. A local
-Vite-to-production-WSS authenticated handshake and an interactive simulator
-text request/response rendered on the glasses display also passed. Bilingual
-speech, search, Calendar read, exit and reconnect remain separate step-2
-acceptance cases; this text smoke test does not certify them or real hardware.
+The public backend transport and security checks passed on 2026-09-17. The
+local simulator-to-production-WSS path subsequently passed bilingual speech,
+search, Calendar read/create/update/cancel, confirmed email delivery, exit and
+reconnect on 2026-09-18. Production monitoring, automatic updates, verified
+daily backup and an isolated restore drill also passed. These results still do
+not certify physical hardware or phone lifecycle behavior.
+
+The packaged client now has an exact production HTTPS/WSS whitelist, a direct
+production WSS target, release-safe display name and reverse-domain identity.
+SDK tests and release-content scanning pass, and the official CLI produced a
+45,803-byte `0.1.0` `.ehpk` with `min_app_version 2.2.9`. The artifact remains
+local and Git-ignored. Package-ID availability needs an explicit CLI login;
+portal upload, packaged WebView Origin validation, Private Testing and physical
+G2/R1 acceptance remain outstanding.
 
 ## Recurring meetings: bounded first implementation
 
@@ -73,10 +82,10 @@ References checked 2026-09-16:
 
 ## Even Hub publication target
 
-Keep the packaged SDK client separate from the private server runtime. Before
-submission: validate real-device lifecycle, configure a production HTTPS/WSS
-endpoint in the packaged client, remove local debug configuration, and document data flows, retention,
-deletion, permissions, support and privacy practices. Never ship provider keys,
+Keep the packaged SDK client separate from the private server runtime. The
+production endpoint, manifest whitelist and debug-free bundle are now configured.
+Before submission: validate real-device lifecycle and document data flows, retention,
+deletion, support and privacy practices. Never ship provider keys,
 OAuth refresh tokens or operator email credentials in the client package.
 
 The current backend is a personal, single-owner deployment. The selected public

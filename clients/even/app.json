@@ -1,6 +1,23 @@
 {
-  "package_id": "local.evenagent.simulator", "name": "Even Agent Dev", "version": "0.1.0",
-  "edition": "202601", "min_sdk_version": "0.0.14", "entrypoint": "index.html",
-  "permissions": [{ "name": "g2-microphone", "desc": "用户主动开启连续语音对话" }],
-  "supported_languages": ["zh", "en"]
+  "package_id": "com.eveng2assistant.glassassistant",
+  "edition": "202601",
+  "name": "Glass Assistant",
+  "version": "0.1.0",
+  "min_sdk_version": "0.0.14",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Connects to the user-operated assistant backend for conversations and tools.",
+      "whitelist": [
+        "https://calendar.eveng2assistant.com",
+        "wss://calendar.eveng2assistant.com"
+      ]
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Captures speech only after the user actively starts a conversation."
+    }
+  ],
+  "supported_languages": ["en", "zh"]
 }

@@ -132,7 +132,7 @@ docs/                  Setup, operations, design, and acceptance guides
 
 `npm run build:server` creates a separate `dist/server-*` backend release directory. **Deploy only a successful build and inspect its `BUILD-MANIFEST.json`; do not upload the entire development checkout.**
 
-The server release excludes the browser lab, SDK frontend, simulator, tests, credentials, and local data. Build the SDK separately; configure Linux credentials and data separately. The current server listens on loopback. Public HTTPS/WSS and Even Hub network configuration still require integration; exposing a port is not a production deployment.
+The server release excludes the browser lab, SDK frontend, simulator, tests, credentials, and local data. Build the SDK separately; configure Linux credentials and data separately. Node stays on loopback behind the deployed HTTPS/WSS reverse proxy; port 3001 is not public. The Even Hub client now has a separate production bundle and exact network whitelist, but Private Testing and physical-device acceptance are still pending.
 
 See [deployment boundaries](docs/PROJECT_STRUCTURE.md), [Linux lifecycle, storage, and migration](docs/LINUX_OPERATIONS.md), and [automatic Linux updates with rollback](docs/setup/AUTOMATIC_UPDATES.md).
 
@@ -176,7 +176,7 @@ See [contribution guidelines](CONTRIBUTING.md) and [release readiness](docs/RELE
 - Recurrence does not yet support monthly rules, multiple weekdays, all-day series, or “this and following” splits. Real recurring-invitation delivery and synchronization need dedicated acceptance testing.
 - Audio detection is an energy-based baseline. Noise, quiet speech, transcription, and intent recognition can still fail; 800ms buffering preserves only audio already captured.
 - There is no multi-tenant isolation. Reconnecting does not automatically restore full conversation context.
-- Next priorities: physical G2/R1 acceptance → Linux deployment and recovery drills → production networking/privacy documentation → Even Hub packaging and review.
+- Next priorities: Even Hub Private Testing → physical G2/R1 acceptance → Beta lock/background testing → privacy/support material and submission review.
 
 ## Documentation
 

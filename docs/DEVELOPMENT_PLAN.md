@@ -479,6 +479,16 @@ audit_events
 - [Anthropic MCP documentation](https://docs.anthropic.com/en/docs/mcp)
 - [Even Hub iOS background lifecycle open issue](https://github.com/even-realities/everything-evenhub/issues/16)
 
-## 14. 下一步
+## 14. 当前进度与下一步（2026-09-18）
 
-下一次工作从 **V0 + backlog 1–3** 开始：记录 ADR、pin 上游版本、建立 monorepo 和测试骨架。除非用户明确要求，本阶段不创建 VPS、不提交任何 API key，也不接入外部写工具。
+原 V0/V1 的代码骨架、OpenAI 实时转录、连续对话、模拟器 HUD、公网 WSS、Linux 单机部署、安全加固、自动更新、监控、备份与恢复演练均已完成。Calendar、邮件、搜索和安全确认工具也已提前覆盖部分 V2.5/V3 范围。模拟器到生产 WSS 的中英混合语音及工具链路已经通过人工端到端测试。
+
+当前正式 gate 仍是 **V1.3 真机验收**，不能因为后端功能较多而跳过。客户端已配置生产域名与最小权限，官方 CLI 已生成本地 `.ehpk`。接下来的顺序是：
+
+1. 登录 Even Hub CLI／Portal，检查 package ID，并上传 Private Testing build；
+2. 核对 packaged WebView 的真实 Origin，保持后端精确 allowlist；
+3. 在 G2/R1 上完成语音、手势、退出重连、网络切换与 30m/1h/2h 测试；
+4. 进入 Beta，完成 5 分钟锁屏与后台 reviewer-parity 测试；
+5. 通过 V1 gate 后，再扩展长期上下文／显式记忆等 V2 能力并准备公开提交材料。
+
+具体操作与记录模板见 [Even Hub 打包与 Private Testing](EVEN_HUB_PACKAGING.md) 和 [发布准备清单](RELEASE_READINESS.md)。

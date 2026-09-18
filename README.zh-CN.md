@@ -132,7 +132,7 @@ docs/                  配置、运维、设计与验收文档
 
 `npm run build:server` 生成独立的 `dist/server-*` 后端发布目录。**只部署成功构建的目录，并检查 `BUILD-MANIFEST.json`；不要上传整个开发目录。**
 
-后端部署包不含网页实验室、SDK 前端、模拟器、测试、密钥或本地数据。SDK 单独构建；Linux 凭据与数据单独配置。当前服务监听 loopback，公网 HTTPS/WSS 与 Even Hub 网络配置仍待集成，不能直接开放端口当作生产部署。
+后端部署包不含网页实验室、SDK 前端、模拟器、测试、密钥或本地数据。SDK 单独构建；Linux 凭据与数据单独配置。Node 只监听 loopback，并由已部署的 HTTPS/WSS 反向代理对外服务，3001 不开放公网。Even Hub 客户端已有独立生产 bundle 与精确网络白名单，但 Private Testing 和真机验收仍待完成。
 
 详见 [部署边界](docs/PROJECT_STRUCTURE.md)、[Linux 进程、存储与迁移](docs/LINUX_OPERATIONS.md) 和 [Linux 自动更新与回滚](docs/setup/AUTOMATIC_UPDATES.md)。
 
@@ -176,7 +176,7 @@ npm run build
 - 重复日程暂不支持月度、多星期几、全天系列或“本次及以后”的拆分。真实重复邀请收件与同步仍待专门验收。
 - 收音是能量检测基线，噪声、轻声、转录及语义判断仍可能出错；800ms 缓冲只能保留已采集音频。
 - 当前没有多租户隔离；断线重连不等于自动恢复完整对话上下文。
-- 后续重点：真实 G2/R1 验收 → Linux 部署与恢复演练 → 生产网络／隐私文档 → Even Hub 打包与审核。
+- 后续重点：Even Hub Private Testing → 真实 G2/R1 验收 → Beta 锁屏／后台测试 → 隐私、支持材料与提交审核。
 
 ## 文档导航
 

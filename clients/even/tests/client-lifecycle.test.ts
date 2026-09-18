@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { ReadingHistory } from '../src/reading-history.ts';
 import { DisplaySession } from '../src/display-session.ts';
+import { conversationWebSocketUrl } from '../src/backend-url.ts';
 
 // Run the actual browser entry point against deterministic SDK/DOM/socket doubles.
 // No network, credentials, microphone or simulator process is used by these tests.
@@ -39,7 +40,8 @@ async function fixture(startupResult = 0) {
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   runInNewContext(js, {
     exports: {}, require: (name: string) => name === './reading-history' ? { ReadingHistory }
-      : name === './display-session' ? { DisplaySession } : sdk,
+      : name === './display-session' ? { DisplaySession }
+      : name === './backend-url' ? { conversationWebSocketUrl } : sdk,
     document: { getElementById: element, addEventListener() {} }, window: { addEventListener() {} },
     location: { protocol: 'http:', host: 'localhost' }, WebSocket: Socket,
     setInterval: (callback: typeof tick) => { tick = callback; return 1; }, clearInterval() {}, console: { info() {} }

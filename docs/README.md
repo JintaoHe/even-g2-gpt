@@ -12,6 +12,7 @@ The overview and this index are bilingual. Detailed guides below retain their ex
 
 - [Conversation lab (Chinese)](CONVERSATION_LAB.md): browser startup, audio capture, follow-ups, search, and limitations.
 - [Even SDK client](../clients/even/README.md): connection, pagination, transcription display, history, and exit recovery.
+- [Even Hub packaging and Private Testing (Chinese)](EVEN_HUB_PACKAGING.md): release identity, permissions, `.ehpk`, portal upload, and physical-device acceptance.
 - [Official simulator](../tools/even-simulator/README.md): startup, separate dependencies, and known platform issues.
 - [Earlier single-turn POC](POC.md): audio injection and the initial transcription pipeline, not the current continuous-dialogue entry point.
 
