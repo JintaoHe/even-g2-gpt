@@ -33,8 +33,24 @@ export function createConversationServer(options: {
   calendar?: GoogleCalendarService;
   calendarPlanner?: CalendarPlanner;
   calendarAnswerer?: CalendarAnswerer;
+  ingress?: { publicHosts?: string[]; allowedOrigins?: string[] };
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
+  const localHost = /^(127\.0\.0\.1|localhost):\d+$/;
+  const publicHosts = new Set((options.ingress?.publicHosts ?? []).map(value => value.trim().toLowerCase()).filter(Boolean));
+  const allowedOrigins = new Set((options.ingress?.allowedOrigins ?? []).map(value => value.trim()).filter(Boolean));
+  for (const host of publicHosts) {
+    if (!/^[a-z0-9.-]+(?::\d+)?$/.test(host)) throw new Error('Invalid public host');
+    if (!options.ingress?.allowedOrigins?.length) allowedOrigins.add(`https://${host}`);
+  }
+  for (const origin of allowedOrigins) {
+    const parsed = new URL(origin);
+    if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) throw new Error('Invalid allowed origin');
+  }
+  const hostAllowed = (host: string) => localHost.test(host) || publicHosts.has(host.toLowerCase());
+  const originAllowed = (host: string, origin?: string) => !origin
+    || (localHost.test(host) && origin === `http://${host}`)
+    || allowedOrigins.has(origin);
   const calendarTasks = new Set<Promise<void>>();
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript'], '/mic.js': ['mic.js', 'text/javascript'],
@@ -42,7 +58,7 @@ export function createConversationServer(options: {
   };
   const http = createServer(async (req, res) => {
     const host = req.headers.host ?? '';
-    if (!/^(127\.0\.0\.1|localhost):\d+$/.test(host)) { res.writeHead(403); res.end(); return; }
+    if (!hostAllowed(host)) { res.writeHead(403); res.end(); return; }
     if (req.method === 'GET' && req.url?.startsWith('/artifacts/')) {
       const given = Buffer.from((req.headers.authorization ?? '').replace(/^Bearer /, ''));
       const expected = Buffer.from(options.token);
@@ -79,8 +95,8 @@ export function createConversationServer(options: {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 32768 });
   http.on('upgrade', (req, socket, head) => {
     const host = req.headers.host ?? '', origin = req.headers.origin;
-    if (req.url !== '/ws/conversation' || !/^(127\.0\.0\.1|localhost):\d+$/.test(host)
-      || (origin && origin !== `http://${host}`) || wss.clients.size >= 4) { socket.destroy(); return; }
+    if (req.url !== '/ws/conversation' || !hostAllowed(host)
+      || !originAllowed(host, origin) || wss.clients.size >= 4) { socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, client => wss.emit('connection', client, req));
   });
   let owner: WebSocket | undefined;
@@ -301,11 +317,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     } catch { await jobs.close(); throw new Error('Google Calendar setup invalid; check private auth files and calendar binding.'); }
   }
   const save = fileSaver(resolve(dataDirectory, 'conversations'));
+  const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
+  const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
     jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner() : undefined,
     calendarAnswerer: calendar && hybrid.provider === 'api' ? createCalendarAnswerer() : undefined,
     draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key },
+    ingress: publicHost ? { publicHosts: [publicHost], allowedOrigins: publicOrigin ? [publicOrigin] : undefined } : undefined,
     transcriber: delta => {
       if (!key) throw new Error('Speech requires OPENAI_API_KEY');
       return new LiveTranscriber(key, process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-live-transcribe', delta);

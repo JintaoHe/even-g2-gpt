@@ -12,7 +12,7 @@ Group=even-agent
 WorkingDirectory=/opt/even-agent
 EnvironmentFile=/etc/even-agent.env
 Environment=EVEN_DATA_DIR=/var/lib/even-agent
-ExecStart=/usr/bin/node /opt/even-agent/src/conversation-server.js
+ExecStart=/usr/local/bin/node /opt/even-agent/src/conversation-server.js
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -24,7 +24,23 @@ StateDirectoryMode=0700
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/lib/even-agent /home/even-agent/.codex
 
 [Install]

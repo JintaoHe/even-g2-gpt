@@ -18,7 +18,7 @@
     "conversation:inject": "tsx src/conversation-inject.ts",
     "start": "tsx src/server.ts",
     "inject": "tsx src/inject.ts",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
