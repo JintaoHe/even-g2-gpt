@@ -210,6 +210,21 @@ test('local WebSocket authenticates, runs dialogue, pauses and rejects cross-ori
   } finally { await app.close(); }
 });
 
+test('production ingress accepts only the configured public host and origin', { timeout: 10000 }, async () => {
+  const app = createConversationServer({ token: 'p'.repeat(64), model: immediate, transcriber: () => { throw new Error('not used'); },
+    ingress: { publicHosts: ['calendar.eveng2assistant.com'], allowedOrigins: ['https://calendar.eveng2assistant.com'] } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
+  try {
+    const trusted = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'calendar.eveng2assistant.com' } });
+    await once(trusted, 'open'); trusted.close(); await once(trusted, 'close');
+    const wrongOrigin = new WebSocket(url, { origin: 'https://evil.example', headers: { host: 'calendar.eveng2assistant.com' } });
+    await once(wrongOrigin, 'error'); wrongOrigin.terminate();
+    const wrongHost = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'other.eveng2assistant.com' } });
+    await once(wrongHost, 'error'); wrongHost.terminate();
+  } finally { await app.close(); }
+});
+
 test('audio pipeline waits for ordered final transcripts; pause drops late results', { timeout: 10000 }, async () => {
   const jobs: ReturnType<typeof deferred<string>>[] = [], seen: string[] = [];
   const app = createConversationServer({ token: 'a'.repeat(64),

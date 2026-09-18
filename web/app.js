@@ -95,7 +95,7 @@ $('connect').onclick = () => {
   if (socket && socket.readyState < WebSocket.CLOSING) return;
   const token = $('token').value.trim();
   if (token.length < 32) { notice('请填写本机 .env 中的 G2_CLIENT_TOKEN。'); return; }
-  socket = new WebSocket(`ws://${location.host}/ws/conversation`);
+  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/conversation`);
   socket.onopen = () => send({ type: 'hello', token });
   socket.onmessage = ({ data }) => {
     const e = JSON.parse(data);

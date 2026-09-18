@@ -12,7 +12,8 @@ const result = spawnSync(process.execPath, [join(root, 'node_modules/typescript/
   '-p', join(root, 'tsconfig.server.json'), '--outDir', join(output, 'src')],
   { cwd: root, stdio: 'inherit', shell: false });
 if (result.error || result.status !== 0) throw new Error('Server compilation failed; do not deploy this incomplete directory');
-for (const path of ['src/codex-instructions.md', 'src/codex-intent.schema.json', 'package-lock.json', 'deploy/even-agent.service']) {
+for (const path of ['src/codex-instructions.md', 'src/codex-intent.schema.json', 'package-lock.json', 'deploy/even-agent.service',
+  'deploy/Caddyfile', 'deploy/site/calendar/index.html', 'deploy/site/calendar/privacy.html']) {
   await mkdir(dirname(join(output, path)), { recursive: true });
   await copyFile(join(root, path), join(output, path));
 }
@@ -32,7 +33,7 @@ async function list(directory) {
 }
 const paths = await list(output);
 for (const path of paths) {
-  if (!/^(src\/[a-z0-9-]+\.js|src\/codex-instructions\.md|src\/codex-intent\.schema\.json|package(?:-lock)?\.json|deploy\/even-agent\.service)$/.test(path)) {
+  if (!/^(src\/[a-z0-9-]+\.js|src\/codex-instructions\.md|src\/codex-intent\.schema\.json|package(?:-lock)?\.json|deploy\/(even-agent\.service|Caddyfile|site\/calendar\/(index|privacy)\.html))$/.test(path)) {
     throw new Error(`Unexpected deploy file: ${path}`);
   }
 }

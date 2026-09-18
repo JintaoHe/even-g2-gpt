@@ -1,0 +1,20 @@
+calendar.eveng2assistant.com {
+	encode zstd gzip
+
+	@backend path /ws/conversation /artifacts/*
+	reverse_proxy @backend 127.0.0.1:3001
+
+	root * /var/www/even-calendar
+	try_files {path} {path}.html
+	file_server
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), geolocation=(), payment=(), usb=()"
+		Content-Security-Policy "default-src 'none'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	}
+}
