@@ -18,7 +18,7 @@ test('automatic updater follows only protected main and builds without service s
 
 test('automatic updater uses an atomic release link and rollback health gate', () => {
   assert.match(runtimeService, /WorkingDirectory=\/opt\/even-agent\/current/);
-  assert.match(runtimeService, /\/opt\/even-agent\/current\/src\/conversation-server\.js/);
+  assert.match(runtimeService, /ExecStart=\/usr\/local\/bin\/node --preserve-symlinks-main \/opt\/even-agent\/current\/src\/conversation-server\.js/);
   assert.match(updateScript, /mv -Tf "\$\{temporary_link\}" "\$\{CURRENT_LINK\}"/);
   assert.match(updateScript, /curl .*127\.0\.0\.1:3001/);
   assert.match(updateScript, /rolled back to/);
