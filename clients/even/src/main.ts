@@ -115,6 +115,10 @@ element('exit').onclick = () => { if (connected) send({ type: 'exit.request' });
 element('prev').onclick = () => { pager.move(-1); refresh(); };
 element('next').onclick = () => { pager.move(1); refresh(); };
 element('latest').onclick = () => { pager.latest(); refresh(); };
+element('preview').onwheel = event => {
+  event.preventDefault();
+  if (event.deltaY) { pager.move(event.deltaY < 0 ? -1 : 1); refresh(); }
+};
 
 // Serialize and coalesce updates to avoid overlapping SDK calls or per-token BLE writes.
 const timer = setInterval(async () => {
@@ -136,9 +140,18 @@ async function restoreDisplay() {
   if (disposed) return false;
   if (!bridge) { exiting = false; return true; }
   try {
-  const ok = await display.restore(async () => await bridge!.createStartUpPageContainer(new CreateStartUpPageContainer({ containerTotalNum: 1,
-    textObject: [new TextContainerProperty({ containerID: 1, containerName: 'conversation', xPosition: 8, yPosition: 4,
-      width: 560, height: 280, paddingLength: 4, borderWidth: 0, isEventCapture: 1, content: 'Even Agent\n请在伴随页面连接后端。' })] })) === 0);
+  const initialContent = 'Even Agent\n请在伴随页面连接后端。';
+  const ok = await display.restore(async () => {
+    const created = await bridge!.createStartUpPageContainer(new CreateStartUpPageContainer({ containerTotalNum: 1,
+      textObject: [new TextContainerProperty({ containerID: 1, containerName: 'conversation', xPosition: 8, yPosition: 4,
+        width: 560, height: 280, paddingLength: 4, borderWidth: 0, isEventCapture: 1, content: initialContent })] }));
+    if (created === 0) return true;
+    // Vite can reload the companion WebView while the simulator keeps container 1.
+    // Adopt that existing container instead of leaving Browser and Glasses Display split.
+    return await bridge!.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: 1, containerName: 'conversation', content: initialContent
+    })).catch(() => false);
+  });
   if (!ok || disposed) throw Error('Startup page rejected');
   exiting = false; last = ''; dirty = true;
   element('bridge').textContent = 'Even SDK 已连接 · 576 × 288 显示';

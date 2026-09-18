@@ -12,6 +12,7 @@ import type { DeliveryAction } from '../src/delivery-intent.js';
 import { once } from 'node:events';
 import WebSocket from 'ws';
 import { createConversationServer } from '../src/conversation-server.js';
+import { paginate } from '../clients/even/src/pager.js';
 
 const draft: Draft = { document: { markdown: '# 部署步骤\n\n1. 检查配置\n2. 运行测试\n', presentation: presentation('部署步骤', '两步部署清单，不是聊天记录。', 'summary') } };
 async function fixture(run: (f: { conversation: Conversation; store: JobStore; model: DeliveryDialogue; route: (a: DeliveryAction) => void; sent: Draft[]; advance: () => void }) => Promise<void>, generator: DraftGenerator = async () => structuredClone(draft)) {
@@ -29,13 +30,24 @@ test('requested standalone document saves before preview and sends only on a lat
   await fixture(async ({ conversation, store, route, sent }) => {
     await conversation.submit('生成部署步骤并直接发给我', true);
     assert.equal(sent.length, 0); assert.equal(store.list()[0].state, 'completed');
-    assert.match(conversation.history.at(-1)!.content, /文件已经生成/);
+    assert.match(conversation.history.at(-1)!.content, /文件已生成/);
     assert.equal((await store.download(store.list()[0].id)).toString(), draft.document.markdown);
     route('confirm'); await conversation.submit('确认发送', true);
-    assert.equal(sent.length, 1); assert.match(conversation.history.at(-1)!.content, /已成功提交发送/);
+    assert.equal(sent.length, 1); assert.match(conversation.history.at(-1)!.content, /邮件服务器已接受/);
     assert.match(conversation.history.at(-1)!.content, /确认是否收到/);
     await conversation.submit('确认发送', true); assert.equal(sent.length, 1);
   });
+});
+test('a verbose document preview is bounded for the glasses without changing the saved file', async () => {
+  const verbose: Draft = { document: { markdown: '# 完整正文\n\n' + '保留内容'.repeat(100), presentation: presentation(
+    '一份很长但标题仍然与谈话内容相关的市场分析报告', '这是一段只用于发送确认界面的详细摘要。'.repeat(20), 'summary') } };
+  await fixture(async ({ conversation, store }) => {
+    await conversation.submit('生成报告', true);
+    const preview = conversation.history.at(-1)!.content;
+    assert.ok(paginate(preview).length <= 2);
+    assert.match(preview, /摘要：/); assert.match(preview, /…/);
+    assert.equal((await store.download(store.list()[0].id)).toString(), verbose.document.markdown);
+  }, async () => structuredClone(verbose));
 });
 test('missing email offers one confirmed resend of original file, then download fallback', async () => {
   await fixture(async ({ conversation, store, route, sent }) => {
@@ -128,7 +140,7 @@ test('late cancelled generation cannot publish a sendable artifact or confirmati
     const pending = conversation.submit('生成文档', true);
     await new Promise<void>(r => setImmediate(r)); conversation.interrupt(); finish(draft); await pending;
     assert.equal(store.list().length, 0); assert.equal(sent.length, 0);
-    assert.ok(!conversation.history.some(m => m.content.includes('文件已经生成')));
+    assert.ok(!conversation.history.some(m => m.content.includes('文件已生成')));
   }, () => new Promise(resolve => { finish = resolve; }));
 });
 test('draft API has no tools or mail access, preserves standalone content and fails closed', async () => {
