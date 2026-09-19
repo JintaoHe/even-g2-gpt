@@ -14,7 +14,7 @@
     "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "0.0.14"
+    "@evenrealities/even_hub_sdk": "0.0.15"
   },
   "devDependencies": {
     "@evenrealities/evenhub-cli": "0.1.14",
