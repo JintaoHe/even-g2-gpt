@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { Resampler } from './audio.js';
+import { OPENAI_STT_KEYWORDS } from './stt-vocabulary.js';
 
 /** One utterance, streamed while speaking. Keeps a bounded buffer during handshake. */
 export class LiveTranscriber {
@@ -25,7 +26,7 @@ export class LiveTranscriber {
     this.ws.on('close', () => { if (!this.settled) this.fail(); });
     this.ws.on('open', () => this.send({ type: 'session.update', session: { type: 'transcription', audio: { input: {
       format: { type: 'audio/pcm', rate: 24000 },
-      transcription: { model, languages: ['en', 'zh-cn'], delay: 'low', keywords: ['Even G2', 'deployment', 'OpenAI'] },
+      transcription: { model, languages: ['en', 'zh-cn'], delay: 'low', keywords: OPENAI_STT_KEYWORDS },
       turn_detection: null
     } } } }));
     this.ws.on('message', raw => {

@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { SONIOX_STT_TERMS } from './stt-vocabulary.js';
 
 type SonioxToken = { text?: unknown; is_final?: unknown };
 type SonioxEvent = {
@@ -49,9 +50,12 @@ export class SonioxTranscriber {
         // independent endpoint detectors disagreeing about a short pause.
         enable_endpoint_detection: false,
         context: {
-          general: [{ key: 'domain', value: 'Bilingual Chinese-English personal assistant commands' }],
-          terms: ['Hi, Even', 'Even G2', 'ChatGPT', 'OpenAI', 'Claude', 'Codex', 'Google Calendar', 'TypeScript',
-            'deployment date', 'next Friday', 'Power BI', 'refresh data', 'to-do list']
+          general: [
+            { key: 'domain', value: 'Bilingual Chinese-English personal assistant' },
+            { key: 'languages', value: 'Mandarin Chinese and English code-switching' },
+            { key: 'topics', value: 'calendar, email, local navigation, shopping, daily life, business and data science' }
+          ],
+          terms: SONIOX_STT_TERMS
         },
         client_reference_id: 'even-g2-assistant'
       });

@@ -236,6 +236,17 @@ test('Soniox transcriber keeps native 16 kHz PCM, bilingual auto-detection and f
     assert.equal(config.language_hints_strict, false);
     assert.equal(config.enable_language_identification, true);
     assert.equal(config.enable_endpoint_detection, false);
+    assert.deepEqual(config.context.general, [
+      { key: 'domain', value: 'Bilingual Chinese-English personal assistant' },
+      { key: 'languages', value: 'Mandarin Chinese and English code-switching' },
+      { key: 'topics', value: 'calendar, email, local navigation, shopping, daily life, business and data science' }
+    ]);
+    for (const term of ['Iowa', 'Des Moines', 'West Des Moines', 'Waukee', 'Ames', 'Target', 'Costco',
+      'Whole Foods Market', 'Hy-Vee', 'UPS', 'USPS', 'Power BI', 'SAS', 'data science']) {
+      assert.ok(config.context.terms.includes(term), `missing Soniox context term: ${term}`);
+    }
+    assert.equal(new Set(config.context.terms).size, config.context.terms.length);
+    assert.ok(JSON.stringify(config.context).length < 10_000);
     assert.equal(bytes, 16000 + 6400); assert.equal(finalizes, 1);
     assert.deepEqual(deltas, ['Hi, Even，', '更新 deployment date']);
   } finally { for (const c of provider.clients) c.terminate(); await new Promise<void>(r => provider.close(() => r())); }

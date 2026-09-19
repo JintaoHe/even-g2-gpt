@@ -72,10 +72,10 @@ test('one request can cancel two listed events through sequential previews and c
   assert.match(conversation.history.at(-1)!.content, /第1\/2项[\s\S]*确认取消/);
   await conversation.submit('确认取消', true);
   assert.equal(f.writes(), 3); assert.equal(f.records.size, 1);
-  assert.match(conversation.history.at(-1)!.content, /已取消第1\/2项[\s\S]*第2\/2项[\s\S]*确认取消/);
+  assert.match(conversation.history.at(-1)!.content, /已删除“测试 A”（1\/2）[\s\S]*接下来是第2\/2项[\s\S]*确认取消/);
   await conversation.submit('好，可以', true);
   assert.equal(f.writes(), 4); assert.equal(f.records.size, 0);
-  assert.match(conversation.history.at(-1)!.content, /已取消全部2项日程/);
+  assert.match(conversation.history.at(-1)!.content, /已删除“测试 B”（2\/2）[\s\S]*2项都已删除/);
 });
 
 test('praise after a completed calendar batch gets a warm acknowledgement, not another operation prompt', async t => {
@@ -130,7 +130,39 @@ test('one request can cancel four listed events with one immutable confirmation 
     await conversation.submit(index === 1 ? '确认取消' : '好，可以', true);
   }
   assert.equal(f.records.size, 0);
-  assert.match(conversation.history.at(-1)!.content, /已取消全部4项日程/);
+  assert.match(conversation.history.at(-1)!.content, /已删除“测试 D”（4\/4）[\s\S]*4项都已删除/);
+});
+test('keep one and delete the other three creates a real batch and actively advances each confirmation', async t => {
+  const f = await fixture(t);
+  for (const [title, hour] of [['前往 Target（Mills Civic Pkwy）', 20], ['去 Cream Pan 和山城辣妹子', 21]] as const) {
+    const event = { ...original, title, start: `2026-10-01T${hour}:00-05:00`, end: `2026-10-01T${hour + 1}:00-05:00` };
+    const pending = await f.service.preview('create', event); await f.service.confirm(pending.id, pending.phrase);
+  }
+  let first = true; let baseReplies = 0;
+  const base = {
+    async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: first ? 'query' : 'none' }; },
+    async decide() { return 'respond' as const; },
+    async reply(_history: unknown, _signal: AbortSignal, delta: (text: string) => void) { baseReplies++; delta('普通模型回答'); }
+  };
+  const conversation = new Conversation(new CalendarDialogue(base, f.service, async () => query), () => {});
+  await conversation.submit('查看十月一日的安排', true); first = false;
+  assert.match(conversation.history.at(-1)!.content, /共 4 个事件/);
+  await conversation.submit('帮我把除了“去 Target”那一个留下，其他的全都帮我删掉，谢谢。', true);
+  assert.equal(baseReplies, 0); assert.equal(f.writes(), 4);
+  assert.match(conversation.history.at(-1)!.content, /第1\/3项[\s\S]*确认取消/);
+  await conversation.submit('确认删除', true);
+  assert.equal(f.records.size, 3);
+  assert.match(conversation.history.at(-1)!.content, /已删除“测试 A”（1\/3）[\s\S]*接下来是第2\/3项[\s\S]*确认取消/);
+  await conversation.submit('确认删除三个', true);
+  assert.equal(f.records.size, 3);
+  assert.match(conversation.history.at(-1)!.content, /每次只确认一项[\s\S]*第2\/3项尚未提交/);
+  await conversation.submit('确认', true);
+  assert.equal(f.records.size, 2);
+  assert.match(conversation.history.at(-1)!.content, /已删除“测试 B”（2\/3）[\s\S]*接下来是第3\/3项/);
+  await conversation.submit('确定删除', true);
+  assert.equal(f.records.size, 1);
+  assert.equal([...f.records.values()][0].summary, '前往 Target（Mills Civic Pkwy）');
+  assert.match(conversation.history.at(-1)!.content, /已删除“去 Cream Pan 和山城辣妹子”（3\/3）[\s\S]*3项都已删除[\s\S]*已保留“前往 Target（Mills Civic Pkwy）”/);
 });
 test('right-now creation uses the current location timezone and floors provider seconds', async t => {
   const now = Date.parse('2026-09-19T18:34:47Z');
