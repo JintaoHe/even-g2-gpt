@@ -1,4 +1,4 @@
-import type { DialogueModel, Message, TurnPlan, ReplyUpdate, ReasoningEffort } from './conversation.js';
+import type { AssistantMode, DialogueModel, Message, TurnPlan, ReplyUpdate, ReasoningEffort, WorkflowSelection } from './conversation.js';
 import { validateCalendar, type CalendarEvent } from './calendar.js';
 import { GoogleCalendarService, calendarError, type CalendarItem, type CalendarScope } from './google-calendar.js';
 import type { CalendarPlanner, CalendarContext } from './calendar-planner.js';
@@ -7,23 +7,169 @@ import { calendarDisplayItems, calendarDisplayRange, calendarZoneLabel, calendar
 import { needsCalendarRead, calendarQueryMatches, isNextCalendarQuery, calendarChoice } from './calendar-query.js';
 import { wantsCalendarDetails, detailsFallback, type CalendarAnswerer } from './calendar-answer.js';
 import { boundRecurrenceRequest, revisedRecurrenceNotes } from './calendar-recurrence.js';
+import { wantsSeparateItineraryCalendars, type CalendarItineraryPlanner } from './calendar-itinerary-planner.js';
+import { TimezoneClarificationError } from './timezone.js';
 
 type Preview = Awaited<ReturnType<GoogleCalendarService['preview']>>;
 type Approval = Preview & { prompt: string };
 type ReadChoice = { items: CalendarItem[]; timezone: string; prompt: string; expires: number };
 type Draft = { kind: 'create' | 'update' | 'cancel'; event: CalendarEvent; before?: CalendarEvent;
   eventId?: string; scope?: CalendarScope; context: CalendarContext; blocked?: boolean };
+type Batch = { events: CalendarEvent[]; index: number };
+type CancelBatch = { items: CalendarItem[]; index: number };
+type CalendarTimezoneResolver = (history: Message[], signal: AbortSignal) => Promise<string>;
+
+function namedTimezone(text: string) {
+  if (/(?:洛杉矶|los\s*angeles|pacific\s+time|太平洋时间)/i.test(text)) return 'America/Los_Angeles';
+  if (/(?:芝加哥|chicago|central\s+time|中部时间)/i.test(text)) return 'America/Chicago';
+  if (/(?:纽约|new\s*york|eastern\s+time|东部时间)/i.test(text)) return 'America/New_York';
+  const iana = /\b(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific)\/[A-Za-z_+-]+\b/.exec(text)?.[0];
+  if (!iana) return undefined;
+  try { return new Intl.DateTimeFormat('en', { timeZone: iana }).resolvedOptions().timeZone; } catch { return undefined; }
+}
+
+function immediateStart(history: Message[]) {
+  const anchors = history.filter(message => message.role === 'user').slice(-8).map(message => message.content)
+    .filter(text => /现在|马上|即刻|此刻|今天|明天|后天|周[一二三四五六日天]|星期|\d{1,2}\s*(?:月|\/|-)\s*\d{1,2}|\b(?:now|right now|today|tomorrow|next\s+\w+)\b/i.test(text));
+  const latest = anchors.at(-1) ?? '';
+  return /(?:从)?现在(?:开始|起)?|马上(?:开始)?|即刻|此刻|\b(?:now|right now)\b/i.test(latest)
+    && !/(?:不要|别|不是|改到|改成).{0,16}(?:现在|马上|now)/i.test(latest);
+}
+
+function zonedMinute(time: number, timezone: string) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'longOffset' }).formatToParts(time);
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const offset = value.timeZoneName === 'GMT' ? 'Z' : value.timeZoneName.replace('GMT', '');
+  if (!/^(?:Z|[+-]\d{2}:\d{2})$/.test(offset)) throw new Error('CALENDAR_TIMEZONE_INVALID');
+  return `${value.year}-${value.month}-${value.day}T${value.hour}:${value.minute}${offset}`;
+}
+
+function pinImmediateStart(request: Awaited<ReturnType<CalendarPlanner>>, timezone: string, now: number) {
+  if (request.action !== 'create' || request.changes.allDay === true
+    || typeof request.changes.start !== 'string' || typeof request.changes.end !== 'string') return request;
+  const duration = Date.parse(request.changes.end) - Date.parse(request.changes.start);
+  if (!Number.isFinite(duration) || duration < 60_000 || duration > 7 * 86400_000) return request;
+  const start = Math.floor(now / 60_000) * 60_000;
+  request.changes.start = zonedMinute(start, timezone);
+  request.changes.end = zonedMinute(start + duration, timezone);
+  request.changes.timezone = timezone;
+  return request;
+}
+
+function multipleCancelSelection(text: string, candidates: CalendarItem[]) {
+  if (candidates.length < 2 || candidates.length > 10 || !/(?:取消|删除|删掉|删了|cancel|delete|remove)/i.test(text)) return [];
+  const normalized = text.replace(/[\s，。！？,.!?]/g, '');
+  if (/(?:全部|全都|都可以|都删|都取消|both|all(?:ofthem)?)/i.test(normalized)
+    || candidates.length === 2 && /(?:这|那)?(?:两|2)个/.test(normalized)) return candidates;
+  const selected = new Set<number>();
+  const chinese = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+  for (let index = 0; index < Math.min(candidates.length, 10); index++) {
+    const ordinal = `(?:${index + 1}|${chinese[index]})`;
+    if (new RegExp(`第${ordinal}(?:个|项)?`).test(normalized)) selected.add(index);
+  }
+  for (const match of normalized.matchAll(/(?:^|[^\d])(\d{1,2})(?=(?:和|与|及|、|,|还有|以及)\d)/g)) {
+    const index = Number(match[1]) - 1; if (index >= 0 && index < candidates.length) selected.add(index);
+  }
+  return selected.size > 1 ? [...selected].sort((a, b) => a - b).map(index => candidates[index]) : [];
+}
+
+// Deterministic recovery for an occasional model routing miss. This can only
+// enter the Calendar planner/preview path; it never authorizes a write.
+function explicitCalendarIntent(value: string): 'create' | 'update' | 'cancel' | undefined {
+  const text = value.trim().replace(/[\r\n\t]+/g, ' ');
+  if (!text || text.length > 1000 || /(?:不要|别|无需|不需要|为什么|原理|代码|prompt|quoted|他说|她说).{0,24}(?:日历|calendar)/i.test(text)
+    || /(?:\.ics\b|\bICS\b|日历文件|calendar\s+file|作为附件|附件形式|attachment|导出|export)/i.test(text)
+    || /^(?:如何|怎么).{0,80}(?:创建|修改|取消|日历|calendar)/i.test(text) && !/帮我|please/i.test(text)) return undefined;
+  const calendar = '(?:日历|calendar|会议|meeting|event|appointment|提醒)';
+  if (new RegExp(`(?:取消|删除|删掉|cancel|delete|remove).{0,100}${calendar}|${calendar}.{0,100}(?:取消|删除|删掉|cancel|delete|remove)`, 'i').test(text)) return 'cancel';
+  if (new RegExp(`(?:修改|改到|改成|调整|移动|推迟|提前|update|move|reschedule|change).{0,100}${calendar}|${calendar}.{0,100}(?:修改|改到|改成|调整|移动|推迟|提前|update|move|reschedule|change)`, 'i').test(text)) return 'update';
+  if (new RegExp(`(?:创建|新建|添加|加到|放到|排进|安排到|create|add|put|schedule).{0,100}${calendar}|${calendar}.{0,100}(?:创建|新建|添加|加到|放到|排进|安排|create|add|put|schedule)`, 'i').test(text)) return 'create';
+  if (/(?:帮我|请|麻烦|给我).{0,100}(?:安排|设|做|弄|发).{0,80}(?:日历提醒|calendar\s*reminder|calendar\s*invite|日历邀请)|(?:日历提醒|calendar\s*reminder|calendar\s*invite|日历邀请).{0,80}(?:帮我|给我|安排|设|做|弄|发)/i.test(text)) return 'create';
+  return undefined;
+}
+
+function revisesPendingDraft(value: string) {
+  const text = value.trim().replace(/[\r\n\t]+/g, ' ');
+  if (!text || /^(?:不用|不要|别|取消|算了|确认|确定)/.test(text)) return false;
+  return /(?:备注|notes?|description|说明).{0,120}(?:加|添加|写|记|放|改|补充|append|add|change|update)|(?:加|添加|写|记|放|改|补充).{0,120}(?:备注|notes?|description|说明)/i.test(text)
+    || /(?:地点|地址|location|address|标题|名称|title|时间|日期|几点|start|end).{0,100}(?:改|换|设|调整|update|change|move)/i.test(text)
+    || /(?:改|换|设|调整|update|change|move).{0,100}(?:地点|地址|location|address|标题|名称|title|时间|日期|几点|start|end)/i.test(text);
+}
+
+function asksWhetherDraftWasSaved(value: string) {
+  const text = value.trim().replace(/[\r\n\t]+/g, ' ');
+  return /(?:刚才|刚刚|这个|它).{0,40}(?:已经|不是已经|有没有|是否).{0,20}(?:创建|保存|写入|加到).{0,20}(?:吗|了|没有|日历)|(?:已经|不是已经).{0,20}(?:创建|保存|写入|加到).{0,30}(?:吗|了|没有)/i.test(text);
+}
+
+function isConversationalClosure(value: string) {
+  const text = value.trim().replace(/[\r\n\t]+/g, ' ');
+  const done = /(?:目前|暂时|现在)?(?:没有|没)(?:什么)?(?:事情|事|需要|要改|要做)了|不用了|先这样|就这样|nothing else|that(?:'s| is) all/i.test(text);
+  const social = /谢谢|感谢|thank|appreciate/i.test(text);
+  const newRequest = /(?:再|另外|顺便|接着|还要|下一步|现在).{0,30}(?:帮我|给我|请|创建|新建|添加|修改|改到|取消|删除)|(?:请|麻烦|能不能|可以再).{0,24}(?:创建|新建|添加|修改|改到|取消|删除)/i.test(text);
+  return done && social && !newRequest;
+}
+
+function completedCalendarAcknowledgement(value: string, history: Message[]) {
+  const text = value.trim().replace(/[\r\n\t]+/g, ' ');
+  const social = /(?:真|很|太)(?:棒|赞|贴心|好)|好棒|很好|做得好|贴心|谢谢|感谢|满意|做得不错|做得很好|thank|appreciate|great|awesome|nice/i.test(text);
+  const retrospective = /(?:已经|刚才|刚刚|你).{0,36}(?:帮我|给我)?.{0,20}(?:创建|新建|添加|保存).{0,5}(?:了|好|完成|成功)|(?:帮我|给我).{0,20}(?:创建|新建|添加|保存)了/i.test(text);
+  const newRequest = /(?:再|另外|顺便|接着|还要|下一步|现在).{0,30}(?:帮我|给我|请|创建|新建|添加|修改|改到|取消|删除)|(?:请|麻烦|能不能|可以再).{0,24}(?:创建|新建|添加|修改|改到|取消|删除)/i.test(text);
+  if ((!social && !retrospective) || newRequest) return undefined;
+  // This bridge is intentionally one-shot. Once the result has been
+  // acknowledged, later thanks or closure return to normal conversation.
+  const success = history.at(-1);
+  if (success?.role !== 'assistant' || !/Google 已保存(?:全部\d+项日程|新日程)/.test(success.content)) return undefined;
+  const count = /Google 已保存全部(\d+)项日程/.exec(success.content)?.[1];
+  const subject = count === '1' || !count ? '这个日程' : count === '2' ? '这两个日程' : `这${count}个日程`;
+  const done = /(?:目前|暂时|现在)?(?:没有|没)(?:什么)?(?:事情|事|需要|要改|要做)了|不用了|先这样|就这样|nothing else|that(?:'s| is) all/i.test(text);
+  const calendarSatisfied = /(?:calendar|日历).{0,24}(?:没(?:有)?什么问题|没问题|很好|不错|满意|顺手|清楚)/i.test(text);
+  if (calendarSatisfied) return '谢谢你这么说！能把日历整理到让你觉得清楚、顺手，我也很开心。之后有变化，随时告诉我就好。';
+  if (done) return `不客气，${subject}已经稳稳地安排好了。接下来按自己的节奏来就好；之后有变化，随时告诉我。`;
+  return `谢谢你这么说！${subject}已经创建好了。能帮你把安排真正落下来，我也很开心；之后想调整，随时告诉我。`;
+}
+
 export class CalendarDialogue implements DialogueModel {
   private context: CalendarContext = { candidates: [] };
   private contextAt = 0;
   private approval?: Approval;
   private draft?: Draft;
   private readChoice?: ReadChoice;
-  private plans = new WeakMap<AbortSignal, { plan: TurnPlan; approval?: Approval; readChoice?: ReadChoice; selected?: number | 'reject' }>();
+  private batch?: Batch;
+  private cancelBatch?: CancelBatch;
+  private batchQuestion?: string;
+  private plans = new WeakMap<AbortSignal, { plan: TurnPlan; approval?: Approval; readChoice?: ReadChoice;
+    selected?: number | 'reject'; itinerary?: boolean; draftStatus?: boolean; acknowledgement?: string }>();
   constructor(private base: DialogueModel, private service: GoogleCalendarService, private planner: CalendarPlanner,
-    private notify?: (text: string) => void, private now = Date.now, private answerDetails?: CalendarAnswerer) {}
+    private notify?: (text: string) => void, private now = Date.now, private answerDetails?: CalendarAnswerer,
+    private itineraryPlanner?: CalendarItineraryPlanner, private resolveTimezone?: CalendarTimezoneResolver) {}
   invalidate() { if (this.approval) this.service.dismiss(this.approval.id); this.approval = undefined; this.readChoice = undefined; }
-  endSession() { this.invalidate(); this.draft = undefined; this.context = { candidates: [] }; }
+  endSession() { this.invalidate(); this.draft = undefined; this.batch = undefined; this.cancelBatch = undefined; this.batchQuestion = undefined; this.context = { candidates: [] }; }
+  private async previewBatch(signal: AbortSignal, lead = '') {
+    const batch = this.batch;
+    if (!batch || batch.index >= batch.events.length) throw new Error('CALENDAR_ITINERARY_INVALID');
+    const event = batch.events[batch.index];
+    const context: CalendarContext = { candidates: [], draft: event };
+    this.context = context; this.contextAt = this.now();
+    this.draft = { kind: 'create', event, context };
+    const pending = await this.service.preview('create', event, undefined, undefined, true); signal.throwIfAborted();
+    const prompt = `${lead}第${batch.index + 1}/${batch.events.length}项\n${pending.preview}`;
+    this.approval = { ...pending, prompt };
+    return prompt;
+  }
+  private async previewCancelBatch(signal: AbortSignal, lead = '') {
+    const batch = this.cancelBatch;
+    if (!batch || batch.index >= batch.items.length) throw new Error('CALENDAR_CANCEL_BATCH_INVALID');
+    const item = batch.items[batch.index];
+    const resolved = await this.service.scopedTarget(item.id); signal.throwIfAborted();
+    const context: CalendarContext = { candidates: [item], draft: resolved.event };
+    this.context = context; this.contextAt = this.now();
+    this.draft = { kind: 'cancel', event: resolved.event, before: resolved.event, eventId: resolved.id, context };
+    const pending = await this.service.preview('cancel', resolved.event, resolved.id, resolved.event, true); signal.throwIfAborted();
+    const prompt = `${lead}第${batch.index + 1}/${batch.items.length}项\n${pending.preview}`;
+    this.approval = { ...pending, prompt };
+    return prompt;
+  }
   private async refreshDraft(signal: AbortSignal, delta: (s: string) => void) {
     const draft = this.draft;
     if (!draft) { delta('没有待处理的日历草稿。'); return; }
@@ -45,12 +191,20 @@ export class CalendarDialogue implements DialogueModel {
     } catch (error) {
       if (pending) this.service.dismiss(pending.id);
       signal.throwIfAborted();
-      delta(`草稿保留，重新检查未完成（${calendarError(error)}）。尚未提交。`);
+      console.warn(JSON.stringify({ event: 'calendar_draft_refresh_failed', code: calendarError(error) }));
+      delta('草稿仍保留，但暂时没能重新核对。尚未提交，请稍后再试。');
     }
   }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal) {
     const approval = this.approval; this.approval = undefined;
     const choice = this.readChoice; this.readChoice = undefined;
+    const acknowledgement = completedCalendarAcknowledgement(text, history);
+    if (acknowledgement) {
+      if (approval) this.service.dismiss(approval.id);
+      const plan: TurnPlan = { decision: 'respond', calendarAction: 'none', deliveryAction: 'none',
+        reasoningEffort: 'low', cognitiveMode: 'casual', assistantMode: 'casual' };
+      this.plans.set(signal, { plan, acknowledgement }); return plan;
+    }
     if (choice && choice.expires > this.now() && history.at(-1)?.role === 'assistant' && history.at(-1)?.content === choice.prompt) {
       const selected = calendarChoice(text, choice.items);
       if (selected !== undefined) {
@@ -77,6 +231,15 @@ export class CalendarDialogue implements DialogueModel {
       }
     }
     if (this.now() - this.contextAt > 10 * 60000) this.context = { candidates: [] };
+    const prior = history.at(-1);
+    if (this.draft && asksWhetherDraftWasSaved(text)) {
+      if (approval) this.service.dismiss(approval.id);
+      const plan: TurnPlan = { decision: 'respond', calendarAction: 'followup', deliveryAction: 'none' };
+      this.plans.set(signal, { plan, draftStatus: true }); return plan;
+    }
+    const itinerary = !!this.itineraryPlanner && (wantsSeparateItineraryCalendars(text, history)
+      || !!this.batchQuestion && prior?.role === 'assistant' && prior.content === this.batchQuestion);
+    if (this.batchQuestion && !itinerary) this.batchQuestion = undefined;
     let plan: TurnPlan;
     try {
       const resume = this.draft && /^(?:(?:继续|恢复)(?:刚才的|那个)?(?:日历|事件)?草稿|确认(?:创建|修改|取消))[。！.!]*$/.test(text.trim());
@@ -87,17 +250,36 @@ export class CalendarDialogue implements DialogueModel {
       if ((!plan.calendarAction || plan.calendarAction === 'none') && (!plan.deliveryAction || plan.deliveryAction === 'none') && needsCalendarRead(text, history)) {
         plan = { ...plan, decision: 'respond', calendarAction: 'query', deliveryAction: 'none' };
       }
+      if (this.draft && revisesPendingDraft(text)) {
+        plan = { ...plan, decision: 'respond', calendarAction: 'followup', deliveryAction: 'none', reasoningEffort: 'low' };
+      }
+      const explicit = explicitCalendarIntent(text);
+      if (explicit && (!plan.calendarAction || plan.calendarAction === 'none')
+        && (!plan.deliveryAction || plan.deliveryAction === 'none' || plan.deliveryAction === 'calendar')) {
+        plan = { ...plan, decision: 'respond', calendarAction: explicit, deliveryAction: 'none', reasoningEffort: 'low' };
+      }
+      if (!this.draft && isConversationalClosure(text)) {
+        plan = { ...plan, decision: 'respond', calendarAction: 'none', deliveryAction: 'none',
+          cognitiveMode: 'casual', assistantMode: 'casual', reasoningEffort: 'low' };
+      }
+      if (itinerary) plan = { ...plan, decision: 'respond', calendarAction: 'create', deliveryAction: 'none', reasoningEffort: 'medium' };
     } catch (error) { if (approval) this.service.dismiss(approval.id); throw error; }
     if (approval && plan.calendarAction !== 'confirm') this.service.dismiss(approval.id);
-    this.plans.set(signal, { plan, approval }); return plan;
+    this.plans.set(signal, { plan, approval, itinerary }); return plan;
   }
   async decide(history: Message[], text: string, forced: boolean, signal: AbortSignal) { return (await this.plan(history, text, forced, signal)).decision; }
-  async reply(history: Message[], signal: AbortSignal, delta: (s: string) => void, update?: (e: ReplyUpdate) => void, effort?: ReasoningEffort) {
+  async reply(history: Message[], signal: AbortSignal, delta: (s: string) => void, update?: (e: ReplyUpdate) => void,
+    effort?: ReasoningEffort, mode?: AssistantMode, workflows?: WorkflowSelection[]) {
     const context = this.plans.get(signal); this.plans.delete(signal);
     const action = context?.plan.calendarAction ?? 'none';
-    if (action === 'none') { await this.base.reply(history, signal, delta, update, effort); return; }
+    if (context?.acknowledgement) { delta(context.acknowledgement); return; }
+    if (action === 'none') { await this.base.reply(history, signal, delta, update, effort, mode, workflows); return; }
     (this.base as DialogueModel & { invalidate?: () => void }).invalidate?.();
     signal.throwIfAborted();
+    if (context?.draftStatus) {
+      delta(`还没有写入 Google。刚才显示的是待确认预览，草稿仍然保留。你可以继续补充；完成后说“恢复日历草稿”查看确认页。`);
+      return;
+    }
     if (context?.readChoice) {
       const choice = context.readChoice;
       if (context.selected === 'reject') { delta('明白，不是这几个。课程还有其他名称，或大概在哪天吗？'); return; }
@@ -109,7 +291,10 @@ export class CalendarDialogue implements DialogueModel {
         this.context = { candidates: result.items.slice(0, 20) }; this.contextAt = this.now();
         delta(result.items.length ? `下一次·${calendarZoneLabel(choice.timezone)}时间\n${calendarDisplayItems(this.context.candidates, choice.timezone)}`
           : '重新查询后，未来93天未找到这个日程的后续安排，可能已被改动。要换个名称查吗？');
-      } catch (error) { signal.throwIfAborted(); delta(`暂时未能重新核实日历（${calendarError(error)}），不能确认下一次时间。请稍后重试。`); }
+      } catch (error) {
+        signal.throwIfAborted(); console.warn(JSON.stringify({ event: 'calendar_query_failed', code: calendarError(error) }));
+        delta('暂时没能重新核实日历，因此不能确认下一次时间。请稍后重试。');
+      }
       return;
     }
     if (action === 'dismiss') { this.endSession(); delta('已丢弃日历草稿，没有修改任何事件。'); return; }
@@ -133,12 +318,44 @@ export class CalendarDialogue implements DialogueModel {
         const result = await this.service.confirm(approval.id, approval.phrase);
         if (result.state === 'succeeded') this.draft = undefined;
         else if (result.state === 'unknown' && this.draft) this.draft.blocked = true;
-        message = result.state === 'succeeded'
+        if (result.state === 'succeeded' && result.kind === 'create' && this.batch) {
+          const completed = this.batch.index + 1, total = this.batch.events.length;
+          if (completed < total) {
+            this.batch.index++;
+            try { message = await this.previewBatch(signal, `已保存第${completed}/${total}项。\n`); }
+            catch (error) {
+              signal.throwIfAborted();
+              console.warn(JSON.stringify({ event: 'calendar_next_preview_failed', code: calendarError(error) }));
+              message = `已保存第${completed}/${total}项；下一项暂时没能生成确认预览。草稿仍保留，请稍后说“恢复日历草稿”。`;
+            }
+          } else {
+            this.batch = undefined;
+            message = `Google 已保存全部${total}项日程。${result.notifyGuests ? '已请求发送邀请，请确认是否收到。' : ''}`;
+          }
+        } else if (result.state === 'succeeded' && result.kind === 'cancel' && this.cancelBatch) {
+          const completed = this.cancelBatch.index + 1, total = this.cancelBatch.items.length;
+          if (completed < total) {
+            this.cancelBatch.index++;
+            try { message = await this.previewCancelBatch(signal, `已取消第${completed}/${total}项。${result.notifyGuests ? '已请求通知受邀人。' : ''}\n`); }
+            catch (error) {
+              signal.throwIfAborted();
+              console.warn(JSON.stringify({ event: 'calendar_next_cancel_preview_failed', code: calendarError(error) }));
+              message = `已取消第${completed}/${total}项；下一项暂时没能生成确认预览。其余日程没有删除，请稍后说“继续取消其余日程”。`;
+            }
+          } else {
+            this.cancelBatch = undefined;
+            message = `Google 已取消全部${total}项日程。${result.notifyGuests ? '已请求通知受邀人。' : ''}`;
+          }
+        } else message = result.state === 'succeeded'
           ? `Google 已保存${result.kind === 'cancel' ? '取消操作' : result.kind === 'create' ? '新日程' : '修改，原事件已更新'}。${result.notifyGuests ? result.kind === 'create' ? '已请求Google发送邀请，请确认是否收到。' : '已请求通知受邀人。' : ''}`
           : result.state === 'conflict' ? '日程已被改动，本次未覆盖。请重新查询、确认。'
           : result.state === 'unknown' ? 'Google 写入结果暂时无法确定，可能已保存。请先核对日历，不要重复创建；系统不会自动重试。'
-          : `Google 未确认保存，操作失败（${result.error ?? 'CALENDAR_FAILED'}）。请检查授权或重新查询。`;
-      } catch (error) { if (this.draft) this.draft.blocked = true; message = `日历操作未完成（${calendarError(error)}），不能确认已保存。请重新查询核对。`; }
+          : 'Google 还没有确认保存。草稿仍保留，请稍后重试或检查日历授权。';
+      } catch (error) {
+        if (this.draft) this.draft.blocked = true;
+        console.warn(JSON.stringify({ event: 'calendar_write_failed', code: calendarError(error) }));
+        message = 'Google 没有确认本次操作是否完成。请先核对日历，不要重复提交。';
+      }
       this.context = { candidates: [] };
       if (signal.aborted) { this.notify?.(message); return; }
       delta(message); return;
@@ -148,16 +365,57 @@ export class CalendarDialogue implements DialogueModel {
     try {
       if (this.draft?.blocked && ['create', 'update', 'cancel', 'followup'].includes(action)) { delta('上次日历写入结果不确定。请先核对日历，不能重复提交。'); return; }
       const plannerContext = action === 'followup' && this.draft ? { ...this.draft.context, draft: this.draft.event } : this.context;
-      const request = await this.planner(history, plannerContext, signal); signal.throwIfAborted();
+      const explicitTimezone = namedTimezone(history.filter(message => message.role === 'user').slice(-6).map(message => message.content).join(' '));
+      let defaultTimezone = explicitTimezone || plannerContext.draft?.timezone
+        || (plannerContext.candidates.length === 1 ? plannerContext.candidates[0].event?.timezone : undefined);
+      if (!defaultTimezone && this.resolveTimezone) {
+        try { defaultTimezone = await this.resolveTimezone(history, signal); signal.throwIfAborted(); }
+        catch (error) {
+          signal.throwIfAborted();
+          const question = error instanceof TimezoneClarificationError ? error.clarification
+            : '需要先确认你当前位置的时区。请允许一次定位，或告诉我所在城市／时区。';
+          delta(`${question.replace(/[。；;]+$/, '')}；尚未修改日历。`); return;
+        }
+      }
+      if (context?.itinerary && this.itineraryPlanner) {
+        const itinerary = await this.itineraryPlanner(history, signal, defaultTimezone); signal.throwIfAborted();
+        if (itinerary.action === 'clarify') {
+          this.batchQuestion = itinerary.clarification;
+          delta(itinerary.clarification); return;
+        }
+        this.batchQuestion = undefined;
+        this.batch = { events: itinerary.events, index: 0 };
+        delta(await this.previewBatch(signal)); return;
+      }
+      if (this.batch && action === 'create') this.batch = undefined;
+      const latestText = history.at(-1)?.content ?? '';
+      if (action === 'cancel') {
+        if (this.cancelBatch && /(?:继续|恢复).{0,12}(?:取消|删除)|(?:取消|删除).{0,12}(?:其余|剩下)/.test(latestText)) {
+          delta(await this.previewCancelBatch(signal)); return;
+        }
+        const selectedForCancel = multipleCancelSelection(latestText, this.context.candidates);
+        if (selectedForCancel.length > 1) {
+          if (selectedForCancel.some(item => !item.editable)) {
+            delta('所选事件中有只读或非助手创建的日程，不能安全批量取消；尚未删除任何事件。'); return;
+          }
+          if (selectedForCancel.some(item => item.recurringEventId || item.event?.recurrence)) {
+            delta('所选事件包含重复会议。请先说明要取消单次还是整个系列；尚未删除任何事件。'); return;
+          }
+          this.cancelBatch = { items: selectedForCancel, index: 0 };
+          delta(await this.previewCancelBatch(signal)); return;
+        }
+      }
+      let request = await this.planner(history, plannerContext, signal, defaultTimezone); signal.throwIfAborted();
+      if (defaultTimezone && immediateStart(history)) request = pinImmediateStart(request, defaultTimezone, this.now());
       if (request.scope === 'following') { delta('暂不支持“此次及以后”的系列拆分。请选择仅这一次或整个系列；没有提交。'); return; }
       update?.({ type: 'calendar.status', status: 'querying' });
       if (request.action === 'clarify' || request.clarification) { this.context.request = request; this.contextAt = this.now(); delta(request.clarification || '请说明要查询的日期范围或要修改的具体事件。'); return; }
       const changes = Object.fromEntries(Object.entries(request.changes).filter(([, value]) => value !== null));
       if (request.action === 'query' && isNextCalendarQuery(history.at(-1)?.content ?? '')) {
         if (!request.titleQuery.trim()) { delta('想查哪个课程或会议的下一次安排？请告诉我名称。'); return; }
-        const result = await this.service.next(request.titleQuery, request.timezone || process.env.CONVERSATION_TIMEZONE || 'America/Chicago', this.now()); signal.throwIfAborted();
+        const result = await this.service.next(request.titleQuery, request.timezone || defaultTimezone || process.env.CONVERSATION_TIMEZONE || 'UTC', this.now()); signal.throwIfAborted();
         if (!result.items.length && result.suggestions.length) {
-          const items = result.suggestions, timezone = request.timezone || process.env.CONVERSATION_TIMEZONE || 'America/Chicago';
+          const items = result.suggestions, timezone = request.timezone || defaultTimezone || process.env.CONVERSATION_TIMEZONE || 'UTC';
           const label = (item: CalendarItem) => (item.title + (items.length > 1 && items[0].title === items[1].title ? `（${item.location || item.start.slice(0, 10)}）` : '')).replace(/[\r\n]/g, ' ').slice(0, 65);
           const prompt = items.length === 1 ? `日历里有“${label(items[0])}”。你说的是这个课程或会议吗？`
             : `你指的是哪一个？\n1. ${label(items[0])}\n2. ${label(items[1])}\n说名称或第几个即可。`;
@@ -165,7 +423,7 @@ export class CalendarDialogue implements DialogueModel {
           delta(prompt); return;
         }
         this.context = { candidates: result.items.slice(0, 20), request }; this.contextAt = this.now();
-        delta(result.items.length ? `下一次·${calendarZoneLabel(request.timezone || process.env.CONVERSATION_TIMEZONE || 'America/Chicago')}时间\n${calendarDisplayItems(this.context.candidates, request.timezone || process.env.CONVERSATION_TIMEZONE || 'America/Chicago')}`
+        delta(result.items.length ? `下一次·${calendarZoneLabel(request.timezone || defaultTimezone || process.env.CONVERSATION_TIMEZONE || 'UTC')}时间\n${calendarDisplayItems(this.context.candidates, request.timezone || defaultTimezone || process.env.CONVERSATION_TIMEZONE || 'UTC')}`
           : `未来${result.horizonDays}天内未查到匹配的定时日程。这个课程或会议还有其他名称吗？`);
         return;
       }
@@ -210,6 +468,7 @@ export class CalendarDialogue implements DialogueModel {
       if (request.action === 'create') {
         event = validateCalendar(boundRecurrenceRequest({ ...(this.draft?.kind === 'create' ? this.draft.event : undefined), ...changes }));
         event = revisedRecurrenceNotes(event, this.draft?.kind === 'create' ? this.draft.event : undefined);
+        if (this.batch) this.batch.events[this.batch.index] = event;
       } else {
         const resolved = await this.service.scopedTarget(selected!.id, scope); signal.throwIfAborted();
         before = resolved.event; targetId = resolved.id;
@@ -221,13 +480,16 @@ export class CalendarDialogue implements DialogueModel {
       this.context = { candidates: selected ? [selected] : [], request, draft: event }; this.contextAt = this.now();
       this.draft = { kind: request.action, event, before, eventId: targetId, scope, context: this.context };
       pending = await this.service.preview(request.action, event, targetId, before, true, scope); signal.throwIfAborted();
-      this.approval = { ...pending, prompt: pending.preview }; delta(pending.preview);
+      const prompt = this.batch && request.action === 'create'
+        ? `第${this.batch.index + 1}/${this.batch.events.length}项\n${pending.preview}` : pending.preview;
+      this.approval = { ...pending, prompt }; delta(prompt);
     } catch (error) {
       if (pending) this.service.dismiss(pending.id);
       signal.throwIfAborted();
       const code = calendarError(error);
-      delta(code === 'CALENDAR_SCOPE_REQUIRED' ? '请确认仅这一次或整个系列；尚未提交。' : code.startsWith('CALENDAR_RECURRENCE') ? '重复规则暂不支持或遇到夏令时歧义。请使用有具体次数的按天／按周定时会议，或调整时间；尚未提交。' : code === 'CALENDAR_PREVIEW_TOO_LONG' ? '改动较多，超过两页。请分次修改或缩短内容；尚未提交。' : code.includes('CHANGED') ? '日程刚刚发生变化，没有提交修改。请重新查询后确认。'
-        : `日历查询或预览未完成（${code}），没有提交修改。请核对日期、起止时间和时区，或稍后重试。`);
+      console.warn(JSON.stringify({ event: 'calendar_planning_failed', code }));
+      delta(code === 'CALENDAR_SCOPE_REQUIRED' ? '请确认仅这一次或整个系列；尚未提交。' : code.startsWith('CALENDAR_RECURRENCE') ? '重复规则暂不支持或遇到夏令时歧义。请使用有具体次数的按天／按周定时会议，或调整时间；尚未提交。' : code === 'CALENDAR_PREVIEW_TOO_LONG' ? '预览仍然过长，尚未提交。这次先处理时间、地点还是备注？' : code.includes('CHANGED') ? '日程刚刚发生变化，没有提交修改。请重新查询后确认。' : code.startsWith('CALENDAR_NETWORK') || code.startsWith('GOOGLE_') ? 'Google Calendar 查询未完成，因此我不能把它当作“没有安排”。没有修改任何日程，请稍后重试。'
+        : '我暂时没能把这次日历要求整理成安全的预览。上下文仍保留；请再说一次最关键的日期或时间，我继续处理。');
     }
   }
 }

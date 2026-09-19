@@ -27,10 +27,44 @@ export function wrapLines(text: string, columns = 40): string[] {
 }
 
 export function paginate(text: string, columns = 40, rows = 5): string[] {
-  const lines = wrapLines(text, columns);
+  const input = text.replace(/\r/g, '');
+  const logical = input.split('\n');
+  const blocks: { kind: 'plain' | 'point'; text: string }[] = [];
+  let current: { kind: 'plain' | 'point'; lines: string[] } | undefined;
+  const flush = () => {
+    if (!current) return;
+    while (current.lines.at(-1) === '') current.lines.pop();
+    if (current.lines.length) blocks.push({ kind: current.kind, text: current.lines.join('\n') });
+    current = undefined;
+  };
+  for (const line of logical) {
+    const point = /^\s*(?:[-*•]|\d+[.)、）])\s+/.test(line);
+    if (point) { flush(); current = { kind: 'point', lines: [line] }; continue; }
+    if (!line.trim()) { flush(); continue; }
+    if (!current) current = { kind: 'plain', lines: [line] };
+    else current.lines.push(line);
+  }
+  flush();
+  if (!blocks.length) return [''];
+
   const pages: string[] = [];
-  for (let i = 0; i < lines.length; i += rows) pages.push(lines.slice(i, i + rows).join('\n'));
-  return pages;
+  let page: string[] = [];
+  const pushPage = () => { if (page.length) pages.push(page.join('\n')); page = []; };
+  const addChunked = (lines: string[], keepTogether: boolean) => {
+    // Keep a short semantic point together when it fits, but do not force every
+    // bullet onto its own mostly-empty page. Pages remain strictly non-overlapping.
+    if (keepTogether && lines.length <= rows && page.length && page.length + lines.length > rows) pushPage();
+    for (const line of lines) {
+      if (page.length >= rows) pushPage();
+      page.push(line);
+    }
+  };
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index], lines = wrapLines(block.text, columns);
+    addChunked(lines, block.kind === 'point');
+  }
+  pushPage();
+  return pages.length ? pages : [''];
 }
 export class Pager {
   text = ''; index = 0;

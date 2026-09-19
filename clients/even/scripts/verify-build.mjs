@@ -14,6 +14,12 @@ const secretPatterns = [
   /\bG2_CLIENT_TOKEN\s*=/,
   /\b(?:OPENAI|GOOGLE|EMAIL)_[A-Z0-9_]*(?:KEY|SECRET|PASSWORD|TOKEN)\s*=/
 ];
+const developmentOnlyPatterns = [
+  /开发测试\s*·\s*模拟定位/,
+  /Des Moines\s*·\s*Downtown/,
+  /41\.5868/,
+  /developmentLocationPanel/
+];
 
 async function files(directory) {
   const output = [];
@@ -42,6 +48,9 @@ for (const path of builtFiles) {
   for (const pattern of secretPatterns) {
     if (pattern.test(text)) throw new Error(`Possible credential in release file: ${name}`);
   }
+  for (const pattern of developmentOnlyPatterns) {
+    if (pattern.test(text)) throw new Error(`Development-only location fixture in release file: ${name}`);
+  }
 }
 
-console.log(`Verified ${builtFiles.length} release files: no debug folders, source maps, private keys, or obvious credentials.`);
+console.log(`Verified ${builtFiles.length} release files: no debug fixtures, source maps, private keys, or obvious credentials.`);

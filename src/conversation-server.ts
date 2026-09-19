@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { Conversation, type DialogueModel, type Event, type Message } from './conversation.js';
 import { createDialogueProvider } from './dialogue-provider.js';
-import { LiveTranscriber } from './live-transcriber.js';
+import { createSttProvider, type StreamingTranscriber } from './stt-provider.js';
 import { TurnDetector } from './vad.js';
 import { JobStore } from './job-store.js';
 import { createMailSender, type MailSender } from './mail.js';
@@ -19,21 +19,35 @@ import { GoogleCalendarService, loadCalendarTransport } from './google-calendar.
 import { CalendarControl } from './calendar-control.js';
 import { CalendarDialogue } from './calendar-dialogue.js';
 import { createCalendarPlanner, type CalendarPlanner } from './calendar-planner.js';
+import { createCalendarItineraryPlanner, type CalendarItineraryPlanner } from './calendar-itinerary-planner.js';
 import { createCalendarAnswerer, type CalendarAnswerer } from './calendar-answer.js';
-import { locationStatus, parseLocationReport, type EphemeralLocation } from './location.js';
+import { LocationRequestBroker, locationStatus, parseLocationReport } from './location.js';
+import { LocationDialogue } from './location-dialogue.js';
+import { createRouteProvider, type RouteProvider } from './routes.js';
+import { createTimezoneProvider, resolveLocationTimezone, type TimezoneFallback, type TimezoneProvider } from './timezone.js';
+import { createTimezoneFallback } from './timezone-fallback.js';
+import { createEnvironmentProvider, type EnvironmentProvider } from './environment.js';
+import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type PlanningEvidenceSelector } from './planning-evidence-dialogue.js';
 
-type Transcriber = Pick<LiveTranscriber, 'result' | 'push' | 'finish' | 'cancel'>;
+type Transcriber = StreamingTranscriber;
 export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
   models?: { intent: string; reply: string };
-  capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean; location?: boolean };
+  capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean; speechProvider?: string; location?: boolean; routes?: boolean;
+    environment?: boolean; conditionalTasks?: boolean };
   jobs?: JobStore;
   mail?: MailSender;
   draftGenerator?: DraftGenerator;
   calendar?: GoogleCalendarService;
   calendarPlanner?: CalendarPlanner;
+  calendarItineraryPlanner?: CalendarItineraryPlanner;
   calendarAnswerer?: CalendarAnswerer;
+  routeProvider?: RouteProvider;
+  timezoneProvider?: TimezoneProvider;
+  timezoneFallback?: TimezoneFallback;
+  environmentProvider?: EnvironmentProvider;
+  planningEvidenceSelector?: PlanningEvidenceSelector;
   ingress?: { publicHosts?: string[]; allowedOrigins?: string[] };
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
@@ -131,7 +145,6 @@ export function createConversationServer(options: {
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
     let mailApproval: { id: string; token: string; expires: number; retryAttempt?: number } | undefined;
-    let latestLocation: EphemeralLocation | undefined;
     let unsubscribeCalendarHealth: (() => void) | undefined;
     const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
       (jobId, result) => { if (!closed) { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); } }) : undefined;
@@ -139,16 +152,41 @@ export function createConversationServer(options: {
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 262144) client.send(JSON.stringify(event));
       else client.close(1013, 'Client too slow');
     };
+    const locationBroker = new LocationRequestBroker(send, randomUUID);
+    const resolveCalendarTimezone = async (history: Message[], signal: AbortSignal) => {
+      const cached = locationBroker.timezone();
+      if (cached) return cached;
+      const location = await locationBroker.request(signal);
+      const timezone = await resolveLocationTimezone(location, history, options.timezoneProvider, options.timezoneFallback, signal,
+        () => console.warn(JSON.stringify({ event: 'timezone_provider_fallback', provider: 'google-timezone', fallback: 'luna' })));
+      return locationBroker.rememberTimezone(timezone)!;
+    };
     const clearCapture = () => {
       generation++; detector.reset(); current = undefined; forced = false;
       for (const slot of slots) slot.job.cancel(); slots = [];
     };
     const calendarControl = options.calendar ? new CalendarControl(options.calendar, send) : undefined;
     const calendarDialogue = options.calendar && options.calendarPlanner ? new CalendarDialogue(delivery ?? options.model, options.calendar, options.calendarPlanner,
-      text => { if (!closed) send({ type: 'notice', text }); }, Date.now, options.calendarAnswerer) : undefined;
-    const conversation = new Conversation(calendarDialogue ?? delivery ?? options.model, event => {
-      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) { clearCapture(); delivery?.invalidate(); mailApproval = undefined; calendarControl?.invalidate(); calendarDialogue?.invalidate(); }
-      if (event.type === 'state' && event.state === 'closed') calendarDialogue?.endSession();
+      text => { if (!closed) send({ type: 'notice', text }); }, Date.now, options.calendarAnswerer, options.calendarItineraryPlanner,
+      options.capabilities?.location === true ? resolveCalendarTimezone : undefined) : undefined;
+    const locationDialogue = options.routeProvider && options.capabilities?.location === true
+      ? new LocationDialogue(calendarDialogue ?? delivery ?? options.model, locationBroker, options.routeProvider,
+        process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', Date.now, options.model) : undefined;
+    const planningEvidenceDialogue = options.environmentProvider && options.planningEvidenceSelector
+      ? new PlanningEvidenceDialogue(locationDialogue ?? calendarDialogue ?? delivery ?? options.model,
+        options.planningEvidenceSelector, locationBroker, options.environmentProvider) : undefined;
+    const conversationModel = planningEvidenceDialogue ?? locationDialogue ?? calendarDialogue ?? delivery ?? options.model;
+    let sessionEnded = false;
+    const endSession = () => {
+      if (sessionEnded) return;
+      sessionEnded = true; locationDialogue?.endSession(); calendarDialogue?.endSession(); options.model.endSession?.();
+    };
+    const conversation = new Conversation(conversationModel, event => {
+      if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) {
+        clearCapture(); delivery?.invalidate(); mailApproval = undefined; calendarControl?.invalidate(); calendarDialogue?.invalidate();
+        locationDialogue?.invalidate();
+      }
+      if (event.type === 'state' && event.state === 'closed') endSession();
       send(event);
       if (event.type === 'state' && event.state === 'closed') client.close(1000, 'Conversation ended');
     }, history => options.save?.(id, history) ?? Promise.resolve());
@@ -192,7 +230,7 @@ export function createConversationServer(options: {
         if (++budgetFrames > 250) throw new Error('Rate limit');
         if (binary) {
           if (!authenticated) throw new Error('Auth required');
-          if (options.capabilities?.speech === false) { send({ type: 'notice', text: '当前为文字模式；语音转录需要 OPENAI_API_KEY。' }); return; }
+          if (options.capabilities?.speech === false) { send({ type: 'notice', text: '当前为文字模式；请检查所选 STT provider 的 API key。' }); return; }
           if (!conversation.acceptsInput) return; // Drop queued audio after pause/exit.
           const pcm = Buffer.from(raw as Buffer); totalBytes += pcm.length;
           if (!pcm.length || pcm.length % 2 || pcm.length > 6400 || totalBytes > 32000 * 1800) throw new Error('Audio limit');
@@ -205,6 +243,7 @@ export function createConversationServer(options: {
           if (msg.type !== 'hello' || given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Auth');
           if (owner && owner !== client) { send({ type: 'error', code: 'BUSY' }); client.close(); return; }
           owner = client; authenticated = true; clearTimeout(authTimer);
+          options.model.startSession?.(); locationDialogue?.startSession();
           send({ type: 'ready', session_id: id, models: options.models, capabilities: { ...options.capabilities, email: !!options.mail, calendar: !!options.calendar } }); send({ type: 'state', state: conversation.state });
           if (options.calendar) {
             let lastHealthState = '';
@@ -239,16 +278,32 @@ export function createConversationServer(options: {
             if (options.capabilities?.location !== true) { send({ type: 'location.status', state: 'disabled' }); break; }
             try {
               const report = parseLocationReport(msg);
-              latestLocation = report.location;
-              send(locationStatus(report.location));
+              if (report.requestId) {
+                if (locationBroker.accept(report)) send(locationStatus(report.location));
+                else send({ type: 'location.status', state: 'cleared' });
+              } else if (locationBroker.prime(report)) send(locationStatus(report.location));
+              else send({ type: 'location.status', state: 'unavailable', reason: 'low_accuracy' });
             } catch {
               send({ type: 'location.status', state: 'unavailable', reason: 'invalid_or_stale' });
             }
             break;
           }
+          case 'location.failed':
+            if (options.capabilities?.location !== true) { send({ type: 'location.status', state: 'disabled' }); break; }
+            if (!locationBroker.fail(msg)) send({ type: 'location.status', state: 'cleared' });
+            break;
           case 'location.clear':
             if (Object.keys(msg).some(key => key !== 'type')) throw new Error('Invalid location clear');
-            latestLocation = undefined; send({ type: 'location.status', state: 'cleared' }); break;
+            locationBroker.clear(); break;
+          case 'route.mode': {
+            if (Object.keys(msg).some(key => !['type', 'mode'].includes(key))
+              || !['drive', 'walk', 'bicycle'].includes(msg.mode)) throw new Error('Invalid route mode');
+            if (!locationDialogue) { send({ type: 'notice', text: '实时路线尚未启用。' }); break; }
+            locationDialogue.setPreferredMode(msg.mode);
+            const names = { drive: '驾车', walk: '步行', bicycle: '骑车' } as const;
+            send({ type: 'notice', text: `本次对话默认交通方式已切换为${names[msg.mode as keyof typeof names]}。` });
+            break;
+          }
           case 'jobs.email.cancel': mailApproval = undefined; send({ type: 'notice', text: '已取消本次发送确认，没有发送邮件。' }); break;
           case 'jobs.email.prepare': {
             if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); break; }
@@ -315,7 +370,7 @@ export function createConversationServer(options: {
     client.on('close', () => {
       closed = true; clearTimeout(authTimer); clearInterval(idle); clearTimeout(lifetime);
       unsubscribeCalendarHealth?.();
-      latestLocation = undefined; clearCapture(); conversation.close(); if (owner === client) owner = undefined;
+      locationBroker.cancel(); clearCapture(); conversation.close(); endSession(); if (owner === client) owner = undefined;
     });
   });
   return { http, wss, close: async () => {
@@ -345,6 +400,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const key = process.env.OPENAI_API_KEY, token = process.env.G2_CLIENT_TOKEN;
   if (!token) throw new Error('Set G2_CLIENT_TOKEN in .env');
   const hybrid = createDialogueProvider();
+  const stt = createSttProvider();
+  const routeProvider = createRouteProvider();
+  const timezoneProvider = createTimezoneProvider();
+  const environmentProvider = createEnvironmentProvider();
   const mail = createMailSender();
   const dataDirectory = resolve(process.env.EVEN_DATA_DIR ?? '.local');
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer());
@@ -357,18 +416,29 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     } catch { await jobs.close(); throw new Error('Google Calendar setup invalid; check private auth files and calendar binding.'); }
   }
   const save = fileSaver(resolve(dataDirectory, 'conversations'));
+  const timezoneFallback = calendar && hybrid.provider === 'api' && key
+    ? createTimezoneFallback(key, hybrid.models.reply) : undefined;
+  const planningEvidenceSelector = hybrid.provider === 'api' && key && environmentProvider
+    ? createPlanningEvidenceSelector(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',
+      process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago') : undefined;
   const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
     jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner() : undefined,
+    calendarItineraryPlanner: calendar && hybrid.provider === 'api' && key
+      ? createCalendarItineraryPlanner(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',
+        process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago') : undefined,
     calendarAnswerer: calendar && hybrid.provider === 'api' ? createCalendarAnswerer() : undefined,
+    routeProvider,
+    timezoneProvider,
+    timezoneFallback,
+    environmentProvider,
+    planningEvidenceSelector,
     draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
-    capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: !!key, location: true },
+    capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: stt.configured, speechProvider: stt.name, location: true,
+      routes: !!routeProvider, environment: !!planningEvidenceSelector, conditionalTasks: false },
     ingress: publicHost ? { publicHosts: [publicHost], allowedOrigins: publicOrigin ? [publicOrigin] : undefined } : undefined,
-    transcriber: delta => {
-      if (!key) throw new Error('Speech requires OPENAI_API_KEY');
-      return new LiveTranscriber(key, process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-live-transcribe', delta);
-    },
+    transcriber: delta => stt.create(delta),
     save
   });
   const port = Number(process.env.CONVERSATION_PORT ?? 3001);
@@ -377,7 +447,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exitCode = 1;
     void shutdown();
   });
-  app.http.listen(port, '127.0.0.1', () => console.log(`Conversation lab: http://127.0.0.1:${port} | provider=${hybrid.provider} | intent=${hybrid.models.intent} | reply=${hybrid.models.reply} | speech=${!!key}`));
+  app.http.listen(port, '127.0.0.1', () => console.log(`Conversation lab: http://127.0.0.1:${port} | provider=${hybrid.provider} | intent=${hybrid.models.intent} | reply=${hybrid.models.reply} | stt=${stt.name}/${stt.model} | speech=${stt.configured}`));
   let stopping: Promise<void> | undefined;
   function shutdown() {
     return stopping ??= (async () => {
@@ -389,6 +459,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       } finally { clearTimeout(deadline); }
     })().catch(() => { process.exitCode = 1; });
   }
-  process.on('SIGINT', () => { void shutdown(); });
-  process.on('SIGTERM', () => { void shutdown(); });
+  const stopFromSignal = () => { void shutdown().finally(() => process.exit(process.exitCode ?? 0)); };
+  process.once('SIGINT', stopFromSignal);
+  process.once('SIGTERM', stopFromSignal);
 }

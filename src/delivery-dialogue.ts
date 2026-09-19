@@ -1,4 +1,4 @@
-import type { DialogueModel, Message, TurnPlan, ReplyUpdate, ReasoningEffort } from './conversation.js';
+import { activeTopicHistory, type AssistantMode, type DialogueModel, type Message, type TurnPlan, type ReplyUpdate, type ReasoningEffort, type WorkflowSelection } from './conversation.js';
 import type { Draft, DraftGenerator } from './delivery-draft.js';
 import type { MailSender } from './mail.js';
 import { JobStore } from './job-store.js';
@@ -13,10 +13,23 @@ export const explicitResend = (text: string) => /^(?:确认重发|确认重新�
 export function naturalMailApproval(text: string) {
   const s = text.trim();
   return s.length <= 160 && /发|send|email|mail/i.test(s)
-    && !/[?？“”"「」『』@]|不|没|别|吗|么|等等|等会|稍后|明天|以后|如果|假如|他说|她说|改|换|加|删|先.*再|刚才|已经|是否|能否|can you|could you|should|if\b|don't|not\b|\bno\b|never|later|tomorrow|said|change|instead|already|after/i.test(s)
+    && !/[?？“”"「」『』@]|不|没|别|取消|撤回|吗|么|等等|等会|稍后|明天|以后|如果|假如|他说|她说|改|换|加|删|先.*再|刚才|已经|是否|能否|can you|could you|should|cancel|withdraw|if\b|don't|not\b|\bno\b|never|later|tomorrow|said|change|instead|already|after/i.test(s)
     && !/发给\s*(?!我|自己|固定邮箱)[^\s，。！]|发(?:送)?到\s*(?!我的邮箱|我邮箱|固定邮箱)[^\s，。！]|\bto\s+(?!me\b|my\b|the fixed\b)/i.test(s);
 }
+function contextualMailApproval(text: string) {
+  return /^(?:好(?:的)?[，,、\s]*)?(?:可以|没问题|ok(?:ay)?)[。！.!\s]*$/i.test(text.trim());
+}
 export const mailFallback = '请先稍等片刻，检查垃圾邮件、所有邮件，并搜索“Even 笔记”。也可到网页文件列表直接下载 MD／ICS；无需重新生成文件或开放收件箱权限。';
+const explicitDocumentRequest = (value: string) => {
+  const text = value.trim().replace(/[\r\n\t]+/g, ' ');
+  if (!text || text.length > 2000 || /(?:不要|别|无需|不需要).{0,30}(?:生成|整理|导出|MD|Markdown|文档|文件)/i.test(text)
+    || /^(?:如何|怎么|为什么).{0,100}(?:生成|整理|导出|MD|Markdown|文档|文件)/i.test(text) && !/帮我|please/i.test(text)) return false;
+  const namedContent = /(?:刚才|这份|这个|上面|之前)?.{0,30}(?:计划|方案|回答|内容|总结|笔记|清单|步骤|行程|notes?|plan|summary|answer|itinerary)/i;
+  const toFixedRecipient = /(?:发给我|发到(?:我|我的)?邮箱|发送到(?:我|我的)?邮箱|email\s+(?:it\s+)?to\s+me|email\s+me|send\s+(?:it\s+)?to\s+(?:me|my\s+email))/i;
+  return /(?:生成|整理|写成|导出|做成|create|write|export|turn).{0,120}(?:MD|Markdown|文档|文件|notes?|plan)/i.test(text)
+    || /(?:MD|Markdown|文档|文件).{0,120}(?:生成|整理|写|导出|发给我|email|send)/i.test(text)
+    || namedContent.test(text) && toFixedRecipient.test(text);
+};
 function clipForGlasses(text: string, cells: number) {
   const clean = text.replace(/\s+/g, ' ').trim();
   let result = '', used = 0;
@@ -44,9 +57,14 @@ export class DeliveryDialogue implements DialogueModel {
   invalidate() { this.approval = undefined; }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan> {
     const approval = this.approval; this.invalidate();
-    const plan = this.base.plan ? await this.base.plan(history, text, forced, signal)
+    let plan = this.base.plan ? await this.base.plan(history, text, forced, signal)
       : { decision: await this.base.decide(history, text, forced, signal) };
     signal.throwIfAborted();
+    if (approval && (explicitSend(text) || explicitResend(text) || naturalMailApproval(text) || contextualMailApproval(text))) {
+      plan = { ...plan, decision: 'respond', deliveryAction: 'confirm', calendarAction: 'none', reasoningEffort: 'low' };
+    } else if ((!plan.deliveryAction || plan.deliveryAction === 'none' || plan.deliveryAction === 'confirm') && explicitDocumentRequest(text)) {
+      plan = { ...plan, decision: 'respond', deliveryAction: 'document', calendarAction: 'none' };
+    }
     this.plans.set(signal, { plan, approval });
     return plan;
   }
@@ -73,11 +91,12 @@ export class DeliveryDialogue implements DialogueModel {
     const prompt = `${mailFallback}\n\n要将同一份文件“${this.jobs.metadata(this.jobId)?.filename ?? '谈话笔记.md'}”再发送一次到固定邮箱吗？内容不会改变；前一封可能延迟到达，因此可能收到两封。每份文件最多重发一次。${calendar ? '\n' + calendarDetails(calendar) + '\n' : ''}请说“${calendar ? calendarConfirmationPhrase(calendar, true) : '确认重发'}”，或说“取消发送”。`;
     delta(prompt); this.approval = { id: this.jobId, prompt, expires: this.now() + 5 * 60000, retryAttempt: this.jobs.mailAttempts(this.jobId) };
   }
-  async reply(history: Message[], signal: AbortSignal, delta: (text: string) => void, update?: (event: ReplyUpdate) => void, effort?: ReasoningEffort) {
+  async reply(history: Message[], signal: AbortSignal, delta: (text: string) => void, update?: (event: ReplyUpdate) => void,
+    effort?: ReasoningEffort, mode?: AssistantMode, workflows?: WorkflowSelection[]) {
     const context = this.plans.get(signal); this.plans.delete(signal);
     const action = context?.plan.deliveryAction ?? 'none';
     signal.throwIfAborted();
-    if (action === 'none') { await this.base.reply(history, signal, delta, update, effort); return; }
+    if (action === 'none') { await this.base.reply(history, signal, delta, update, effort, mode, workflows); return; }
     if (action === 'not_received') { this.retryPreview(delta); return; }
     if (action === 'received') {
       if (!this.jobId || !this.jobs.mailState(this.jobId) || this.jobs.mailState(this.jobId) === 'sending') { delta('谢谢反馈。当前没有可关联的已结束发送记录；你也可以在网页文件列表标记对应邮件已收到。'); return; }
@@ -96,7 +115,7 @@ export class DeliveryDialogue implements DialogueModel {
       const calendar = this.jobId ? this.jobs.calendar(this.jobId) : undefined;
       const validPhrase = calendar ? calendarApprovalMatches(text, calendar, !!approval?.retryAttempt)
           || (naturalMailApproval(text) && !/芝加哥|纽约|洛杉矶|时区|Chicago|New York|Los Angeles|UTC|GMT|\d|明天|后天/.test(text))
-        : (approval?.retryAttempt ? explicitResend(text) : explicitSend(text)) || naturalMailApproval(text);
+        : (approval?.retryAttempt ? explicitResend(text) : explicitSend(text)) || naturalMailApproval(text) || contextualMailApproval(text);
       if (!validPhrase || !approval || approval.expires <= this.now() || approval.id !== this.jobId
         || lastAssistant?.role !== 'assistant' || lastAssistant.content !== approval.prompt) {
         if (approval?.retryAttempt || explicitResend(text) || (calendar && calendarApprovalMatches(text, calendar, true))) this.retryPreview(delta); else this.preview(delta);
@@ -122,7 +141,10 @@ export class DeliveryDialogue implements DialogueModel {
     update?.({ type: 'artifact.status', status: 'generating' });
     let newJob: string | undefined;
     try {
-      const generated = await this.generate(history, action, action === 'revise' ? this.draft : undefined, signal);
+      // Normal Luna replies receive the whole session as short-term memory. A
+      // generated artifact remains scoped to the active topic so a trip plan and
+      // a business idea are never silently blended into one document.
+      const generated = await this.generate(activeTopicHistory(history), action, action === 'revise' ? this.draft : undefined, signal);
       signal.throwIfAborted();
       if ('clarification' in generated) { delta(generated.clarification + '\n尚未发送邮件。'); return; }
       const job = this.jobs.enqueueDocument(generated.document, generated.calendar); newJob = job.id;

@@ -11,7 +11,7 @@ Run from the project root. No automatic retries. Default application model and `
 - Strict function schemas with automatic tool choice and parallel tool calls disabled.
 - Memory/list/deployment tools are fixtures: **no real actions executed**. One simulated permission-denied result is returned to test the full tool round-trip.
 - Date interpretation is controlled: prompt explicitly defines Tuesday 2026-09-15 and next Friday as 2026-09-18. This is not a test of ambiguous relative-date resolution.
-- One genuine hosted `web_search` call, forced with `tool_choice=required`, capped at one and charged to the shared 20/day, 600/calendar-month ledger. This tests compatibility, not autonomous search routing.
+- One genuine hosted `web_search` call, forced with `tool_choice=required`, capped at one and charged to the then-current 20/day, 600/calendar-month ledger. This historical test predates the current 10/answer, 50/session, 100/day, 1200/month defaults and tests compatibility, not autonomous search routing.
 - Nine paid requests total. Reported usage: 11,488 input tokens, 2,253 output tokens (including 1,600 reasoning tokens). No STT calls.
 
 ## Observations

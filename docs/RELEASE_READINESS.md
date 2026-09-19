@@ -108,11 +108,41 @@ safe arbitrary-self-host client. Each self-hoster must rebuild with their own ex
 origin unless the platform later provides a reviewable endpoint-configuration model.
 Wildcards, open Origin checks and a shared maintainer token are not acceptable.
 
-The phone companion text box is already present. The `0.2.0` source candidate adds
-manual one-shot and continuous location transport with validation and session-only
-retention. It does not provide reverse geocoding, traffic routes, or LLM location
-context yet and still requires physical-device permission/lifecycle validation. See
-[companion input, location, and safe distribution](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md).
+The phone companion text box is already present. Source after the existing `0.2.0`
+package now adds automatic session-only location, three bounded first/stale-fix attempts,
+typed-origin fallback, Places candidate ratings, traffic-aware Route Matrix
+comparison, confidence-adjusted recommendation, and drive/walk/cycle session modes.
+Coordinates bypass the LLM/history/logs, refresh at most every 10 seconds, and are cleared on explicit stop, disconnect or session exit. Mocked
+tests pass, but this source has deliberately not been deployed or repacked yet. See
+[companion input, location, and safe distribution](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)
+and [Google Maps route setup](setup/GOOGLE_MAPS_ROUTES.md).
+
+## Current location release gate
+
+Do not reorder or collapse these steps:
+
+1. Developer local typecheck, unit/integration tests, server-only build, SDK test/build,
+   public-source scan and manual diff review. Completed for this local POC on
+   2026-09-18; no live Google request was made by the automated gate.
+2. User local simulator acceptance, including first permission guidance, success,
+   nearby candidate/rating display, drive/walk/cycle recalculation, three-attempt
+   failure, typed-origin fallback, interruption and exit.
+3. Only after that approval, configure the restricted server Maps key, deploy the
+   server-only release to Linux and perform live route tests.
+4. Run the post-deployment security review: public ports, loopback, HTTPS/WSS,
+   Origin/token rejection, secret permissions, service sandbox, key/API/IP
+   restrictions, quotas/alerts and coordinate-free logs.
+5. Perform other travel-region and failure tests. Only when all preceding gates are
+   ready should a final `.ehpk` be rebuilt for Private Testing and real G2/phone
+   permission/lifecycle acceptance.
+
+Weather, Air Quality and transit are separate later gates. They are not enabled by
+this POC and must not be inferred from the route result.
+
+Separate control-plane TODO: set the OpenAI project's monthly spend limit to `$40`
+and enable hard enforcement in the API dashboard. Application search limits are
+10/answer, 50/session, 100/day and 1200/calendar-month, but they do not cap all API,
+Maps or AWS charges.
 
 Even Hub publication requires platform review; no approval is implied here.
 - [Even Hub developer terms](https://support.evenrealities.com/hc/en-us/articles/15606676690703-Even-Hub-Developer-Platform-Terms-of-Service)

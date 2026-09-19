@@ -68,7 +68,7 @@ cat /etc/os-release
 timedatectl
 ```
 
-应用使用 `America/Chicago` 解释默认日历时间，但服务器系统时区可以保持 UTC。不要用修改服务器时区来修复日历时间问题。
+服务器系统时区保持 UTC。应用通过一次性当前位置和 Google Time Zone API 解析 Calendar 的相对本地时间；显式指定的事件时区优先。`CONVERSATION_TIMEZONE` 仍用于配额日界线及无定位组件的离线工具，不应通过修改服务器系统时区修复日历问题。
 
 ## 5. 主机防火墙 UFW
 
@@ -217,9 +217,18 @@ sudo find /opt/even-agent -type f -exec chmod 0644 {} \;
 OPENAI_API_KEY=<secret>
 DIALOGUE_PROVIDER=api
 G2_CLIENT_TOKEN=<at-least-32-random-characters>
-OPENAI_TRANSCRIBE_MODEL=<model-name>
+STT_PROVIDER=soniox
+SONIOX_API_KEY=<secret>
+SONIOX_TRANSCRIBE_MODEL=stt-rt-v5
+# Optional rollback only:
+OPENAI_TRANSCRIBE_MODEL=gpt-live-transcribe
 OPENAI_INTENT_MODEL=<model-name>
 OPENAI_REPLY_MODEL=<model-name>
+OPENAI_WEB_SEARCH=true
+OPENAI_MAX_SEARCH_CALLS=10
+OPENAI_SEARCH_SESSION_LIMIT=50
+OPENAI_SEARCH_DAILY_LIMIT=100
+OPENAI_SEARCH_MONTHLY_LIMIT=1200
 CONVERSATION_PORT=3001
 CONVERSATION_TIMEZONE=America/Chicago
 EVEN_PUBLIC_HOST=<your-domain.example>
@@ -227,6 +236,9 @@ EVEN_PUBLIC_ORIGIN=https://<your-domain.example>
 GOOGLE_CALENDAR_ACCOUNT=<assistant-account@example.com>
 GOOGLE_CALENDAR_NAME=Even Assistant
 GOOGLE_CALENDAR_ENABLED=true
+# Only after local route acceptance and Maps key/IP/API restrictions are complete:
+GOOGLE_MAPS_ENABLED=false
+GOOGLE_MAPS_API_KEY=<restricted-server-key>
 EVEN_EMAIL_ENABLED=true
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
@@ -237,6 +249,12 @@ EMAIL_FROM=<assistant-account@example.com>
 EMAIL_TO=<fixed-recipient@example.com>
 EMAIL_AI_SUMMARY=true
 ```
+
+`GOOGLE_MAPS_ENABLED` 在本地人工路线验收前保持 `false`。启用前按
+[Google Maps 路线指南](GOOGLE_MAPS_ROUTES.md) 把 key 限制到 Places API
+(New)、Routes API 和 Lightsail 静态出口 IP。Calendar OAuth 文件不能代替该
+key。OpenAI 的 `$40/月` project hard limit 必须在 API Dashboard 单独开启；
+环境变量中的搜索次数只限制 web search，不是美元硬上限。
 
 这只是字段清单。不要把真实文件放进仓库，也不要把 Secret 作为 shell 命令参数写入历史。安装后设置：
 

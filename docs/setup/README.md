@@ -5,9 +5,10 @@
 1. [Linux 后端部署](LINUX_DEPLOYMENT.md)：创建服务器、收紧网络、安装运行时、部署后端、配置 systemd/Caddy，并完成上线验收。
 2. [生产监控、日志与恢复](MONITORING_BACKUP_RECOVERY.md)：健康探测、journald 留存、每日一致性备份和非破坏性恢复演练。
 3. [Google Calendar API 发布与长期授权](GOOGLE_API_PRODUCTION.md)：启用 Calendar API、配置 OAuth、从 Testing 发布到 Production、重新授权及排错。
-4. [Tailscale 私有管理通道](TAILSCALE_SETUP.md)：安装 Tailscale、加入私人 tailnet，并通过私网 SSH/WinSCP 管理服务器。
-5. [使用 WinSCP 登录 Lightsail](WINSCP_LIGHTSAIL.md)：Windows 安装、PEM 转 PPK、MagicDNS、首次 host key 核验、安全上传和换电脑流程。
-6. [Linux 自动更新与回滚](AUTOMATIC_UPDATES.md)：定时跟踪受保护的 main、低权限构建、原子切换、健康检查与失败回滚。
+4. [Google Maps 定位与路线](GOOGLE_MAPS_ROUTES.md)：一次性定位、Places/Routes key 限制、本地验收、Linux gate 与坐标隐私边界。
+5. [Tailscale 私有管理通道](TAILSCALE_SETUP.md)：安装 Tailscale、加入私人 tailnet，并通过私网 SSH/WinSCP 管理服务器。
+6. [使用 WinSCP 登录 Lightsail](WINSCP_LIGHTSAIL.md)：Windows 安装、PEM 转 PPK、MagicDNS、首次 host key 核验、安全上传和换电脑流程。
+7. [Linux 自动更新与回滚](AUTOMATIC_UPDATES.md)：定时跟踪受保护的 main、低权限构建、原子切换、健康检查与失败回滚。
 
 ## 先理解三个边界
 

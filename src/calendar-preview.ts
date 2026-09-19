@@ -6,7 +6,9 @@ export function shortConfirmation(kind: CalendarKind) { return kind === 'create'
 export function calendarConfirmed(text: string, expected: string) {
   const clean = text.trim().replace(/[。！.!]+$/, '').trim().replace(/^(?:可以|好的|好|嗯)[，,、\s]+/, '');
   // Entire utterance only. Negations, questions, quotes and correction+approval never match.
-  return [expected, '确认', '确定'].includes(clean);
+  // A plain affirmative is accepted only by callers that also hold the exact
+  // immediately preceding immutable preview and its unexpired approval ID.
+  return [expected, '确认', '确定', '可以', '没问题'].includes(clean);
 }
 // This detects a likely confirmation attempt, NEVER authorization. Misheard verbs ask again.
 export function calendarConfirmationAttempt(text: string) {
@@ -16,6 +18,10 @@ function clip(text: string, cells: number) {
   let result = '', used = 0;
   for (const c of text) { const width = /[\x20-\x7e]/.test(c) ? 1 : 2; if (used + width > cells) return result + '…'; result += c; used += width; }
   return result;
+}
+function previewValue(text: string, cells: number) {
+  const value = clip(text, cells);
+  return value === text ? value : `${value}〔完整内容保留〕`;
 }
 function appendedNote(before: string, after: string) {
   const prior = before.trim();
@@ -63,19 +69,20 @@ export function compactCalendarPreview(kind: CalendarKind, event: CalendarEvent,
     for (const [key, name] of [['location', '地点'], ['title', '标题'], ['notes', '备注']] as const) {
       if (key === 'notes' && before.notes !== event.notes && /【期限】/.test(event.notes)) {
         const strip = (s: string) => s.replace(/【期限】[^。]*。/g, '').trim();
-        if (strip(before.notes) !== strip(event.notes)) lines.push(`备注：${strip(before.notes) || '无'} → ${strip(event.notes) || '无'}`);
+        if (strip(before.notes) !== strip(event.notes)) lines.push(`备注：${previewValue(strip(before.notes) || '无', 28)} → ${previewValue(strip(event.notes) || '无', 48)}`);
         lines.push(event.notes.match(/【期限】[^。]*。/)![0]);
         continue;
       }
       if (before[key] !== event[key]) {
         const addition = key === 'notes' ? appendedNote(before.notes, event.notes) : undefined;
-        lines.push(addition ? `备注：新增 ${addition}` : `${name}：${before[key] || '无'} → ${event[key] || '无'}`);
+        lines.push(addition ? `备注：新增 ${previewValue(addition, 64)}`
+          : `${name}：${previewValue(before[key] || '无', key === 'notes' ? 28 : 52)} → ${previewValue(event[key] || '无', key === 'notes' ? 48 : 72)}`);
       }
     }
   } else {
     lines.push(when(event, zone));
-    if (event.location) lines.push(`地点：${event.location}`);
-    if (kind === 'create' && event.notes) lines.push(`备注：${event.notes}`);
+    if (event.location) lines.push(`地点：${previewValue(event.location, 80)}`);
+    if (kind === 'create' && event.notes) lines.push(`备注：${previewValue(event.notes, 72)}`);
   }
   if (overlaps.length) lines.push(`⚠ 与${clip(overlaps[0], 12)}${overlaps.length > 1 ? `等${overlaps.length}项` : ''}重叠`);
   if (alternative) lines.push(alternative);
@@ -83,6 +90,8 @@ export function compactCalendarPreview(kind: CalendarKind, event: CalendarEvent,
   if (event.allDay) lines.push('未检查全天日程重叠');
   lines.push(`${alternative ? '保留原时间，' : ''}说“${shortConfirmation(kind)}”`);
   const preview = lines.join('\n');
-  if (previewLineCount(preview) > 10) throw new Error('CALENDAR_PREVIEW_TOO_LONG');
+  // Long model-generated notes are abbreviated for the five-line display;
+  // the validated full value remains in the immutable preview payload.
+  if (previewLineCount(preview) > 15) throw new Error('CALENDAR_PREVIEW_TOO_LONG');
   return preview;
 }

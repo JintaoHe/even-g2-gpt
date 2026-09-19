@@ -21,11 +21,11 @@
 
 1. `g2-microphone`：用户主动开始对话后才收音；退出、暂停、页面隐藏或断线会停收音。
 2. `network`：只允许 `https://calendar.eveng2assistant.com` 与 `wss://calendar.eveng2assistant.com`。
-3. `location`：仅在用户点击一次定位或连续定位后读取手机位置；连续定位可显式停止并清除。
+3. `location`：明确的路线意图可自动请求一次短期定位；最多三次有限尝试后停止并清除。手动一次／连续按钮仅用于开发诊断，连续定位仍须显式启动并可停止。
 
 OpenAI、Google、Gmail 和 OAuth 凭据全部留在 Linux 后端。`.ehpk` 内只有公开后端地址，没有 `G2_CLIENT_TOKEN`、API key、OAuth refresh token 或邮箱密码。访问 token 由用户在手机伴随页面输入，只保存在当前 WebView 内存；页面关闭后需要重新输入。
 
-手机伴随页已经包含文字输入框，适合输入邮箱、URL、ID 或在不方便说话时发问；眼镜本身没有键盘。`0.2.0` 增加手动定位传输 POC：后端只校验当前 WSS 会话中的坐标，不写入对话／日志／MD，也不发送给 LLM。地址、路线和任意 To/CC 收件人仍须完成显式授权、预览确认、最小留存和真机测试，详见 [伴随输入、定位与安全分发](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)。
+手机伴随页已经包含文字输入框，适合输入邮箱、URL、ID 或在不方便说话时发问；眼镜本身没有键盘。当前 source 在 `0.2.0` 包之后增加自动一次性定位与服务端 Places/Routes：精确坐标绑定当前 WSS 请求，不写入 LLM／对话／日志／MD，完成、失败、中断或退出后清除；失败会请求用户输入出发地址。Google Maps key 只留在后端。任意 To/CC 收件人仍未启用，详见 [伴随输入、定位与安全分发](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)。
 
 Even 的 network whitelist 与浏览器的 Origin/CORS 是两道独立检查。当前后端继续严格校验 Host 与 Origin。真实 `.ehpk` 第一次连接时，如果 WebView 使用了不同的稳定 Origin，先从安全日志确认精确值，再决定是否加入后端 allowlist；不得为了跑通而允许任意 Origin、通配符或公开 3001 端口。
 
@@ -39,8 +39,11 @@ Remove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue
 npm ci
 npm test
 npm run build
-npm run pack:hub
 ```
+
+日常 source 更新到这里停止：`npm run build` 只验证前端 bundle，不生成新的
+`.ehpk`。只有本地人工验收、Linux 部署／live test、部署后安全检查全部通过，
+准备进入 Private Testing 时，才单独运行 `npm run pack:hub`。
 
 生产构建固定连接 `wss://calendar.eveng2assistant.com`。确有需要时，可在**构建前**用 `EVEN_HUB_BACKEND_ORIGIN` 覆盖，但只能是无路径、无凭据、无 query 的 `wss://` origin；改域名时也必须同步修改 `app.json` whitelist 并重新审核。
 
@@ -83,7 +86,7 @@ Private Testing 能验证真实包、manifest、权限和启动流程，但不�
 - MD 邮件发送确认与成功回执。
 - 单击收音／暂停、滑动阅读、双击系统退出框、取消退出、确认退出后重开。
 - Wi-Fi、蜂窝网络及二者切换；断网后的安全失败和恢复。
-- 一次定位、连续定位、停止／清除、拒绝、超时、低精度和页面退出；确认未自动开始后台跟踪。
+- 路线意图自动一次定位、首次权限提示、最多三次尝试、手动地址 fallback、停止／清除、拒绝、超时、低精度和页面退出；确认未自动开始连续／后台跟踪。
 - 手机前台、后台、锁屏；Private build 先 smoke，Beta 再做 5 分钟锁屏 reviewer-parity 测试。
 - 30 分钟、1 小时、2 小时稳定性、延迟、电量与温度。
 - 退出后能正常启动 Conversate 等第一方应用。

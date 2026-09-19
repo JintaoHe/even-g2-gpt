@@ -4,7 +4,7 @@
 
 ## 当前默认：GPT-5.6 Luna
 
-当前示例配置的意图与回答均为 `gpt-5.6-luna`：意图判断使用 none，回答按每轮上下文选择 none / low / medium，见 [自适应推理](ADAPTIVE_REASONING.md)。STT 不变。早期固定档位对照及回退见 [LUNA_EVAL.md](LUNA_EVAL.md)；下文 4.1 mini 搜索费用为历史基线，不是当前账单保证。
+当前示例配置的意图与回答均为 `gpt-5.6-luna`：意图判断使用 medium，回答按每轮上下文选择 low / medium / high，见 [自适应推理](ADAPTIVE_REASONING.md)。STT 默认使用 Soniox `stt-rt-v5`；早期固定档位对照及回退见 [LUNA_EVAL.md](LUNA_EVAL.md)；下文 4.1 mini 搜索费用为历史基线，不是当前账单保证。
 
 ## 新增：OpenAI 内置联网搜索
 
@@ -12,9 +12,9 @@
 
 - 页面显示搜索状态；完成后在回答内显示可点击引用，并附来源列表。引用来自 API annotations，不把网页内容当 HTML 执行。
 - 插话会取消在途请求，隔离迟到的搜索状态与来源。已发生的 API/搜索费用不会因此撤销。
-- 默认每次回答最多 2 次内置工具调用；新增每日 20 次、每个自然月 600 次搜索上限，按 `CONVERSATION_TIMEZONE`（默认芝加哥）结算。剩余 1 次时只向 API 授权 1 次。普通聊天不占搜索次数；达到上限仍可聊天，但不再提供联网工具。不会自动重试失败请求。
-- 用量预扣并持久保存于 `.local/search-usage.json`，成功完成后按实际 `web_search_call` 数量退回未用额度。中断、故障或重启导致无法确认用量时保留预扣（可能多计，但不乐观放行）；文件损坏或不可写时停用搜索。不要删除或手动改动账本。自然月满 600 次即停止搜索，即使该月有 31 天。
-- 这是本项目单进程应用限额，不是 OpenAI 账户消费硬上限；普通聊天和 STT 另计。Linux 部署要保留账本到持久卷；多实例需改用事务数据库，不能共享此文件并发运行。真实搜索回归也使用此账本，因此不要与服务同时运行；普通对话回归禁用搜索。
+- 默认每次回答最多 10 次、每个 30 分钟会话最多 50 次、每日 100 次、每个自然月 1200 次搜索调用，按 `CONVERSATION_TIMEZONE`（默认芝加哥）结算。剩余额度不足时只向 API 授权剩余次数。普通聊天不占搜索次数；达到任一上限仍可聊天，但不再提供联网工具。
+- 用量预扣并持久保存于 `.local/search-usage.json`，成功完成后按实际 `web_search_call` 数量退回未用额度。中断、故障或重启导致无法确认用量时保留预扣（可能多计，但不乐观放行）；文件损坏或不可写时停用搜索。不要删除或手动改动账本。会话额度随新认证会话重置，日／月账本不会因此重置。
+- 这是本项目单进程的工具次数保护，不是美元硬上限；普通聊天、意图判断、STT、文档生成和 Maps 另计。OpenAI 项目应在平台 **Limits → Spend** 另设 `$40/月` 并开启 **Enforce a hard limit**。官方说明硬限制达到后返回 429，但传播不是瞬时的，因此账单仍可能轻微超过设置值。Linux 部署要保留账本到持久卷；多实例需改用事务数据库，不能共享此文件并发运行。
 - 会给模型当前时间与用户时区，要求核实涨跌前提、标明行情日期/时间与交易时段、区分事实和推测。搜索不是专用实时行情保障，也不保证模型事实判断永远正确。
 - 查询内容会通过 OpenAI 搜索服务处理；指令要求查询时避免带入不相关的私人信息，但这不是独立的数据脱敏器。搜索工具本身只读；日历修改和文件发送由独立的确认流程处理，不接交易。
 
@@ -22,26 +22,30 @@
 
 ```dotenv
 OPENAI_WEB_SEARCH=true
-OPENAI_MAX_SEARCH_CALLS=2
+OPENAI_MAX_SEARCH_CALLS=10
+OPENAI_SEARCH_SESSION_LIMIT=50
+OPENAI_SEARCH_DAILY_LIMIT=100
+OPENAI_SEARCH_MONTHLY_LIMIT=1200
 CONVERSATION_TIMEZONE=America/Chicago
 ```
 
-设置 `OPENAI_WEB_SEARCH=false` 可禁用。调用上限接受 1–5。不存在配置时使用以上默认值，不需要重写已有 `.env`。
+设置 `OPENAI_WEB_SEARCH=false` 可禁用。每回答调用上限接受 1–10，且必须不大于会话／日／月上限。不存在配置时使用以上默认值；已有 `.env` 中的旧值会覆盖新默认，需要人工核对但不要覆盖其他凭据。
 
 ### 搜索费用估算
 
-按本次核对的官方标准价：搜索 $10/1000 次；`gpt-4.1-mini` 非 preview 搜索每次固定计 8000 个搜索内容输入 token，该模型输入价 $0.40/百万 token。所以搜索调用费＋搜索内容输入约为 `$0.01 + 8000/1000000 × $0.40 = $0.0132/次`。
+截至 2026-09-18 核对的标准价：Luna 输入 `$0.20/百万 token`、输出 `$1.20/百万 token`；web search 工具调用 `$10/1000 次`，搜索内容 token 仍按所用模型计费。以下 `$0.017/分钟` 的转录数字是旧 OpenAI STT 基线，**不代表当前 Soniox 价格，也不受 OpenAI project 的 `$40` 限制**；Soniox 必须在其控制台单独设置用量／账单保护。
 
-- 每月 100 次：约 $1.32。
-- 每天 20 次、30 天：约 $7.92。
-- 以上不含普通提示词/历史、回答、意图判断、语音转写费用及税费；一个问题可能调用多次搜索。不是账户账单或最高费用保证。
-- 默认模型不变，换模型后重新核算。API key 是访问凭证，计费对象是实际使用；没有额外购买“搜索 key”。
+- 100 次搜索的工具费约 `$1`；1200 次月上限的工具费约 `$12`，均未含搜索内容及回答 token。
+- 每天使用麦克风 30 分钟、30 天，单转录约 `$15.30`；每天 1 小时约 `$30.60`。
+- 连续 24 小时一次的转录约 `$24.48`；若 30 天每天 24 小时，单转录理论值约 `$734.40`，尚未算对话／搜索。`$40` 项目硬限制会提前中断 API，而不会让这种极端使用继续一个月。
+- 仅按转录估算，`$40` 约覆盖 2353 分钟（约 39.2 小时）；实际可用时长更短，因为对话、意图、搜索和文档也计费。这不是账单保证。
+- API key 是访问凭证，不是预付搜索套餐。Google Maps 和 AWS 费用也不受 OpenAI `$40` 限制。
 
-来源：[官方价格](https://developers.openai.com/api/docs/pricing)、[GPT-4.1 Mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini)、[Web search](https://developers.openai.com/api/docs/guides/tools-web-search)。
+来源：[OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna)、[Web search](https://developers.openai.com/api/docs/guides/tools-web-search)、[Spend limits](https://developers.openai.com/api/docs/guides/spend-limits)。
 
 ## 启动
 
-使用现有 `.env` 中的 `OPENAI_API_KEY` 和 `G2_CLIENT_TOKEN`。这里的 client token 是我们自己的本地访问密码，不需要收到眼镜后才能取得；不要把 OpenAI key 输入浏览器。
+使用现有 `.env` 中的 `OPENAI_API_KEY`、`SONIOX_API_KEY` 和 `G2_CLIENT_TOKEN`。这里的 client token 是我们自己的本地访问密码，不需要收到眼镜后才能取得；不要把任何 provider key 输入浏览器。
 
 这台 Windows 的启动方式（避开系统旧 Node 和 NODE_OPTIONS 问题）：
 
@@ -63,15 +67,15 @@ Set-Location 'C:\path\to\even-g2-gpt'
 ## 结构与隐私
 
 - 浏览器电脑麦克风 → AudioWorklet PCM16/16 kHz → 本地认证 WebSocket。
-- 本地能量门限与静音计时 → 保留 800 ms 触发前音频（含 160 ms 起音确认）→ 单语音段实时转录连接 → 服务端重采样至 24 kHz → OpenAI。回放已采集缓冲，不额外等待 800 ms；麦克风未开启时的声音无法补回。
+- 本地能量门限与静音计时 → 保留 800 ms 触发前音频（含 160 ms 起音确认）→ 单语音段实时转录连接 → 原生 PCM16/16 kHz 直接发送 Soniox。回放已采集缓冲，不额外等待 800 ms；麦克风未开启时的声音无法补回。
 - 稳定转录结果按采集顺序合并；临时 delta 只显示，不用于退出操作。
 - Responses API：先用受约束的 JSON 输出判断 respond/wait/exit/clarify_exit，再流式生成文本回答。
-- STT 默认 `gpt-live-transcribe`。意图与回答已拆开：`OPENAI_INTENT_MODEL` 和 `OPENAI_REPLY_MODEL` 分别配置；未设置时各自回退到旧的 `OPENAI_DIALOGUE_MODEL`，再回退到 `gpt-4.1-mini`。连接后页面显示实际模型。实验混合模式将回答设为 `gpt-5-nano`，使用 low reasoning、3072 输出 token（含推理）及名字保留指令；意图仍用 4.1 mini，且不提供搜索工具。没有自动切换到更贵模型或自动重试。
+- STT 默认 Soniox `stt-rt-v5`，使用 `en`/`zh` hints 与自动语言识别，但不做严格语言限制；OpenAI `gpt-live-transcribe` adapter 仅作为 `STT_PROVIDER=openai` 的回退。意图与回答由 `OPENAI_INTENT_MODEL` 和 `OPENAI_REPLY_MODEL` 分别配置；连接后页面显示对话模型与 STT provider。
 - nano 混合模式未达标，仍为实验。后续双 Luna 对照达到小样本质量基线，已成为当前默认。`npm run luna:eval` / `npm run baseline:eval` 为付费对照回归，先停止服务。实际省费幅度尚未验证。
 - OpenAI key 不下发客户端；Responses 请求设置 `store:false`。这不等于承诺服务商零保留，服务商数据政策仍适用。
 - 不落盘音频。已提交的用户文字、回答及部分被打断的回答保存在 `.local/conversations/<随机会话ID>.json`，已加入 gitignore；本机明文存储，未做应用层加密或跨设备同步。
 - 本地服务仅监听 127.0.0.1，限制 Origin/Host，客户端需要 token，单个已认证会话；不是公网部署方案。
-- 同一连接内保留上下文；重新连接开启新会话。磁盘记录尚未接入自动恢复或历史摘要。
+- 同一连接内把完整、受消息数上限约束的 session 历史作为 Luna 的短期记忆；topic 标记帮助它区分当前与较早讨论，因此可以回到“之前的 idea／第几点／刚才推荐的店”。生成 MD／Email 时后端仍只提供当前 topic，避免把旅行和 business 文档混在一起。重新连接开启新会话；磁盘记录尚未接入自动恢复或历史摘要，因此这不是跨 session 的永久 memory。
 
 ## 当前限制与后续
 
@@ -97,6 +101,8 @@ Set-Location 'C:\path\to\even-g2-gpt'
 
 ```powershell
 & $conversationNode --use-system-ca --import tsx tests/live-conversation.ts
+# 单独测试 Soniox（付费，使用本地 16 kHz mono WAV）：
+& $conversationNode --use-system-ca --import tsx scripts/soniox-smoke.ts 'tests/Recording.16k.wav'
 # 需先启动 3001 对话服务，发送已授权使用的录音：
 & $conversationNode --use-system-ca --import tsx src/conversation-inject.ts 'tests/Recording.16k.wav'
 ```
@@ -113,6 +119,8 @@ Set-Location 'C:\path\to\even-g2-gpt'
 官方接口参考：
 
 - [Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription)
+- [Soniox realtime transcription](https://soniox.com/docs/stt/rt/real-time-transcription)
+- [Soniox language hints](https://soniox.com/docs/stt/concepts/language-hints)
 - [Structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 - [Streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses)
 - [Web search](https://developers.openai.com/api/docs/guides/tools-web-search)

@@ -62,19 +62,20 @@ test('manual question/history reading is not stolen when answer starts', () => {
   h.latest(); assert.equal(h.selected?.role, 'Even');
 });
 
-test('long content uses an overlapping line window while short content keeps pages', () => {
+test('long content uses non-overlapping pages while short content keeps one page', () => {
   const h = new ReadingHistory();
   h.event({ type: 'answer.start', id: 1 });
   h.event({ type: 'answer.delta', id: 1, text: Array.from({ length: 14 }, (_, i) => `第${i + 1}行`).join('\n') });
   h.event({ type: 'answer.done', id: 1 });
-  assert.equal(h.scrolling, true);
-  assert.match(h.label, /滚动 1–5\/14行/);
+  assert.equal(h.scrolling, false);
+  assert.match(h.label, /1\/3页/);
   assert.match(h.current, /第1行[\s\S]*第5行/);
   h.move(1);
-  assert.match(h.label, /滚动 4–8\/14行/);
-  assert.match(h.current, /第4行[\s\S]*第8行/);
+  assert.match(h.label, /2\/3页/);
+  assert.match(h.current, /第6行[\s\S]*第10行/);
+  assert.doesNotMatch(h.current, /第[1-5]行/);
   h.move(-1);
-  assert.match(h.label, /滚动 1–5\/14行/);
+  assert.match(h.label, /1\/3页/);
 
   const short = new ReadingHistory();
   short.event({ type: 'answer.start', id: 2 });
@@ -82,4 +83,18 @@ test('long content uses an overlapping line window while short content keeps pag
   short.event({ type: 'answer.done', id: 2 });
   assert.equal(short.scrolling, false);
   assert.match(short.label, /1\/1页/);
+});
+
+test('itinerary bullets become semantic pages without repeating the previous point', () => {
+  const h = new ReadingHistory();
+  h.event({ type: 'answer.start', id: 3 });
+  h.event({ type: 'answer.delta', id: 3, text: '可以，行程这样安排：\n\n- 9月19日 7:00：从当前位置出发去环球影城。\n- 8:00：停车、安检和入园。\n- 18:00：离园开车去尔湾朋友家。\n- 9月20日 9:00：从朋友家返程。' });
+  h.event({ type: 'answer.done', id: 3 });
+  assert.ok(h.pages.length >= 2 && h.pages.length <= 3);
+  const all = h.pages.join('\n');
+  for (const marker of ['9月19日 7:00', '- 8:00', '- 18:00', '9月20日 9:00']) {
+    assert.equal(all.split(marker).length - 1, 1, `${marker} must appear on exactly one page`);
+  }
+  assert.ok(h.pages.some(page => (page.match(/^-/gm) ?? []).length >= 2), 'short points should stack on one page');
+  for (const page of h.pages) assert.ok(page.split('\n').length <= 5);
 });

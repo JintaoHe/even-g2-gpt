@@ -2,8 +2,13 @@
   "type": "object",
   "properties": {
     "decision": { "type": "string", "enum": ["respond", "wait", "exit", "clarify_exit"] },
-    "reasoning_effort": { "type": "string", "enum": ["none", "low", "medium"] }
+    "reasoning_effort": { "type": "string", "enum": ["low", "medium", "high"] },
+    "cognitive_mode": { "type": "string", "enum": ["casual", "explain", "research", "brainstorm", "decision_support", "planning", "deep_reasoning", "compose", "coaching"] },
+    "search_action": { "type": "string", "enum": ["none", "search"] },
+    "topic_action": { "type": "string", "enum": ["continue", "switch", "resume"] },
+    "topic_target": { "type": ["string", "null"] },
+    "topic_label": { "type": ["string", "null"] }
   },
-  "required": ["decision", "reasoning_effort"],
+  "required": ["decision", "reasoning_effort", "cognitive_mode", "search_action", "topic_action", "topic_target", "topic_label"],
   "additionalProperties": false
 }

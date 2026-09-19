@@ -1,5 +1,7 @@
 # Dynamic reasoning evaluation
 
+> Historical baseline: this evaluation predates the `high` answer tier and the current medium-effort intent classifier with low/medium/high answers. Keep it for comparison; do not treat it as validation of the current three-tier answer router.
+
 Run: 2026-09-16 UTC. Model: gpt-5.6-luna for intent and answer. Existing application code and prompts unchanged.
 
 ## Method

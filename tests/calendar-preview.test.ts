@@ -16,13 +16,14 @@ test('an appended note shows only the addition and keeps unchanged fields off th
   assert.doesNotMatch(preview, /时间不变|这段没有变化的备注不需要在预览中重复.*→/);
   assert.equal(paginate(preview).length, 1);
 });
-test('conflict and guest notification fit two pages; oversized changes are not silently truncated', () => {
+test('conflict and guest notification fit two pages; long notes are visibly abbreviated without blocking the write preview', () => {
   const preview = compactCalendarPreview('update', { ...before, location: '园区咖啡馆' }, before, ['重叠事件', '另一事件'], true);
   assert.ok(paginate(preview).length <= 2); assert.match(preview, /重叠/); assert.match(preview, /通知原受邀人/);
-  assert.throws(() => compactCalendarPreview('update', { ...before, notes: '修改后的重要信息'.repeat(100) }, before), /TOO_LONG/);
+  const long = compactCalendarPreview('update', { ...before, notes: '修改后的重要信息'.repeat(100) }, before);
+  assert.match(long, /完整内容保留/); assert.match(long, /确认修改/); assert.ok(paginate(long).length <= 2);
 });
 test('short confirmations accept only whole affirmative utterances, not negation/quoted/question/correction', () => {
-  for (const phrase of ['确认修改', '确认', '确定', '确认。', '确定！', '可以，确认修改', '好的，确认']) assert.equal(calendarConfirmed(phrase, '确认修改'), true);
+  for (const phrase of ['确认修改', '确认', '确定', '确认。', '确定！', '可以，确认修改', '好的，确认', '可以', '好，可以', '没问题']) assert.equal(calendarConfirmed(phrase, '确认修改'), true);
   for (const phrase of ['不要确认', '他说确认', '“确认”', '确认？', '确认，但改成十点', '确认取消', '不确定', '确认了吗', '确认发送']) assert.equal(calendarConfirmed(phrase, '确认修改'), false);
 });
 test('repeated DST hour is not presented as unchanged time', () => {

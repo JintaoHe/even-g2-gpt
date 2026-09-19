@@ -3,7 +3,7 @@ import { waitForEvenAppBridge, CreateStartUpPageContainer, TextContainerProperty
 import { ReadingHistory } from './reading-history';
 import { DisplaySession } from './display-session';
 import { conversationWebSocketUrl } from './backend-url';
-import { LocationController } from './location';
+import { LocationController, locationReport } from './location';
 
 const element = (id: string) => document.getElementById(id)!;
 const packagedBackendOrigin = typeof __EVEN_BACKEND_ORIGIN__ === 'string' ? __EVEN_BACKEND_ORIGIN__ : '';
@@ -14,11 +14,54 @@ let shutdown: Promise<void> | undefined;
 pager.reset('请在伴随页面连接后端。\n连接后可输入文字或开启麦克风。');
 let bridge: EvenAppBridge | undefined, socket: WebSocket | undefined;
 let locationController: LocationController | undefined, locationAvailable = false;
+let developmentLocation: { label: string; latitude: number; longitude: number; accuracy: number; timezone: string } | undefined;
 let connected = false, speech = false, audio = false, audioEpoch = 0, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
 const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
 function send(event: object) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); }
 function refresh() { dirty = true; element('status').textContent = `${status} · 麦克风${audio ? '开启' : '关闭'}`; }
+const locationPermissionKey = 'glass-assistant.location-succeeded.v1';
+function firstLocationRequest() {
+  try { return localStorage.getItem(locationPermissionKey) !== '1'; }
+  catch { return true; }
+}
+function rememberLocationSuccess() {
+  try { localStorage.setItem(locationPermissionKey, '1'); }
+  catch { /* The hint can safely reappear when storage is unavailable. */ }
+}
+async function automaticLocation(event: any, ws: WebSocket) {
+  if (!bridge || !locationController || !locationAvailable || typeof event.request_id !== 'string'
+    || !Array.isArray(event.attempts) || event.attempts.length < 1 || event.attempts.length > 3
+    || !event.attempts.every((a: any) => a && ['high', 'medium'].includes(a.accuracy)
+      && Number.isInteger(a.timeout_ms) && a.timeout_ms >= 1000 && a.timeout_ms <= 10_000)
+    || !Number.isFinite(event.maximum_accuracy_m)) {
+    send({ type: 'location.failed', request_id: event.request_id, reason: 'unavailable' }); return;
+  }
+  if (import.meta.env.DEV && developmentLocation) {
+    const selected = developmentLocation;
+    const report = locationReport('once', {
+      latitude: selected.latitude, longitude: selected.longitude,
+      accuracy: selected.accuracy, timestamp: Date.now()
+    }, event.request_id, selected.timezone);
+    status = `模拟定位 · ${selected.label}`; refresh();
+    if (socket === ws && ws.readyState === WebSocket.OPEN && report) send(report);
+    else send({ type: 'location.failed', request_id: event.request_id, reason: 'unavailable' });
+    return;
+  }
+  if (firstLocationRequest()) {
+    pager.notice('首次定位可能在手机上弹出权限请求。\n请选择允许使用期间访问位置。');
+  }
+  const result = await locationController.automatic(event.request_id, event.attempts, event.maximum_accuracy_m,
+    (attempt, total) => { status = `正在定位 ${attempt}/${total}`; refresh(); });
+  if (result.ok) {
+    rememberLocationSuccess();
+    // Once permission succeeds, keep the live session context fresh. The SDK
+    // owns actual sampling; our request asks for at most one update per 10s.
+    void locationController.start();
+  }
+  if (socket !== ws || ws.readyState !== WebSocket.OPEN || result.ok || result.reason === 'cancelled') return;
+  send({ type: 'location.failed', request_id: event.request_id, reason: result.reason });
+}
 async function stopAudio() {
   audioEpoch++; audio = false; refresh();
   if (bridge) await bridge.audioControl(false).catch(() => false);
@@ -73,7 +116,8 @@ element('connect').onclick = async () => {
       connected = true; speech = event.capabilities?.speech === true;
       locationAvailable = event.capabilities?.location === true;
       channel = event.capabilities?.provider === 'api' ? 'API' : event.capabilities?.provider === 'codex-cli' ? 'CLI' : '?';
-      element('channel').textContent = `当前测试：${channel} · 模型 ${event.models?.reply ?? '?'} · 语音转录仍走 API`;
+      const stt = event.capabilities?.speechProvider === 'soniox' ? 'Soniox' : event.capabilities?.speechProvider === 'openai' ? 'OpenAI' : 'STT';
+      element('channel').textContent = `当前测试：${channel} · 模型 ${event.models?.reply ?? '?'} · 语音 ${stt}`;
       pager.reset('已连接。\n可输入文字，或主动开启麦克风。');
     }
     pager.event(event);
@@ -88,21 +132,45 @@ element('connect').onclick = async () => {
     if (event.type === 'search.status' && event.id === answerId) status = event.status === 'searching' ? '正在查资料' : '整理回答中';
     if (event.type === 'artifact.status' && event.id === answerId) status = event.status === 'sending' ? '正在提交邮件' : '正在生成文件';
     if (event.type === 'calendar.status' && event.id === answerId) status = event.status === 'saving' ? '正在保存日历' : event.status === 'querying' ? '正在查询日历' : '正在理解日历请求';
+    if (event.type === 'task.status' && event.id === answerId) {
+      status = event.status === 'planning' ? '正在规划任务'
+        : event.status === 'calendar' ? '正在核对日历'
+        : event.status === 'locating' ? '正在获取当前位置'
+        : event.status === 'environment' ? '正在查询环境条件'
+        : event.status === 'places' ? '正在比较地点和路线'
+        : event.status === 'deciding' ? '正在形成建议'
+        : event.status === 'previewing' ? '正在生成日历预览'
+        : '正在保存日历';
+    }
+    if (event.type === 'route.status' && event.id === answerId) {
+      status = event.status === 'locating' ? '正在获取当前位置'
+        : event.status === 'searching' ? '正在查找附近地点'
+        : event.status === 'comparing' ? '正在重新比较路线'
+        : event.status === 'clarifying' ? '正在确认地点含义'
+        : event.status === 'resolving' ? '正在解析出发地和目的地'
+        : event.status === 'failed' ? `路线失败 · ${event.stage === 'places' ? '地点查询' : event.stage === 'routes' ? '路线计算' : '未知阶段'}`
+        : '正在比较路线和评分';
+      if (event.status === 'failed') console.warn('Route request failed', {
+        stage: event.stage, providerStatus: event.provider_status, providerReason: event.provider_reason
+      });
+    }
     if (event.type === 'speech.started') status = '正在说 · 正在识别文字';
     if (event.type === 'speech.ended') status = '正在完成识别';
     if (event.type === 'transcript.final') status = '识别结果已保留';
     if (event.type === 'turn.waiting') status = '请继续说';
+    if (event.type === 'location.request') void automaticLocation(event, ws);
+    if (event.type === 'location.cancel') locationController?.cancelAutomatic(event.request_id);
     if (event.type === 'exit.confirmation_required') void exitDialog();
     if (event.type === 'error') { status = `错误：${event.code}`; void stopAudio(); }
     if (event.type === 'notice') status = event.text;
     if (event.type === 'location.status') {
       status = event.state === 'available'
-        ? `位置可用${typeof event.accuracy_m === 'number' ? ` · 精度约 ${event.accuracy_m}m` : ''}（未保存）`
-        : event.state === 'cleared' ? '位置已清除' : '位置不可用，请手动提供出发地';
+        ? `本次会话位置可用${typeof event.accuracy_m === 'number' ? ` · 精度约 ${event.accuracy_m}m` : ''}`
+        : event.state === 'cleared' ? '本次会话位置已清除' : '位置不可用，请手动提供出发地';
     }
     refresh();
   };
-  ws.onclose = () => { if (socket !== ws) return; connected = false; state = 'closed'; answerId = undefined; token = ''; status = '已断开，请重新连接'; element('channel').textContent = '通道：已断开'; void stopAudio(); refresh(); };
+  ws.onclose = () => { if (socket !== ws) return; connected = false; state = 'closed'; answerId = undefined; token = ''; status = '已断开，请重新连接'; element('channel').textContent = '通道：已断开'; void stopAudio(); void locationController?.stop(); refresh(); };
   ws.onerror = () => { if (socket !== ws) return; status = '连接失败，请检查后端'; refresh(); };
   } catch {
     status = '连接配置无效或后端不可用'; refresh();
@@ -129,12 +197,26 @@ element('next').onclick = () => { pager.move(1); refresh(); };
 element('latest').onclick = () => { pager.latest(); refresh(); };
 element('locate-once').onclick = async () => {
   if (!connected || !bridge || !locationAvailable || !locationController) { status = '定位尚不可用或后端未连接'; refresh(); return; }
+  if (import.meta.env.DEV && developmentLocation) {
+    const selected = developmentLocation;
+    const report = locationReport('once', { latitude: selected.latitude, longitude: selected.longitude,
+      accuracy: selected.accuracy, timestamp: Date.now() }, undefined, selected.timezone);
+    if (report) send(report);
+    status = report ? `模拟定位可用 · ${selected.label}（本次会话）` : '模拟定位无效'; refresh(); return;
+  }
   status = '正在获取一次性位置'; refresh();
   const ok = await locationController.once().catch(() => false);
   if (!ok) { status = '定位被拒绝、超时或结果无效'; refresh(); }
 };
 element('locate-start').onclick = async () => {
   if (!connected || !bridge || !locationAvailable || !locationController) { status = '定位尚不可用或后端未连接'; refresh(); return; }
+  if (import.meta.env.DEV && developmentLocation) {
+    const selected = developmentLocation;
+    const report = locationReport('continuous', { latitude: selected.latitude, longitude: selected.longitude,
+      accuracy: selected.accuracy, timestamp: Date.now() }, undefined, selected.timezone);
+    if (report) send(report);
+    status = report ? `模拟连续定位 · ${selected.label}（固定测试点）` : '模拟定位无效'; refresh(); return;
+  }
   status = '正在请求连续定位'; refresh();
   const ok = await locationController.start();
   status = ok ? '连续定位已开启 · 15 秒/25 米更新' : '连续定位未开启'; refresh();
@@ -142,6 +224,10 @@ element('locate-start').onclick = async () => {
 element('locate-stop').onclick = async () => {
   const ok = await locationController?.stop(); send({ type: 'location.clear' });
   status = ok === false ? '定位停止状态未确认，位置已从会话清除' : '连续定位已停止，位置已清除'; refresh();
+};
+element('route-mode-apply').onclick = () => {
+  const mode = (element('route-mode') as HTMLSelectElement).value;
+  if (['drive', 'walk', 'bicycle'].includes(mode)) send({ type: 'route.mode', mode });
 };
 element('preview').onwheel = event => {
   event.preventDefault();
@@ -200,7 +286,7 @@ void (async () => {
     if (system === OsEventTypeList.FOREGROUND_EXIT_EVENT) { void stopAudio(); send({ type: 'pause' }); return; }
     if (system === OsEventTypeList.SYSTEM_EXIT_EVENT || system === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
       exiting = true; display.close(); connected = false; state = 'closed'; answerId = undefined;
-      const old = socket; socket = undefined; old?.close(); void stopAudio();
+      const old = socket; socket = undefined; old?.close(); void stopAudio(); void locationController?.stop();
       status = '眼镜页面已退出；可重新连接或恢复画面'; refresh(); return;
     }
     if (event.audioEvent && audio && active() && socket?.readyState === WebSocket.OPEN) {
@@ -220,9 +306,14 @@ void (async () => {
   });
   await restoreDisplay();
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
-window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void stopAudio(); void locationController?.stop(); socket?.close(); });
+window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void stopAudio(); locationController?.cancelAutomatic(); void locationController?.stop(); socket?.close(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) { void stopAudio(); send({ type: 'pause' }); } });
 if (import.meta.env.DEV) {
+  void import('../dev/location-presets').then(({ installLocationPresets }) => installLocationPresets(location => {
+    developmentLocation = location;
+    status = location ? `已选择模拟位置 · ${location.label}` : '已恢复真实 SDK 定位';
+    refresh();
+  }));
   void import('../dev/reading-demo').then(({ installReadingDemo }) => installReadingDemo(events => {
     if (connected) return;
     pager.reset('本地显示测试，不调用模型');

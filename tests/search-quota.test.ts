@@ -51,3 +51,23 @@ test('reply releases zero-call reservation, counts tools and omits tools when ex
     assert.equal(await q.reserve(1), null);
   } finally { await new Promise<void>(r => server.close(() => r())); }
 });
+
+test('per-session search cap is conservative, refunds completed unused calls and resets explicitly', async () => {
+  const limits: (number | undefined)[] = [];
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw); limits.push(body.max_tool_calls);
+    const output = body.tools ? [{ type: 'web_search_call' }] : [];
+    res.end(`data: ${JSON.stringify({ type: 'response.completed', response: { output } })}\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  try {
+    const model = new OpenAIDialogue('fake', 'test', `http://127.0.0.1:${(server.address() as any).port}`,
+      true, 2, 'America/Chicago', undefined, { sessionSearchCalls: 3 });
+    model.startSession();
+    for (let i = 0; i < 3; i++) await model.reply([], new AbortController().signal, () => {});
+    model.startSession(); await model.reply([], new AbortController().signal, () => {});
+    assert.deepEqual(limits, [2, 2, 1, 2]);
+    assert.throws(() => new OpenAIDialogue('fake', 'test', undefined, true, 11));
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});

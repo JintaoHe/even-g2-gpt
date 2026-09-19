@@ -1,6 +1,6 @@
 # Live STT & Bilingual Intent Bake-off
 
-> **已取消/仅供历史参考。** 用户已明确确定 OpenAI，不做 Soniox 或其他 STT 对照。下面的选型与实验步骤不再执行。中文、英文、混说准确率仍需测试；当前入口见 [POC.md](./POC.md)。
+> **2026-09-18 决策更新：** 当前默认已从 OpenAI 切换到 Soniox `stt-rt-v5`。G2 原生 PCM16/16 kHz 直接发送，使用 `en`/`zh` hints、非严格限制及自动语言识别；OpenAI adapter 只保留为显式回退。下面的历史比较方法仍用于后续真实录音回归，但不再阻塞当前开发。
 
 **目的：** 为 Even G2 的中英实时字幕和命令理解选择默认 STT provider。
 **原则：** 不用厂商宣传替代我们的 G2/用户声音实测。
