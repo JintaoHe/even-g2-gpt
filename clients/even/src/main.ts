@@ -7,6 +7,8 @@ import { LocationController, locationReport } from './location';
 
 const element = (id: string) => document.getElementById(id)!;
 const packagedBackendOrigin = typeof __EVEN_BACKEND_ORIGIN__ === 'string' ? __EVEN_BACKEND_ORIGIN__ : '';
+const connectionLabel = typeof __EVEN_CONNECTION_LABEL__ === 'string' ? __EVEN_CONNECTION_LABEL__ : '连接配置不可见';
+element('backend-target').textContent = `连接目标：${connectionLabel}`;
 const pager = new ReadingHistory();
 const display = new DisplaySession();
 let connecting = false;

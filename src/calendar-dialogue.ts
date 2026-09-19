@@ -16,7 +16,7 @@ type ReadChoice = { items: CalendarItem[]; timezone: string; prompt: string; exp
 type Draft = { kind: 'create' | 'update' | 'cancel'; event: CalendarEvent; before?: CalendarEvent;
   eventId?: string; scope?: CalendarScope; context: CalendarContext; blocked?: boolean };
 type Batch = { events: CalendarEvent[]; index: number };
-type CancelBatch = { items: CalendarItem[]; index: number };
+type CancelBatch = { items: CalendarItem[]; retained: CalendarItem[]; index: number };
 type CalendarTimezoneResolver = (history: Message[], signal: AbortSignal) => Promise<string>;
 
 function namedTimezone(text: string) {
@@ -57,8 +57,36 @@ function pinImmediateStart(request: Awaited<ReturnType<CalendarPlanner>>, timezo
   return request;
 }
 
+function calendarTitleKey(value: string) {
+  return value.normalize('NFKC').toLocaleLowerCase()
+    .replace(/[\s，。！？,.!?；;：“”"‘’'《》（）()\[\]【】·—_/-]+/g, '')
+    .replace(/(?:帮我|麻烦|谢谢|那个|那一个|这一个|日程|事件|calendar|event)/g, '')
+    .replace(/^(?:前往|去|到|购买|买|参加)/, '')
+    .replace(/(?:喝一杯|电影票)$/, '');
+}
+
+function uniquelyMentionedCandidate(value: string, candidates: CalendarItem[]) {
+  const key = calendarTitleKey(value);
+  if (key.length < 2) return undefined;
+  const matches = candidates.filter(candidate => {
+    const title = calendarTitleKey(candidate.title);
+    return title.length >= 2 && (title.includes(key) || key.includes(title));
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 function multipleCancelSelection(text: string, candidates: CalendarItem[]) {
   if (candidates.length < 2 || candidates.length > 10 || !/(?:取消|删除|删掉|删了|cancel|delete|remove)/i.test(text)) return [];
+  const clauses = text.replace(/[\r\n\t，。！？,.!?；;：“”"‘’']/g, ' ').replace(/\s+/g, ' ').trim();
+  const keepClause = /(?:除了|除去)\s*(.+?)\s*(?:那(?:一)?个)?\s*(?:留下|保留|不删|不要删|别删)/i.exec(clauses)?.[1]
+    ?? /(?:只|仅)\s*(?:留下|保留)\s*(.+?)(?=\s*(?:其他|其余|剩下).*(?:删|取消)|$)/i.exec(clauses)?.[1];
+  if (keepClause) {
+    const kept = uniquelyMentionedCandidate(keepClause, candidates);
+    // An ambiguous keep instruction must never degrade into deleting all.
+    if (!kept) return [];
+    const selected = candidates.filter(candidate => candidate.id !== kept.id);
+    return selected.length > 1 ? selected : [];
+  }
   const normalized = text.replace(/[\s，。！？,.!?]/g, '');
   if (/(?:全部|全都|都可以|都删|都取消|both|all(?:ofthem)?)/i.test(normalized)
     || candidates.length === 2 && /(?:这|那)?(?:两|2)个/.test(normalized)) return candidates;
@@ -72,6 +100,17 @@ function multipleCancelSelection(text: string, candidates: CalendarItem[]) {
     const index = Number(match[1]) - 1; if (index >= 0 && index < candidates.length) selected.add(index);
   }
   return selected.size > 1 ? [...selected].sort((a, b) => a - b).map(index => candidates[index]) : [];
+}
+
+function contextualCancelIntent(text: string, candidates: CalendarItem[]) {
+  if (candidates.length < 2) return false;
+  const cancel = '(?:取消|删除|删掉|删了|cancel|delete|remove)';
+  return new RegExp(`(?:帮我|请|把|将|这|那|都|全部|全都|其他|其余|剩下).{0,160}${cancel}|${cancel}.{0,160}(?:这|那|都|全部|全都|其他|其余|剩下|第\\d)`, 'i').test(text);
+}
+
+function eventTitle(item: CalendarItem, maximum = 32) {
+  const title = item.title.replace(/[\r\n\t]+/g, ' ').trim();
+  return title.length > maximum ? `${title.slice(0, maximum - 1)}…` : title;
 }
 
 // Deterministic recovery for an occasional model routing miss. This can only
@@ -253,6 +292,11 @@ export class CalendarDialogue implements DialogueModel {
       if (this.draft && revisesPendingDraft(text)) {
         plan = { ...plan, decision: 'respond', calendarAction: 'followup', deliveryAction: 'none', reasoningEffort: 'low' };
       }
+      if (contextualCancelIntent(text, this.context.candidates)
+        && (!plan.calendarAction || plan.calendarAction === 'none')
+        && (!plan.deliveryAction || plan.deliveryAction === 'none')) {
+        plan = { ...plan, decision: 'respond', calendarAction: 'cancel', deliveryAction: 'none', reasoningEffort: 'low' };
+      }
       const explicit = explicitCalendarIntent(text);
       if (explicit && (!plan.calendarAction || plan.calendarAction === 'none')
         && (!plan.deliveryAction || plan.deliveryAction === 'none' || plan.deliveryAction === 'calendar')) {
@@ -307,7 +351,9 @@ export class CalendarDialogue implements DialogueModel {
       }
       if (!calendarConfirmed(text ?? '', approval.phrase)) {
         // Keep the same operation and original expiry; bind the next approval to this retry prompt.
-        const prompt = `尚未提交。草稿保留，请说“${approval.phrase}”或“确认”。`;
+        const prompt = this.cancelBatch
+          ? `为避免误删，每次只确认一项。当前第${this.cancelBatch.index + 1}/${this.cancelBatch.items.length}项尚未提交，请说“${approval.phrase}”或“确认”。`
+          : `尚未提交。草稿保留，请说“${approval.phrase}”或“确认”。`;
         this.approval = { ...approval, prompt };
         delta(prompt); return;
       }
@@ -333,18 +379,21 @@ export class CalendarDialogue implements DialogueModel {
             message = `Google 已保存全部${total}项日程。${result.notifyGuests ? '已请求发送邀请，请确认是否收到。' : ''}`;
           }
         } else if (result.state === 'succeeded' && result.kind === 'cancel' && this.cancelBatch) {
+          const completedItem = this.cancelBatch.items[this.cancelBatch.index];
           const completed = this.cancelBatch.index + 1, total = this.cancelBatch.items.length;
           if (completed < total) {
             this.cancelBatch.index++;
-            try { message = await this.previewCancelBatch(signal, `已取消第${completed}/${total}项。${result.notifyGuests ? '已请求通知受邀人。' : ''}\n`); }
+            try { message = await this.previewCancelBatch(signal,
+              `已删除“${eventTitle(completedItem)}”（${completed}/${total}）。${result.notifyGuests ? '已请求通知受邀人。' : ''}\n接下来是第${completed + 1}/${total}项：\n`); }
             catch (error) {
               signal.throwIfAborted();
               console.warn(JSON.stringify({ event: 'calendar_next_cancel_preview_failed', code: calendarError(error) }));
-              message = `已取消第${completed}/${total}项；下一项暂时没能生成确认预览。其余日程没有删除，请稍后说“继续取消其余日程”。`;
+              message = `已删除“${eventTitle(completedItem)}”（${completed}/${total}）；下一项暂时没能生成确认预览。其余日程没有删除，请稍后说“继续取消其余日程”。`;
             }
           } else {
+            const retained = this.cancelBatch.retained.map(item => `“${eventTitle(item)}”`).join('、');
             this.cancelBatch = undefined;
-            message = `Google 已取消全部${total}项日程。${result.notifyGuests ? '已请求通知受邀人。' : ''}`;
+            message = `已删除“${eventTitle(completedItem)}”（${completed}/${total}）。\n${total}项都已删除${retained ? `；已保留${retained}，没有改动` : ''}。${result.notifyGuests ? '已请求通知受邀人。' : ''}`;
           }
         } else message = result.state === 'succeeded'
           ? `Google 已保存${result.kind === 'cancel' ? '取消操作' : result.kind === 'create' ? '新日程' : '修改，原事件已更新'}。${result.notifyGuests ? result.kind === 'create' ? '已请求Google发送邀请，请确认是否收到。' : '已请求通知受邀人。' : ''}`
@@ -401,7 +450,9 @@ export class CalendarDialogue implements DialogueModel {
           if (selectedForCancel.some(item => item.recurringEventId || item.event?.recurrence)) {
             delta('所选事件包含重复会议。请先说明要取消单次还是整个系列；尚未删除任何事件。'); return;
           }
-          this.cancelBatch = { items: selectedForCancel, index: 0 };
+          const selectedIds = new Set(selectedForCancel.map(item => item.id));
+          this.cancelBatch = { items: selectedForCancel,
+            retained: this.context.candidates.filter(item => !selectedIds.has(item.id)), index: 0 };
           delta(await this.previewCancelBatch(signal)); return;
         }
       }

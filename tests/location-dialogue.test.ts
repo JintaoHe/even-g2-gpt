@@ -108,6 +108,18 @@ test('duplicate place names use a compact city label in choices and recommendati
   assert.match(answer, /建议 Target · West Des Moines/);
 });
 
+test('duplicate place names in the same city use street addresses in choices and recommendation', () => {
+  const result: RouteComparisonResult = { ...comparison, candidates: [
+    { ...comparison.candidates[0], name: 'Target', address: '5405 Mills Civic Pkwy, West Des Moines, IA 50266, USA' },
+    { ...comparison.candidates[1], name: 'Target', address: '1800 Valley West Dr, West Des Moines, IA 50266, USA' }
+  ] };
+  const answer = routeText(result, 'America/Chicago', true);
+  assert.match(answer, /Target · 5405 Mills Civic Pkwy, West Des Moines · 11分/);
+  assert.match(answer, /Target · 1800 Valley West Dr, West Des Moines · 13分/);
+  assert.match(answer, /建议 Target · 5405 Mills Civic Pkwy, West Des Moines/);
+  assert.doesNotMatch(answer, /1\. Target · West Des Moines ·/);
+});
+
 test('long routes use hours and always display both miles and kilometres', () => {
   const long: RouteComparisonResult = { query: 'ORD', recommendedPlaceId: 'ord', recommendationBasis: 'fastest',
     mode: 'drive', trafficAware: true, candidates: [{ placeId: 'ord', name: "Chicago O'Hare International Airport",

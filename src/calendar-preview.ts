@@ -8,11 +8,12 @@ export function calendarConfirmed(text: string, expected: string) {
   // Entire utterance only. Negations, questions, quotes and correction+approval never match.
   // A plain affirmative is accepted only by callers that also hold the exact
   // immediately preceding immutable preview and its unexpired approval ID.
-  return [expected, '确认', '确定', '可以', '没问题'].includes(clean);
+  if ([expected, '确认', '确定', '可以', '没问题'].includes(clean)) return true;
+  return expected === '确认取消' && ['确认删除', '确定删除', '确认删掉', '确定删掉'].includes(clean);
 }
 // This detects a likely confirmation attempt, NEVER authorization. Misheard verbs ask again.
 export function calendarConfirmationAttempt(text: string) {
-  return /^(?:(?:可以|好的|好|嗯)[，,、\s]*)?(?:确认|确定)(?:上线|创建|修改|取消|发送)?[。！.!]*$/.test(text.trim());
+  return /^(?:(?:可以|好的|好|嗯)[，,、\s]*)?(?:确认|确定)(?:上线|创建|修改|取消|删除|删掉|发送)?(?:(?:这)?[一二三四五六七八九十\d]+个|全部|所有)?[。！.!]*$/.test(text.trim());
 }
 function clip(text: string, cells: number) {
   let result = '', used = 0;

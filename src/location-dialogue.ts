@@ -67,15 +67,28 @@ function addressLocality(address?: string) {
   return parts.length >= 3 ? parts.at(-2) : parts[1];
 }
 
+function streetAndLocality(address?: string) {
+  const parts = address?.split(',').map(part => part.trim()).filter(Boolean) ?? [];
+  const street = parts[0], locality = addressLocality(address);
+  if (street && locality && street.toLocaleLowerCase() !== locality.toLocaleLowerCase()) return `${street}, ${locality}`;
+  return street || locality;
+}
+
 function candidateLabels(candidates: RouteComparisonResult['candidates']) {
-  const counts = new Map<string, number>();
+  const groups = new Map<string, RouteComparisonResult['candidates']>();
   for (const candidate of candidates) {
-    const key = candidate.name.toLocaleLowerCase(); counts.set(key, (counts.get(key) ?? 0) + 1);
+    const key = candidate.name.toLocaleLowerCase(), group = groups.get(key) ?? [];
+    group.push(candidate); groups.set(key, group);
   }
   return new Map(candidates.map(candidate => {
-    const duplicate = (counts.get(candidate.name.toLocaleLowerCase()) ?? 0) > 1;
-    const locality = duplicate ? addressLocality(candidate.address) : undefined;
-    return [candidate.placeId, locality ? `${candidate.name} · ${locality}` : candidate.name];
+    const group = groups.get(candidate.name.toLocaleLowerCase()) ?? [];
+    if (group.length < 2) return [candidate.placeId, candidate.name];
+    const localities = group.map(item => addressLocality(item.address));
+    const locality = addressLocality(candidate.address);
+    const citiesDistinguish = localities.every(Boolean)
+      && new Set(localities.map(value => value!.toLocaleLowerCase())).size === group.length;
+    const discriminator = citiesDistinguish ? locality : streetAndLocality(candidate.address);
+    return [candidate.placeId, discriminator ? `${candidate.name} · ${discriminator}` : candidate.name];
   }));
 }
 

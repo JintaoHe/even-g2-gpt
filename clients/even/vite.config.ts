@@ -21,10 +21,17 @@ export default defineConfig(({ mode }) => {
       throw new Error('EVEN_HUB_BACKEND_ORIGIN must be a bare wss:// origin');
     }
   }
+  const effectiveBackend = packagedOrigin ? new URL(packagedOrigin) : backend;
+  const effectiveLocal = effectiveBackend.hostname === '127.0.0.1' || effectiveBackend.hostname === 'localhost';
+  const effectivePort = effectiveBackend.port || (effectiveBackend.protocol === 'wss:' ? '443' : '80');
+  const connectionLabel = `${effectiveLocal ? '本地后端' : 'Linux 后端'} · ${effectiveBackend.hostname}:${effectivePort} · ${effectiveBackend.protocol === 'wss:' ? 'WSS' : 'WS'}`;
 
   return {
     base: './',
-    define: { __EVEN_BACKEND_ORIGIN__: JSON.stringify(packagedOrigin) },
+    define: {
+      __EVEN_BACKEND_ORIGIN__: JSON.stringify(packagedOrigin),
+      __EVEN_CONNECTION_LABEL__: JSON.stringify(connectionLabel)
+    },
     server: { host: '127.0.0.1', port: 5173, strictPort: true,
       // Development-only proxy. It never exposes the backend listener or enters the production bundle.
       proxy: { '/ws/conversation': { target: backend.origin, ws: true, changeOrigin: true,

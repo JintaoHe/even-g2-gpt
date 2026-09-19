@@ -49,6 +49,7 @@ async function fixture(startupResult = 0) {
       : name === './backend-url' ? { conversationWebSocketUrl }
       : name === './location' ? { LocationController } : sdk,
     document: { getElementById: element, addEventListener() {} }, window: { addEventListener() {} },
+    __EVEN_BACKEND_ORIGIN__: '', __EVEN_CONNECTION_LABEL__: '本地后端 · 127.0.0.1:3001 · WS',
     location: { protocol: 'http:', host: 'localhost' }, WebSocket: Socket,
     setInterval: (callback: typeof tick) => { tick = callback; return 1; }, clearInterval() {}, console: { info() {} }
   });
@@ -72,6 +73,7 @@ test('hot reload adopts an existing glasses container instead of splitting the d
   assert.deepEqual(f.counts(), { creates: 1, exits: 0 });
   assert.match(f.writes[0], /请在伴随页面连接后端/);
   assert.equal(f.element('bridge').textContent, 'Even SDK 已连接 · 576 × 288 显示');
+  assert.equal(f.element('backend-target').textContent, '连接目标：本地后端 · 127.0.0.1:3001 · WS');
 });
 
 for (const systemEvent of [false, true]) test(`exit then reconnect redraws with system exit event=${systemEvent}`, async () => {
