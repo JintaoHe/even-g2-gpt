@@ -1,51 +1,73 @@
-# Even G2 Agent
+# Glass Assistant for Even G2
 
 [简体中文](README.zh-CN.md) | **English**
 
-A personal AI assistant for Even Realities G2: bilingual Chinese/English voice conversations, text on glasses, web search, Google Calendar management, and confirmation-gated Markdown email delivery.
+A self-hosted, single-user personal AI assistant for Even Realities G2. It can hold bilingual voice conversations, remember the current session, reason across different topics, research the web, compare routes and places, manage a dedicated Google Calendar, and deliver Markdown documents by email.
 
-**Independent community project. Not affiliated with, endorsed by, or published by Even Realities.** The packaged working name is **Glass Assistant** so the application itself does not present as an official Even product.
+> **Independent community project.** This project is not affiliated with, endorsed by, or published by Even Realities. **Glass Assistant** is a working name chosen to avoid presenting the app as an official Even product.
 
-**Bring your own backend, for one trusted user.** OpenAI API is the default dialogue channel; Codex CLI is optional. Model keys, calendar authorization, and email credentials remain on your backend, never in the glasses client or public repository.
+[![CI](https://github.com/JintaoHe/even-g2-gpt/actions/workflows/ci.yml/badge.svg)](https://github.com/JintaoHe/even-g2-gpt/actions/workflows/ci.yml)
 
-This is a development build. The browser conversation lab and Even SDK simulator are connected, and the single-user Linux backend has passed host-level deployment checks; **physical G2/R1 end-to-end testing and Even Hub publication are still pending**. This is not a published Even Hub app or a hosted multi-user service.
+## Project status
 
-## Contents
+The current source has passed local browser and Even SDK simulator acceptance for bilingual speech, contextual conversation, web research, routes, Calendar create/update/cancel flows, email delivery, interruption, pagination, and exit/reconnect behavior. The single-user Linux deployment path, HTTPS/WSS reverse proxy, monitoring, backups, and rollback workflow are also implemented.
 
-- [Current capabilities](#current-capabilities)
-- [Quick start](#quick-start)
-- [Optional tools and configuration](#optional-tools-and-configuration)
-- [Project structure and deployment](#project-structure-and-deployment)
-- [Security and data boundaries](#security-and-data-boundaries)
-- [Development and verification](#development-and-verification)
-- [Limitations and next steps](#limitations-and-next-steps)
-- [Documentation](#documentation)
+The latest source still needs a fresh Linux deployment and live acceptance before packaging the next Even Hub build. **Physical G2/R1 testing and Even Hub publication remain pending.** This repository is not a hosted multi-user service.
+
+## What the assistant is designed to feel like
+
+Glass Assistant is intended to behave like a personal assistant, not a data-reporting bot:
+
+- **Talk naturally:** Soniox `stt-rt-v5` handles native 16 kHz Mandarin/English code-switching, with an 800 ms pre-trigger buffer and interruption support.
+- **Remember the current conversation:** bounded short-term session context resolves references such as “the second point,” “that idea,” or “the place you recommended.” It can pause a trip topic, discuss a business idea, and later return to the trip without mixing their exported documents.
+- **Adapt every turn:** one of nine cognitive modes is selected for the current goal—`casual`, `explain`, `research`, `brainstorm`, `decision_support`, `planning`, `deep_reasoning`, `compose`, or `coaching`. Tool workflows are authorized separately.
+- **Be useful and warm:** the assistant can execute tasks, think with the user, or simply respond socially. Praise, frustration, and conversational closure should receive a human-friendly response rather than another intake form.
+- **Ask one thing at a time:** when information is genuinely missing, it asks for one atomic fact or decision per turn instead of presenting a long questionnaire on the glasses.
+- **Show readable glasses pages:** live/final user speech and assistant answers use semantic, non-overlapping manual pages. URLs and internal metadata are removed from the glasses body while sources remain available for exported material.
 
 ## Current capabilities
 
-| Area | Implemented scope |
+| Capability | Current behavior |
 | --- | --- |
-| Conversation | Soniox `stt-rt-v5` mixed Chinese/English transcription at native 16 kHz, automatic utterance detection, contextual follow-ups, streamed text replies, interruption cancellation, and intent-based exit; scene-aware topic threads can pause and resume separate trip/business discussions within one session |
-| Companion input | Optional phone text box for questions and exact strings such as email addresses, URLs, and IDs; the glasses themselves do not provide a keyboard |
-| Location and ETA | Named/nearby route intent requests one short-lived phone fix (up to three attempts), supports far-city destinations, compares Places ratings with a Routes Matrix, and can use one quota-bound web lookup to resolve a temporary event venue before revalidating it in Places; coordinates never enter the LLM/history/logs. Local user/Linux/real-device acceptance is still pending |
-| Audio buffering | 800ms pre-trigger buffer preserves captured speech onset without adding an 800ms wait; it cannot eliminate every transcription omission |
-| Glasses reading | Live user transcription and final questions/answers; semantic, non-overlapping manual pages and session history; link syntax removed from the display while original sources remain available for export |
-| Dialogue channels | OpenAI API by default; optional Codex CLI with waiting feedback, actual search events, timeout, and cancellation handling |
-| Web search | API defaults: up to 10 calls per answer, 50 per 30-minute session, 100 per day, and 1200 per calendar month, with persistent accounting; CLI native search is separate from the API ledger |
-| Reasoning | The default dual-Luna configuration selects one of nine cognitive modes plus independent workflows/task kinds, then bounds low / medium / high effort per turn; tools remain separately authorized |
-| Calendar queries | Titles, times, locations, notes, and conflict checks; “next event” searches up to 93 days ahead and asks the user to resolve uncertain name matches |
-| Calendar changes | Preview and confirmation before create/update/cancel; updates retain the original event, and creation sends a native Google invitation to the fixed recipient |
-| Recurring events | Bounded daily/weekly series; requests without an end date default to three months, disclosed in notes; edits/cancellations distinguish one occurrence from the entire series |
-| Documents and email | Requested plans, instructions, discussion points, or transcripts as topic-scoped MD (business and trip threads are not blended); save, preview, then confirm sending; descriptive subjects, summaries, attachment names, single-event ICS attachments, and controlled resend |
-| Persistence | Conversations, jobs, files, and usage ledgers on your backend, with authenticated downloads, shutdown handling, and task recovery safeguards |
+| Voice conversation | Soniox real-time bilingual STT, automatic utterance completion, streamed answers, interruption cancellation, session exit intent, and OpenAI STT as an explicit rollback |
+| Session intelligence | Full bounded session context plus isolated topic threads; modes and workflows are re-evaluated on every turn rather than pinning the whole session to navigation or planning |
+| Web research | OpenAI API search with persistent per-answer/session/day/month quotas; actual search progress is shown instead of leaving the user waiting silently |
+| Places and routes | Session-only phone location, Places candidates and ratings, traffic-aware Routes Matrix comparisons, drive/walk/bicycle modes, ambiguity clarification, and a bounded public-research fallback for venue context |
+| Outdoor evidence | Weather, air quality, and pollen can be fetched concurrently for relevant time-bounded outdoor plans; unavailable evidence remains unknown instead of being treated as safe |
+| Google Calendar | Query titles, times, locations, notes and conflicts; create/update/cancel single or bounded recurring events; plan up to six itinerary events and confirm them one at a time |
+| Dynamic time zones | Google Time Zone is primary. A bounded Luna fallback receives no coordinates and must return a valid IANA zone or ask one location question |
+| Documents and email | Generate a topic-scoped Markdown artifact, preview it, request confirmation, and send it to the configured fixed recipient with a descriptive subject and attachment name |
+| Optional CLI channel | Codex CLI remains available for operators who prefer subscription-backed execution, with timeout/cancellation feedback; the API channel is the default low-latency experience |
+| Persistence | Backend-owned conversations, jobs, documents and usage ledgers; credentials and exact coordinates are excluded from those records |
 
-Google Calendar events and emailed ICS files are different capabilities: **a real event can be updated and notify attendees; a standalone ICS file is not a continuous synchronization service.** Recurring meetings use Google's native invitations; custom recurring ICS export is not supported yet.
+Calendar and email are authoritative private-state workflows. They never fall back to a model guess: writes require backend validation, preview-bound confirmation, idempotency handling, and a receipt. Maps, Weather, Air Quality, and Pollen are read-only evidence and may use a clearly disclosed, quota-bounded public-research fallback.
+
+## Architecture
+
+```text
+Even G2 / R1 or local simulator
+              |
+              | authenticated WSS
+              v
+      self-hosted Node backend
+       |        |         |
+     Soniox   OpenAI   validated tools
+       STT     Luna     Calendar / Email
+                         Maps / Environment
+```
+
+- The Even client contains no model, SMTP, Calendar, or Maps credentials.
+- Node listens on loopback in production and is exposed only through HTTPS/WSS.
+- The public Hub package must be rebuilt by each operator with their own backend URL and exact network whitelist.
+- This is currently a **single trusted user** design; there is no multi-tenant account isolation.
+
+See [project structure and deployment boundaries](docs/PROJECT_STRUCTURE.md) and [cognitive/workflow routing](docs/COGNITIVE_WORKFLOW_ROUTING.md).
 
 ## Quick start
 
-### 1. Prepare the development environment
+### 1. Install
 
-Requirements: **Node.js 24+**, npm, an OpenAI API key for API dialogue, and a Soniox API key for the default speech transcription path.
+Requirements: **Node.js 24+**, npm, an OpenAI API key for dialogue, and a Soniox API key for the default speech path.
 
 ```sh
 git clone https://github.com/JintaoHe/even-g2-gpt.git
@@ -53,137 +75,105 @@ cd even-g2-gpt
 npm ci
 ```
 
-Copy [.env.example](.env.example) to `.env` **only if `.env` does not already exist**. Never overwrite existing credentials. Configure these first:
+Copy [.env.example](.env.example) to `.env` only when `.env` does not already exist. Never commit `.env` or copy real credentials into an issue, log, simulator bundle, or Hub package.
+
+Minimum configuration:
 
 | Setting | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | Backend only; never enter it in the browser or glasses client |
-| `SONIOX_API_KEY` | Backend-only real-time STT credential; never ship it in the Even client or Hub package |
-| `STT_PROVIDER=soniox` | Default native-16-kHz bilingual transcription; `openai` is retained as an explicit rollback |
-| `G2_CLIENT_TOKEN` | Your own random access password, at least 32 characters; not an official Even token, and no glasses are required to create it |
-| `DIALOGUE_PROVIDER=api` | Default API dialogue; CLI mode requires a separate CLI login |
+| `OPENAI_API_KEY` | Backend-only dialogue and approved web-search access |
+| `SONIOX_API_KEY` | Backend-only real-time transcription credential |
+| `STT_PROVIDER=soniox` | Default bilingual STT; use `openai` only for rollback/testing |
+| `G2_CLIENT_TOKEN` | Your own random backend access secret, at least 32 characters; not an official Even token |
+| `DIALOGUE_PROVIDER=api` | Default low-latency dialogue path; `cli` is optional |
 
-Keep the sample model and port settings initially. Email and Google Calendar are disabled by default; enable them after basic conversation works.
+Calendar, email, Maps, Time Zone, Weather, Air Quality, and Pollen stay disabled until their dedicated server-side credentials and restrictions are configured.
 
-### 2. Start the browser conversation lab
+### 2. Run the browser conversation lab
 
 ```sh
 npm run conversation
 ```
 
-Open <http://127.0.0.1:3001> and connect with **G2_CLIENT_TOKEN**. Test text first, then explicitly enable the microphone. The page shows the active API/CLI channel. For Windows startup troubleshooting, see the [conversation guide, in Chinese](docs/CONVERSATION_LAB.md#启动).
+Open <http://127.0.0.1:3001>, enter `G2_CLIENT_TOKEN`, test text first, and then explicitly enable the microphone. See the [conversation lab guide](docs/CONVERSATION_LAB.md).
 
-`npm start` runs the earlier single-turn transcription POC, not the continuous conversation server.
+`npm start` is the earlier single-turn transcription POC; it is not the continuous assistant server.
 
-### 3. Connect the SDK client and simulator
+### 3. Run the Even client and simulator
 
-Keep the backend running. Use two additional terminals, each starting from the repository root:
+Keep the backend running and use two additional terminals from the repository root:
 
 ```sh
-# Terminal A: SDK frontend
+# Terminal A: Even SDK frontend
 cd clients/even
 npm ci
 npm run dev
 ```
 
 ```sh
-# Terminal B: simulator
+# Terminal B: local simulator
 cd tools/even-simulator
 npm ci
 npm start
 ```
 
-Enter the application token in the simulator's companion page. The backend allows one active authenticated owner; disconnect the browser lab before switching to the simulator. See [SDK controls and pagination](clients/even/README.md) and [simulator startup and exit troubleshooting](tools/even-simulator/README.md).
+Enter the application token on the companion page. Only one authenticated owner connection is allowed, so disconnect the browser lab before switching to the simulator. See [Even client controls](clients/even/README.md) and [simulator troubleshooting](tools/even-simulator/README.md).
 
-## Optional tools and configuration
+## Optional services
 
-### Google Calendar
+| Service | What it enables | Setup |
+| --- | --- | --- |
+| Google Calendar | Queries, conflict checks, invitations, recurring events, and confirmed updates/cancellations | [Calendar guide](docs/google-calendar.md) |
+| Gmail SMTP | Confirmed delivery of Markdown and ICS attachments to one fixed recipient | [Email delivery](docs/EMAIL_DELIVERY.md) |
+| Google Places and Routes | Nearby/far destination resolution, ETA, distance, traffic and ratings | [Maps and Routes](docs/setup/GOOGLE_MAPS_ROUTES.md) |
+| Time Zone API | Location-aware IANA time zones for relative Calendar requests | [Google API production](docs/setup/GOOGLE_API_PRODUCTION.md) |
+| Weather, Air Quality, Pollen | Structured evidence for outdoor planning | [Maps and environment setup](docs/setup/GOOGLE_MAPS_ROUTES.md) |
+| Codex CLI | Optional alternative dialogue execution with lifecycle and timeout controls | [CLI channel](docs/CODEX_CLI_CHANNEL.md) |
 
-Use a dedicated assistant Google account and a separate calendar, named `Even Assistant` by default. Complete OAuth, then explicitly enable `GOOGLE_CALENDAR_ENABLED`. Do not substitute your primary personal account for the dedicated account.
+For this personal deployment, the recommended OpenAI project hard limit is `$40` per month. Application search quotas are defense in depth, not a substitute for provider-side billing limits. Google and AWS use separate billing controls.
 
-- Relative Calendar times use the current one-shot location's IANA timezone (for example Los Angeles or New York), while an explicitly named event timezone wins. Google Time Zone is primary; if it remains unavailable, Luna receives bounded session context and a validated device-zone hint—but no coordinates—and either resolves a strict IANA zone or asks one city/region question. It never silently assumes Chicago, and the fallback cannot bypass write confirmation.
-- Draft content is separate from one-use authorization. A misheard confirmation is not permission to submit; create/update/cancel still require confirmation.
-- Queries cover only the bound calendar. External, non-assistant-created, or unsupported events may be read-only.
-- The three-month recurrence default does not auto-renew. Entire-series operations include past occurrences.
+## Security and privacy boundaries
 
-See the [Google Calendar guide, mixed Chinese/English](docs/google-calendar.md) for setup, 403 troubleshooting, credential recovery, and recurrence boundaries.
+- Commit source, synthetic fixtures, and documentation only—not `.env`, OAuth JSON, CLI authentication, recordings, private conversations, generated documents, or runtime databases.
+- Exact GPS coordinates live only in volatile session adapters. They refresh at most every 10 seconds, become unusable after two minutes, never enter Luna/search/history/logs/artifacts, and are cleared on stop, disconnect, or session exit.
+- Calendar and email credentials stay in the backend. The model cannot select arbitrary recipients, read arbitrary server files, or directly execute a shell.
+- A cognitive mode, previous confirmation, or model statement never grants write permission. Every side effect is revalidated against its current preview.
+- Unknown Calendar/email write results are checked rather than automatically replayed, preventing duplicate events or messages.
+- `.gitignore` is not encryption. Operators remain responsible for backend access controls, retention, encrypted backups, provider policies, and credential rotation.
 
-### Current-location ETA
+Read [SECURITY.md](SECURITY.md) before exposing a backend to the internet. Never post credentials or private logs in a public issue.
 
-The optional route path obtains an automatic phone fix and keeps a session-only
-location context refreshed at most every 10 seconds, then uses Places Text
-Search (New), and one Routes Compute Route Matrix request for up to three nearby
-candidates. Driving is the default; spoken or companion controls can switch to
-walking/cycling. Results combine compact ETA/distance, traffic when applicable,
-rating confidence and a recommendation. A recent-mode follow-up uses the newest
-fresh-enough session fix and reuses bounded Place IDs. Coordinates stay only in
-live memory and are cleared on explicit stop, disconnect, or session exit. It is disabled until a separate, server-only Google
-Maps key is enabled and restricted to those two APIs and the
-calling machine/server IP. The Calendar OAuth secret is not a Maps key. See
-[Google Maps route setup](docs/setup/GOOGLE_MAPS_ROUTES.md) before local testing.
-
-### Markdown, email, and attachments
-
-API conversations can generate requested standalone documents, not just transcripts. Files live in your own backend data directory; **they do not automatically appear in the ChatGPT website or a public artifact store**.
-
-Email uses a dedicated Gmail sender and one fixed recipient. Explicitly enable `EVEN_EMAIL_ENABLED`. The assistant previews the saved document before asking for send confirmation. SMTP acceptance does not prove inbox delivery. Recovery offers mailbox checks, one separately confirmed resend, and authenticated downloads.
-
-See [email setup and delivery safeguards](docs/EMAIL_DELIVERY.md) and [calendar attachment design](docs/CALENDAR_EMAIL_DESIGN.md).
-
-### API and Codex CLI
-
-API is the default dialogue experience. CLI requires the operator's own login and uses that account's allowance. **Dialogue channel selection is independent of STT**: speech uses Soniox by default and still incurs provider usage. CLI does not guarantee equivalent speed, streaming, or tool support. API conversational document generation should not be assumed available in CLI mode.
-
-See [channel selection and authentication](docs/CODEX_CLI_CHANNEL.md) and [application-level reasoning selection](docs/ADAPTIVE_REASONING.md). Search-call limits are not a total dollar spending cap: dialogue, transcription, and document generation incur separate usage.
-
-For this personal deployment, configure an OpenAI **project** monthly spend limit
-of `$40` and turn on hard-limit enforcement in the API dashboard. The in-app search
-ledger is defense in depth, not a replacement for the provider-side cap; Google
-Maps and AWS have separate billing controls.
-
-## Project structure and deployment
+## Project layout and deployment
 
 ```text
 src/                   Backend and historical POC entry points
 web/                   Local browser conversation lab
 clients/even/          Independently built Even SDK frontend
 tools/even-simulator/  Simulator and development tools
-tests/                 Automated tests and opt-in live checks
-scripts/               Build, authorization, audit, and smoke-test tools
-deploy/                Linux systemd template
-docs/                  Setup, operations, design, and acceptance guides
-.local/                Private runtime data (not committed)
+tests/                 Automated tests and opt-in paid/live checks
+scripts/               Build, audit, authorization, and smoke-test tools
+deploy/                Linux systemd, monitoring, backup, and update templates
+docs/                  Setup, product, security, and acceptance references
+.local/                Private runtime data (ignored; never deploy from Git)
 ```
 
-`npm run build:server` creates a separate `dist/server-*` backend release directory. **Deploy only a successful build and inspect its `BUILD-MANIFEST.json`; do not upload the entire development checkout.**
+`npm run build:server` creates a separate `dist/server-*` backend release. Deploy that verified server artifact—not the entire development checkout. The release excludes the browser lab, SDK source, simulator, tests, credentials, and local runtime data.
 
-The server release excludes the browser lab, SDK frontend, simulator, tests, credentials, and local data. Build the SDK separately; configure Linux credentials and data separately. Node stays on loopback behind the deployed HTTPS/WSS reverse proxy; port 3001 is not public. The Even Hub client now has a separate production bundle and exact network whitelist, but Private Testing and physical-device acceptance are still pending.
+Start with [Linux deployment](docs/setup/LINUX_DEPLOYMENT.md), [operations](docs/LINUX_OPERATIONS.md), [automatic updates and rollback](docs/setup/AUTOMATIC_UPDATES.md), and [monitoring/backup recovery](docs/setup/MONITORING_BACKUP_RECOVERY.md).
 
-See [deployment boundaries](docs/PROJECT_STRUCTURE.md), [Linux lifecycle, storage, and migration](docs/LINUX_OPERATIONS.md), and [automatic Linux updates with rollback](docs/setup/AUTOMATIC_UPDATES.md).
+## Verification
 
-## Security and data boundaries
-
-- Commit only source, synthetic tests, and documentation—not `.env`, OAuth JSON, CLI auth, recordings, private conversations, generated files, or runtime databases.
-- Operators manage `.local` data. Git ignore is not encryption; configure access controls, backups, and retention.
-- The backend constrains calendar and mail operations. The model cannot choose arbitrary recipients, read server files, or directly execute a shell.
-- Uncertain writes are not automatically replayed, avoiding duplicate events or mail. Bounded read retries are different from write retries.
-- Keep simulator automation ports local; never expose them publicly.
-- Models and search services process relevant content. Local storage or `store:false` does not guarantee zero retention by providers.
-
-Follow the [security policy](SECURITY.md) to report vulnerabilities. Never post credentials or private logs in public issues.
-
-## Development and verification
-
-Offline checks from the repository root:
+Run from the repository root:
 
 ```sh
 npm run typecheck
 npm test
 npm run build:server
 node scripts/audit-public.mjs --worktree
+node scripts/audit-public.mjs --history
 ```
 
-Separate SDK checks:
+Then verify the Even client separately:
 
 ```sh
 cd clients/even
@@ -191,27 +181,28 @@ npm test
 npm run build
 ```
 
-Before publishing, also scan staged content (`npm run audit:public`) and historical files (`node scripts/audit-public.mjs --history`). Scanning does not replace manual review and does not inspect Git author identities. Real-model evaluations consume allowance; live mail/calendar scripts can cause external side effects. **Review and authorize them separately as documented; they are not part of default CI.**
+Live Calendar, email, Maps, environment, STT, and real-model scripts may consume quota or create external side effects. They are intentionally excluded from default CI and must be reviewed and authorized individually.
 
-See [contribution guidelines](CONTRIBUTING.md) and [release readiness](docs/RELEASE_READINESS.md).
+## Known limits and next steps
 
-## Limitations and next steps
+- Simulator success does not certify BLE behavior, phone permissions, battery, thermals, lock-screen/background lifecycle, fonts, or R1 gestures on physical hardware.
+- There is no always-on wake word or guaranteed all-day background assistant mode.
+- Session context is short-term memory only; reconnecting does not automatically restore a previous conversation or create durable personal memory.
+- Recurrence currently covers bounded daily/weekly series, not monthly rules, multiple weekdays, all-day series, or “this and following” splits.
+- Transit routing and direct handoff into Apple Maps/Google Maps are not implemented.
 
-- Simulator success does not certify hardware BLE, fonts, battery, permissions, phone lock-screen behavior, or background lifecycle. Always-on wake words and background operation are not promised.
-- Recurrence does not yet support monthly rules, multiple weekdays, all-day series, or “this and following” splits. Real recurring-invitation delivery and synchronization need dedicated acceptance testing.
-- Audio detection is an energy-based baseline. Noise, quiet speech, transcription, and intent recognition can still fail; 800ms buffering preserves only audio already captured.
-- There is no multi-tenant isolation. Reconnecting does not automatically restore full conversation context.
-- Next priorities: user local route acceptance → Linux route deployment/live test → post-deployment security review → final Even Hub package/Private Testing → physical G2/R1 acceptance → Beta lock/background testing.
+Next sequence: deploy the current `main` server build to Linux → run live route/environment/Calendar/email acceptance and a post-deployment security review → create one fresh Even Hub package → complete physical G2/R1 and background-lifecycle testing.
 
 ## Documentation
 
-Browse the **[documentation index](docs/README.md)**. The README and index are available in both languages; linked detailed guides retain their existing language and are not all translated.
+Browse the bilingual **[documentation index](docs/README.md)**.
 
 | Goal | Start here |
 | --- | --- |
-| Test voice and browser conversations | [Conversation lab (Chinese)](docs/CONVERSATION_LAB.md) |
-| Test glasses display and controls | [SDK client](clients/even/README.md) · [Simulator](tools/even-simulator/README.md) |
-| Configure calendars, invitations, and recurring events | [Google Calendar (mixed Chinese/English)](docs/google-calendar.md) |
-| Generate MD and send email | [Document and email delivery](docs/EMAIL_DELIVERY.md) |
-| Deploy your Linux backend | [Deployment boundaries](docs/PROJECT_STRUCTURE.md) · [Linux operations](docs/LINUX_OPERATIONS.md) |
-| Understand the roadmap and remaining work | [Release readiness](docs/RELEASE_READINESS.md) · [Development plan](docs/DEVELOPMENT_PLAN.md) |
+| Understand assistant modes, topic memory, tools, and companion tone | [Cognitive/workflow routing](docs/COGNITIVE_WORKFLOW_ROUTING.md) · [Adaptive reasoning](docs/ADAPTIVE_REASONING.md) |
+| Test voice conversation and the browser lab | [Conversation lab](docs/CONVERSATION_LAB.md) |
+| Test glasses display, controls, location, and the simulator | [Even client](clients/even/README.md) · [Simulator](tools/even-simulator/README.md) |
+| Configure Calendar, invitations, and recurrence | [Google Calendar](docs/google-calendar.md) |
+| Generate Markdown and deliver email | [Email delivery](docs/EMAIL_DELIVERY.md) |
+| Deploy and operate the private Linux backend | [Linux deployment](docs/setup/LINUX_DEPLOYMENT.md) · [Linux operations](docs/LINUX_OPERATIONS.md) |
+| Review release gates and remaining work | [Release readiness](docs/RELEASE_READINESS.md) · [Development plan](docs/DEVELOPMENT_PLAN.md) |
