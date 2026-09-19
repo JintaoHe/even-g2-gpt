@@ -25,17 +25,18 @@ This is a development build. The browser conversation lab and Even SDK simulator
 
 | Area | Implemented scope |
 | --- | --- |
-| Conversation | Mixed Chinese/English transcription, automatic utterance detection, contextual follow-ups, streamed text replies, interruption cancellation, and intent-based exit; no send button required for every utterance |
+| Conversation | Soniox `stt-rt-v5` mixed Chinese/English transcription at native 16 kHz, automatic utterance detection, contextual follow-ups, streamed text replies, interruption cancellation, and intent-based exit; scene-aware topic threads can pause and resume separate trip/business discussions within one session |
 | Companion input | Optional phone text box for questions and exact strings such as email addresses, URLs, and IDs; the glasses themselves do not provide a keyboard |
+| Location and ETA | Named/nearby route intent requests one short-lived phone fix (up to three attempts), supports far-city destinations, compares Places ratings with a Routes Matrix, and can use one quota-bound web lookup to resolve a temporary event venue before revalidating it in Places; coordinates never enter the LLM/history/logs. Local user/Linux/real-device acceptance is still pending |
 | Audio buffering | 800ms pre-trigger buffer preserves captured speech onset without adding an 800ms wait; it cannot eliminate every transcription omission |
-| Glasses reading | Live user transcription and final questions/answers; manual pagination and session history; link syntax removed from the display while original sources remain available for export |
+| Glasses reading | Live user transcription and final questions/answers; semantic, non-overlapping manual pages and session history; link syntax removed from the display while original sources remain available for export |
 | Dialogue channels | OpenAI API by default; optional Codex CLI with waiting feedback, actual search events, timeout, and cancellation handling |
-| Web search | API defaults: up to 2 calls per answer, 20 per day, and 600 per calendar month, with persistent accounting; CLI native search is separate from the API ledger |
-| Reasoning | The default dual-Luna configuration selects none / low / medium per turn from context; this is not an accuracy or latency guarantee |
+| Web search | API defaults: up to 10 calls per answer, 50 per 30-minute session, 100 per day, and 1200 per calendar month, with persistent accounting; CLI native search is separate from the API ledger |
+| Reasoning | The default dual-Luna configuration selects one of nine cognitive modes plus independent workflows/task kinds, then bounds low / medium / high effort per turn; tools remain separately authorized |
 | Calendar queries | Titles, times, locations, notes, and conflict checks; “next event” searches up to 93 days ahead and asks the user to resolve uncertain name matches |
 | Calendar changes | Preview and confirmation before create/update/cancel; updates retain the original event, and creation sends a native Google invitation to the fixed recipient |
 | Recurring events | Bounded daily/weekly series; requests without an end date default to three months, disclosed in notes; edits/cancellations distinguish one occurrence from the entire series |
-| Documents and email | Requested plans, instructions, discussion points, or transcripts as MD; save, preview, then confirm sending; descriptive subjects, summaries, attachment names, single-event ICS attachments, and controlled resend |
+| Documents and email | Requested plans, instructions, discussion points, or transcripts as topic-scoped MD (business and trip threads are not blended); save, preview, then confirm sending; descriptive subjects, summaries, attachment names, single-event ICS attachments, and controlled resend |
 | Persistence | Conversations, jobs, files, and usage ledgers on your backend, with authenticated downloads, shutdown handling, and task recovery safeguards |
 
 Google Calendar events and emailed ICS files are different capabilities: **a real event can be updated and notify attendees; a standalone ICS file is not a continuous synchronization service.** Recurring meetings use Google's native invitations; custom recurring ICS export is not supported yet.
@@ -44,7 +45,7 @@ Google Calendar events and emailed ICS files are different capabilities: **a rea
 
 ### 1. Prepare the development environment
 
-Requirements: **Node.js 24+**, npm, and an OpenAI API key for API dialogue and/or speech transcription.
+Requirements: **Node.js 24+**, npm, an OpenAI API key for API dialogue, and a Soniox API key for the default speech transcription path.
 
 ```sh
 git clone https://github.com/JintaoHe/even-g2-gpt.git
@@ -57,6 +58,8 @@ Copy [.env.example](.env.example) to `.env` **only if `.env` does not already ex
 | Setting | Purpose |
 | --- | --- |
 | `OPENAI_API_KEY` | Backend only; never enter it in the browser or glasses client |
+| `SONIOX_API_KEY` | Backend-only real-time STT credential; never ship it in the Even client or Hub package |
+| `STT_PROVIDER=soniox` | Default native-16-kHz bilingual transcription; `openai` is retained as an explicit rollback |
 | `G2_CLIENT_TOKEN` | Your own random access password, at least 32 characters; not an official Even token, and no glasses are required to create it |
 | `DIALOGUE_PROVIDER=api` | Default API dialogue; CLI mode requires a separate CLI login |
 
@@ -98,12 +101,26 @@ Enter the application token in the simulator's companion page. The backend allow
 
 Use a dedicated assistant Google account and a separate calendar, named `Even Assistant` by default. Complete OAuth, then explicitly enable `GOOGLE_CALENDAR_ENABLED`. Do not substitute your primary personal account for the dedicated account.
 
-- Times default to Chicago; users can request another timezone. Verify exact dates, times, and changes before writes.
+- Relative Calendar times use the current one-shot location's IANA timezone (for example Los Angeles or New York), while an explicitly named event timezone wins. Google Time Zone is primary; if it remains unavailable, Luna receives bounded session context and a validated device-zone hint—but no coordinates—and either resolves a strict IANA zone or asks one city/region question. It never silently assumes Chicago, and the fallback cannot bypass write confirmation.
 - Draft content is separate from one-use authorization. A misheard confirmation is not permission to submit; create/update/cancel still require confirmation.
 - Queries cover only the bound calendar. External, non-assistant-created, or unsupported events may be read-only.
 - The three-month recurrence default does not auto-renew. Entire-series operations include past occurrences.
 
 See the [Google Calendar guide, mixed Chinese/English](docs/google-calendar.md) for setup, 403 troubleshooting, credential recovery, and recurrence boundaries.
+
+### Current-location ETA
+
+The optional route path obtains an automatic phone fix and keeps a session-only
+location context refreshed at most every 10 seconds, then uses Places Text
+Search (New), and one Routes Compute Route Matrix request for up to three nearby
+candidates. Driving is the default; spoken or companion controls can switch to
+walking/cycling. Results combine compact ETA/distance, traffic when applicable,
+rating confidence and a recommendation. A recent-mode follow-up uses the newest
+fresh-enough session fix and reuses bounded Place IDs. Coordinates stay only in
+live memory and are cleared on explicit stop, disconnect, or session exit. It is disabled until a separate, server-only Google
+Maps key is enabled and restricted to those two APIs and the
+calling machine/server IP. The Calendar OAuth secret is not a Maps key. See
+[Google Maps route setup](docs/setup/GOOGLE_MAPS_ROUTES.md) before local testing.
 
 ### Markdown, email, and attachments
 
@@ -115,9 +132,14 @@ See [email setup and delivery safeguards](docs/EMAIL_DELIVERY.md) and [calendar 
 
 ### API and Codex CLI
 
-API is the default experience. CLI requires the operator's own login and uses that account's allowance. **CLI dialogue does not remove API usage for speech transcription**, and does not guarantee equivalent speed, streaming, or tool support. API conversational document generation should not be assumed available in CLI mode.
+API is the default dialogue experience. CLI requires the operator's own login and uses that account's allowance. **Dialogue channel selection is independent of STT**: speech uses Soniox by default and still incurs provider usage. CLI does not guarantee equivalent speed, streaming, or tool support. API conversational document generation should not be assumed available in CLI mode.
 
 See [channel selection and authentication](docs/CODEX_CLI_CHANNEL.md) and [application-level reasoning selection](docs/ADAPTIVE_REASONING.md). Search-call limits are not a total dollar spending cap: dialogue, transcription, and document generation incur separate usage.
+
+For this personal deployment, configure an OpenAI **project** monthly spend limit
+of `$40` and turn on hard-limit enforcement in the API dashboard. The in-app search
+ledger is defense in depth, not a replacement for the provider-side cap; Google
+Maps and AWS have separate billing controls.
 
 ## Project structure and deployment
 
@@ -179,7 +201,7 @@ See [contribution guidelines](CONTRIBUTING.md) and [release readiness](docs/RELE
 - Recurrence does not yet support monthly rules, multiple weekdays, all-day series, or “this and following” splits. Real recurring-invitation delivery and synchronization need dedicated acceptance testing.
 - Audio detection is an energy-based baseline. Noise, quiet speech, transcription, and intent recognition can still fail; 800ms buffering preserves only audio already captured.
 - There is no multi-tenant isolation. Reconnecting does not automatically restore full conversation context.
-- Next priorities: Even Hub Private Testing → physical G2/R1 acceptance → Beta lock/background testing → privacy/support material and submission review.
+- Next priorities: user local route acceptance → Linux route deployment/live test → post-deployment security review → final Even Hub package/Private Testing → physical G2/R1 acceptance → Beta lock/background testing.
 
 ## Documentation
 

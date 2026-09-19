@@ -18,6 +18,7 @@ function controls() {
   for (const id of ['voice', 'resume']) $(id).disabled = !connected || ['closed', 'exit_pending'].includes(state);
   if (!speechAvailable) $('voice').disabled = true;
   for (const id of ['submit', 'pause', 'interrupt', 'retry', 'send']) $(id).disabled = !active();
+  $('applyRouteMode').disabled = !connected || ['closed', 'exit_pending'].includes(state);
   $('exit').disabled = !connected || ['closed', 'exit_pending'].includes(state);
   $('connect').disabled = connected;
   $('exportMd').disabled = !connected;
@@ -101,6 +102,9 @@ $('connect').onclick = () => {
     const e = JSON.parse(data);
     calendarEvent(e);
     progress.event(e);
+    if (e.type === 'route.status' && e.status === 'failed') console.warn('Route request failed', {
+      stage: e.stage, providerStatus: e.provider_status, providerReason: e.provider_reason
+    });
     if (e.type === 'ready') {
       emailAvailable = e.capabilities?.email === true;
       downloadToken = token; clearInterval(jobTimer);
@@ -108,13 +112,14 @@ $('connect').onclick = () => {
       connected = true; $('token').value = ''; notice('已连接。点击开启麦克风，或发送文字。');
       speechAvailable = e.capabilities?.speech !== false;
       const provider = e.capabilities?.provider;
+      const stt = e.capabilities?.speechProvider === 'soniox' ? 'Soniox' : e.capabilities?.speechProvider === 'openai' ? 'OpenAI' : 'STT';
       cliSearchEnabled = provider === 'codex-cli' && e.capabilities.webSearch;
       $('channel').textContent = provider === 'codex-cli' ? '当前测试：Codex CLI 版本（ChatGPT 账号通道）' : provider === 'api' ? '当前测试：OpenAI API 调用版本' : '测试通道：服务器未提供，无法确认';
       $('channelDetails').textContent = provider === 'codex-cli'
-        ? `对话与搜索：Codex CLI · 整条回答返回 · 搜索${e.capabilities.webSearch ? '开启' : '关闭'} · 搜索开启时回答推理最低 low。${speechAvailable ? '语音转录：OpenAI API，仍产生 API 用量。' : '仅支持文字输入。'}`
-        : provider === 'api' ? `对话：OpenAI API · 流式回答 · 搜索${e.capabilities.webSearch ? '开启，受 API 搜索额度限制' : '关闭'}。${speechAvailable ? '语音转录：OpenAI API。' : '仅支持文字输入。'}` : '请检查服务器版本。';
+        ? `对话与搜索：Codex CLI · 整条回答返回 · 搜索${e.capabilities.webSearch ? '开启' : '关闭'} · 搜索开启时回答推理最低 low。${speechAvailable ? `语音转录：${stt} API。` : '仅支持文字输入。'}`
+        : provider === 'api' ? `对话：OpenAI API · 流式回答 · 搜索${e.capabilities.webSearch ? '开启，受 API 搜索额度限制' : '关闭'}。${speechAvailable ? `语音转录：${stt} API。` : '仅支持文字输入。'}` : '请检查服务器版本。';
       $('models').textContent = e.models ? `通道：${e.capabilities?.provider ?? 'api'} · 意图：${e.models.intent} · 回答：${e.models.reply}` : '测试模型';
-      if (e.capabilities?.provider === 'codex-cli') notice(`Codex CLI：整条回答返回，${e.capabilities.webSearch ? '原生联网搜索已开启（使用 Codex 账号额度）' : '联网搜索已关闭'}。${speechAvailable ? '语音转录仍走 OpenAI API。' : '未配置 API key，仅支持文字输入。'}`);
+      if (e.capabilities?.provider === 'codex-cli') notice(`Codex CLI：整条回答返回，${e.capabilities.webSearch ? '原生联网搜索已开启（使用 Codex 账号额度）' : '联网搜索已关闭'}。${speechAvailable ? `语音转录走 ${stt} API。` : '未配置 STT API key，仅支持文字输入。'}`);
     }
     if (e.type === 'jobs.list') renderJobs(e.jobs);
     if (e.type === 'mail.confirmation_required') {
@@ -138,9 +143,17 @@ $('connect').onclick = () => {
     if (e.type === 'turn.committed') { message('你', e.text); notice(''); }
     if (e.type === 'answer.start') {
       const answer = message('Even'); answers.set(e.id, answer);
-      if (['none', 'low', 'medium'].includes(e.reasoningEffort)) {
+      if (['low', 'medium', 'high'].includes(e.reasoningEffort)) {
         const mode = document.createElement('small');
-        mode.textContent = ` · 推理：${cliSearchEnabled && e.reasoningEffort === 'none' ? 'low（CLI 搜索最低档）' : e.reasoningEffort}`;
+        const scenes = { casual: '聊天', explain: '解释', research: '研究', brainstorm: '头脑风暴', decision_support: '决策支持',
+          planning: '规划', deep_reasoning: '深度思考', compose: '创作', coaching: '辅导' };
+        const workflowNames = { search: '联网', navigation: '路线', calendar: '日历', document: '文档', email: '邮件',
+          memory: '记忆', list: '清单', conditional_task: '条件任务' };
+        const cognitiveMode = e.cognitiveMode ?? e.assistantMode;
+        const scene = scenes[cognitiveMode] ? ` · 认知：${scenes[cognitiveMode]}` : '';
+        const capabilities = [...new Set((e.workflows ?? []).map(workflow => workflowNames[workflow.kind]).filter(Boolean))];
+        const flow = capabilities.length ? ` · 能力：${capabilities.join('+')}` : '';
+        mode.textContent = `${scene}${flow} · 推理：${cliSearchEnabled && e.reasoningEffort === 'none' ? 'low（CLI 搜索最低档）' : e.reasoningEffort}`;
         answer.label.after(mode);
       }
     }
@@ -193,6 +206,7 @@ $('voice').onclick = async () => {
 $('submit').onclick = () => { if (worklet) worklet.port.postMessage({ type: 'flush' }); else send({ type: 'turn.submit' }); };
 $('pause').onclick = () => { stopMic(); send({ type: 'pause' }); };
 $('resume').onclick = () => send({ type: 'resume' });
+$('applyRouteMode').onclick = () => send({ type: 'route.mode', mode: $('routeMode').value });
 $('interrupt').onclick = () => send({ type: 'interrupt' });
 $('retry').onclick = () => send({ type: 'answer.retry' });
 $('exit').onclick = () => { stopMic(); send({ type: 'exit.request' }); };

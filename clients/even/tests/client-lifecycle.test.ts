@@ -6,6 +6,7 @@ import ts from 'typescript';
 import { ReadingHistory } from '../src/reading-history.ts';
 import { DisplaySession } from '../src/display-session.ts';
 import { conversationWebSocketUrl } from '../src/backend-url.ts';
+import { LocationController } from '../src/location.ts';
 
 // Run the actual browser entry point against deterministic SDK/DOM/socket doubles.
 // No network, credentials, microphone or simulator process is used by these tests.
@@ -30,6 +31,10 @@ async function fixture(startupResult = 0) {
     shutDownPageContainer: async () => { exits++; return true; },
     textContainerUpgrade: async (value: any) => { writes.push(value.content); return true; },
     audioControl: async (enabled: boolean) => { audio.push(enabled); return true; },
+    getAppLocation: async () => null,
+    startAppLocationUpdates: async () => true,
+    stopAppLocationUpdates: async () => true,
+    onAppLocationChanged: () => () => {},
     onEvenHubEvent: (handler: typeof hub) => { hub = handler; }
   };
   class Property { constructor(value: object) { Object.assign(this, value); } }
@@ -41,7 +46,8 @@ async function fixture(startupResult = 0) {
   runInNewContext(js, {
     exports: {}, require: (name: string) => name === './reading-history' ? { ReadingHistory }
       : name === './display-session' ? { DisplaySession }
-      : name === './backend-url' ? { conversationWebSocketUrl } : sdk,
+      : name === './backend-url' ? { conversationWebSocketUrl }
+      : name === './location' ? { LocationController } : sdk,
     document: { getElementById: element, addEventListener() {} }, window: { addEventListener() {} },
     location: { protocol: 'http:', host: 'localhost' }, WebSocket: Socket,
     setInterval: (callback: typeof tick) => { tick = callback; return 1; }, clearInterval() {}, console: { info() {} }

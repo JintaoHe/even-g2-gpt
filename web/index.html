@@ -5,6 +5,7 @@
 <style>
 body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-width:860px;margin:40px auto;padding:0 22px}h1{font-size:28px;margin-bottom:4px}small,.muted{color:#a7b8aa}section{background:#1b261f;padding:20px;border:1px solid #3b5141;border-radius:14px;margin:18px 0}input,textarea,button{font:inherit;border-radius:7px;padding:9px 12px;border:1px solid #617968}input,textarea{background:#101713;color:inherit;box-sizing:border-box}input{width:min(100%,420px)}textarea{width:100%;resize:vertical}button{background:#cdfcae;color:#132010;cursor:pointer;margin:6px 8px 6px 0}button:disabled{opacity:.4;cursor:default}.secondary{background:#233a2b;color:#e4eee6}.danger{background:#ffd6c9}#state{color:#cdfcae}#history{max-height:440px;overflow:auto}.message{white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid #3b5141;padding:12px 0}.message label{display:block;color:#a7b8aa;font-size:13px}#transcript{white-space:pre-wrap;color:#bfe4c8}dialog{background:#1b261f;color:#e4eee6;border:1px solid #617968;border-radius:12px;max-width:420px}dialog::backdrop{background:#000a}#notice{color:#ffdcb0;white-space:pre-wrap}
 </style>
+<style>select{font:inherit;border-radius:7px;padding:9px 12px;border:1px solid #617968;background:#101713;color:inherit}</style>
 <h1>Even · Conversation Lab</h1>
 <div class="muted">本地对话实验版 · 支持联网搜索与引用来源 · 尚未接入 G2 / R1</div>
 <div id="models" class="muted">连接后显示当前模型配置</div>
@@ -29,6 +30,7 @@ body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-wi
     <button id="retry" class="secondary" disabled>继续上一答</button>
     <button id="exit" class="danger" disabled>结束对话</button>
   </div>
+  <div><label for="routeMode">路线默认方式</label> <select id="routeMode"><option value="drive">驾车</option><option value="walk">步行</option><option value="bicycle">骑车</option></select><button id="applyRouteMode" class="secondary" disabled>应用到本次对话</button></div>
   <small>开启后持续监听，停顿约 1.2 秒后判断是否说完；可以直接开口插话。环境声音也可能触发，建议先在安静环境测试。音频发往 OpenAI；文字记录保存在本机 .local/conversations，不保存音频。隐藏页面会暂停收音。</small>
   <p id="transcript" aria-label="实时转录"></p>
 </section>

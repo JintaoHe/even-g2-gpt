@@ -38,6 +38,38 @@ test('requested standalone document saves before preview and sends only on a lat
     await conversation.submit('确认发送', true); assert.equal(sent.length, 1);
   });
 });
+test('explicit document and send wording recovers from model routing misses without bypassing preview', async () => {
+  await fixture(async ({ conversation, store, route, sent }) => {
+    route('none');
+    await conversation.submit('把刚才的计划整理成 Markdown 文件发给我', true);
+    assert.equal(store.list().length, 1); assert.equal(sent.length, 0);
+    assert.match(conversation.history.at(-1)!.content, /文件已生成/);
+    await conversation.submit('好，就把这份发到我的邮箱', true);
+    assert.equal(sent.length, 1); assert.match(conversation.history.at(-1)!.content, /邮件服务器已接受/);
+  });
+});
+test('natural plan-to-email wording creates a real artifact before contextual approval', async () => {
+  await fixture(async ({ conversation, store, route, sent }) => {
+    route('confirm'); // reproduce an intent-model false confirmation with no draft
+    conversation.history.push({ role: 'assistant', content: '旅行计划：周六去公园，周日回家。' });
+    await conversation.submit('把刚才这份旅行计划发到我的邮箱', true);
+    assert.equal(store.list().length, 1); assert.equal(sent.length, 0);
+    assert.match(conversation.history.at(-1)!.content, /文件已生成[\s\S]*发送到固定邮箱/);
+    route('none');
+    await conversation.submit('好，可以。', true);
+    assert.equal(sent.length, 1); assert.match(conversation.history.at(-1)!.content, /邮件服务器已接受/);
+  });
+});
+test('contextual email assent cannot send or create an artifact without a formal preview', async () => {
+  await fixture(async ({ conversation, store, route, sent }) => {
+    route('confirm');
+    for (const phrase of ['好，可以。', '可以', '没问题']) {
+      await conversation.submit(phrase, true);
+    }
+    assert.equal(store.list().length, 0);
+    assert.equal(sent.length, 0);
+  });
+});
 test('a verbose document preview is bounded for the glasses without changing the saved file', async () => {
   const verbose: Draft = { document: { markdown: '# 完整正文\n\n' + '保留内容'.repeat(100), presentation: presentation(
     '一份很长但标题仍然与谈话内容相关的市场分析报告', '这是一段只用于发送确认界面的详细摘要。'.repeat(20), 'summary') } };

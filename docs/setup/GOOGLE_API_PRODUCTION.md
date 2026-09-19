@@ -2,6 +2,10 @@
 
 本指南说明如何为单用户、自建后端配置 Google Calendar OAuth，并避免 Testing 状态下授权约七天失效的问题。它不承诺 refresh token 永久有效；用户撤销、账号安全事件、OAuth Client 轮换或 Google 政策变化仍可能要求重新授权。
 
+本指南只负责 Calendar OAuth。当前位置 ETA 使用独立的服务端 Maps API key，
+不要向 Calendar OAuth 添加 Places／Routes scope，也不要把 OAuth Client Secret
+当作 API key。路线配置见 [Google Maps 定位与路线](GOOGLE_MAPS_ROUTES.md)。
+
 本项目只请求：
 
 ```text

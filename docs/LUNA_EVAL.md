@@ -33,6 +33,6 @@ Manual financial review: Luna's fiscal quarter, quarter end, release date, reven
 Source: https://nvidianews.nvidia.com/news/nvidia-announces-financial-results-for-second-quarter-fiscal-2027
 Mini stated July 27 instead of July 26 and included unrequested stock data. Citation/routing passes alone are NOT factual-quality passes. One checked example does not establish general financial reliability.
 
-Decision: promote Luna none-reasoning to BOTH roles as a provisional personal-use default under the user's conditional authorization. It meets this small baseline for quality; speed is usable but not identical. Actual aggregate cost was not measured; no total savings claim. Search 20/day and 600/calendar-month limits unchanged. No real write tools added; STT unchanged.
+Decision at the time: promote Luna none-reasoning to BOTH roles as a provisional personal-use default under the user's conditional authorization. It meets this small baseline for quality; speed is usable but not identical. Actual aggregate cost was not measured; no total savings claim. The then-current search limits were 20/day and 600/calendar-month; see `CONVERSATION_LAB.md` for current limits. No real write tools were added by this evaluation; STT was unchanged.
 Rollback: set `OPENAI_INTENT_MODEL=gpt-4.1-mini` and `OPENAI_REPLY_MODEL=gpt-4.1-mini` in `.env`, then restart. Explicit legacy OPENAI_DIALOGUE_MODEL remains a fallback override. Secrets untouched.
 Official reference: https://developers.openai.com/api/docs/models/gpt-5.6-luna

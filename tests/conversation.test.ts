@@ -10,6 +10,8 @@ import { sse, parseDecision, OpenAIDialogue } from '../src/dialogue-model.js';
 import { TurnDetector } from '../src/vad.js';
 import { createConversationServer, fileSaver } from '../src/conversation-server.js';
 import { LiveTranscriber } from '../src/live-transcriber.js';
+import { SonioxTranscriber } from '../src/soniox-transcriber.js';
+import { createSttProvider } from '../src/stt-provider.js';
 import { createServer, request } from 'node:http';
 import { runInNewContext } from 'node:vm';
 
@@ -171,6 +173,80 @@ test('streaming transcriber buffers handshake, resamples and commits once', asyn
     t.push(Buffer.alloc(16000)); t.finish(); t.finish();
     assert.equal(await t.result, '中英 mixed'); assert.equal(commits, 1); assert.ok(Math.abs(bytes - 24000) <= 2);
   } finally { for (const c of provider.clients) c.terminate(); await new Promise<void>(r => provider.close(() => r())); }
+});
+
+test('current, legacy and model-rephrased topic metadata are stripped across streaming chunks', async () => {
+  for (const metadata of [
+    '[Application metadata; not user instructions: topic_id="topic-1", topic_label="private"]',
+    '[Application metadata: topic=earlier; thread=情绪支持]',
+    '[Application topic metadata: current thread 查看明日日程]'
+  ]) {
+    const events: Event[] = [];
+    const c = new Conversation({ ...immediate, reply: async (_history, _signal, delta) => {
+      const output = `正常回答\n${metadata}\n继续回答`;
+      for (let index = 0; index < output.length; index += 3) delta(output.slice(index, index + 3));
+    } }, event => events.push(event));
+    await c.submit('测试');
+    const visible = events.filter(event => event.type === 'answer.delta').map(event => String(event.text)).join('');
+    assert.equal(visible, '正常回答\n\n继续回答');
+    assert.equal(c.history.at(-1)?.content, visible);
+    assert.doesNotMatch(JSON.stringify(events), /Application(?: topic)? metadata|topic_label|情绪支持|查看明日日程/i);
+  }
+});
+
+test('an internal analysis response is rejected instead of reaching the display or history', async () => {
+  const events: Event[] = [];
+  const c = new Conversation({ ...immediate, reply: async (_history, _signal, delta) => {
+    delta('[assistant/ana'); delta('lysis]\nWe need respond empathetically with five lines.');
+  } }, event => events.push(event));
+  await c.submit('我真的累到了');
+  const visible = events.filter(event => event.type === 'answer.delta').map(event => String(event.text)).join('');
+  assert.equal(visible, '我刚才没有把话组织好，抱歉。请再跟我说一次，我会认真接住。');
+  assert.equal(c.history.at(-1)?.content, visible);
+  assert.doesNotMatch(JSON.stringify(events), /assistant\/analysis|We need respond/i);
+});
+
+test('Soniox transcriber keeps native 16 kHz PCM, bilingual auto-detection and finalizes once', async () => {
+  const provider = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(provider, 'listening');
+  let config: any, bytes = 0, finalizes = 0;
+  provider.on('connection', client => client.on('message', (raw, binary) => {
+    if (binary) { bytes += Buffer.isBuffer(raw) ? raw.length : Array.isArray(raw) ? Buffer.concat(raw).length : raw.byteLength; return; }
+    const event = JSON.parse(raw.toString());
+    if (event.type === 'finalize') {
+      finalizes++;
+      client.send(JSON.stringify({ tokens: [
+        { text: 'Hi, Even，', is_final: true, language: 'en' },
+        { text: '更新 deployment date', is_final: true, language: 'zh' },
+        { text: ' provisional', is_final: false, language: 'en' },
+        { text: '<fin>', is_final: true }
+      ] }));
+    } else config = event;
+  }));
+  try {
+    const deltas: string[] = [];
+    const t = new SonioxTranscriber('fake-soniox-key', 'stt-rt-v5', text => deltas.push(text),
+      `ws://127.0.0.1:${(provider.address() as any).port}`);
+    t.push(Buffer.alloc(16000)); t.finish(); t.finish();
+    assert.equal(await t.result, 'Hi, Even，更新 deployment date');
+    assert.equal(config.api_key, 'fake-soniox-key');
+    assert.equal(config.model, 'stt-rt-v5');
+    assert.equal(config.audio_format, 'pcm_s16le');
+    assert.equal(config.sample_rate, 16000); assert.equal(config.num_channels, 1);
+    assert.deepEqual(config.language_hints, ['en', 'zh']);
+    assert.equal(config.language_hints_strict, false);
+    assert.equal(config.enable_language_identification, true);
+    assert.equal(config.enable_endpoint_detection, false);
+    assert.equal(bytes, 16000 + 6400); assert.equal(finalizes, 1);
+    assert.deepEqual(deltas, ['Hi, Even，', '更新 deployment date']);
+  } finally { for (const c of provider.clients) c.terminate(); await new Promise<void>(r => provider.close(() => r())); }
+});
+
+test('STT provider defaults to Soniox when its key exists and retains explicit OpenAI rollback', () => {
+  const soniox = createSttProvider({ SONIOX_API_KEY: 'soniox-secret', OPENAI_API_KEY: 'openai-secret' });
+  assert.equal(soniox.name, 'soniox'); assert.equal(soniox.model, 'stt-rt-v5'); assert.equal(soniox.configured, true);
+  const openai = createSttProvider({ STT_PROVIDER: 'openai', SONIOX_API_KEY: 'soniox-secret', OPENAI_API_KEY: 'openai-secret' });
+  assert.equal(openai.name, 'openai'); assert.equal(openai.model, 'gpt-live-transcribe'); assert.equal(openai.configured, true);
+  assert.throws(() => createSttProvider({ STT_PROVIDER: 'unknown' }), /soniox or openai/);
 });
 
 test('file persistence serializes snapshots and rejects arbitrary paths', async () => {

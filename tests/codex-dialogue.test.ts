@@ -34,19 +34,21 @@ test('CLI child environment and arguments do not leak API/client secrets or inte
     'features.shell_tool=false', 'features.plugins=false', 'forced_login_method="chatgpt"', 'model_reasoning_effort="medium"']) assert.ok(args.includes(arg));
 });
 
-test('CLI dialogue preserves history, routes reasoning and semantic exit without HTTP requests', async () => {
-  const calls: CodexRequest[] = []; let decision = 'respond', effort = 'medium';
+test('CLI dialogue preserves history, routes scenes/reasoning and semantic exit without HTTP requests', async () => {
+  const calls: CodexRequest[] = []; let decision = 'respond', effort = 'medium', mode = 'planning';
   const model = new CodexDialogue(async (request, signal) => {
     signal.throwIfAborted(); calls.push(request);
-    return request.schema ? JSON.stringify({ decision, reasoning_effort: effort }) : '回答';
+    return request.schema ? JSON.stringify({ decision, reasoning_effort: effort, cognitive_mode: mode,
+      search_action: mode === 'planning' ? 'search' : 'none',
+      topic_action: 'continue', topic_target: null, topic_label: 'test' }) : '回答';
   });
   const events: any[] = [], conversation = new Conversation(model, e => events.push(e));
   await conversation.submit('比较一下方案');
-  assert.equal(calls.length, 2); assert.equal(calls[0].effort, 'none'); assert.equal(calls[1].effort, 'medium');
+  assert.equal(calls.length, 2); assert.equal(calls[0].effort, 'medium'); assert.equal(calls[1].effort, 'medium');
   assert.equal(calls[0].search, undefined); assert.equal(calls[1].search, true);
-  effort = 'none'; await conversation.submit('谢谢');
+  effort = 'none'; mode = 'casual'; await conversation.submit('谢谢');
   assert.match(calls[2].prompt, /比较一下方案/); assert.match(calls[2].prompt, /回答/);
-  assert.equal(calls[3].effort, 'low'); // Search-capable CLI replies use a low floor.
+  assert.equal(calls[3].effort, 'low'); assert.equal(calls[3].search, false);
   decision = 'exit'; await conversation.submit('退下吧');
   assert.equal(calls.length, 5); assert.equal(conversation.state, 'exit_pending');
   assert.ok(events.some(e => e.type === 'exit.confirmation_required'));
@@ -106,7 +108,7 @@ test('CLI subprocess timeout and interruption terminate work and return no late 
 
 test('CLI text-only WebSocket advertises capabilities, rejects audio and still answers text', { timeout: 10000 }, async () => {
   const model = new CodexDialogue(async request => request.schema
-    ? '{"decision":"respond","reasoning_effort":"low"}' : 'CLI answer');
+    ? '{"decision":"respond","reasoning_effort":"low","cognitive_mode":"casual","search_action":"none","topic_action":"continue","topic_target":null,"topic_label":"chat"}' : 'CLI answer');
   const app = createConversationServer({ token: 'x'.repeat(40), model,
     capabilities: { provider: 'codex-cli', delivery: 'complete-message', webSearch: false, speech: false },
     transcriber: () => { throw new Error('Must never start STT without key'); } });
@@ -120,7 +122,7 @@ test('CLI text-only WebSocket advertises capabilities, rejects audio and still a
     await once(client, 'open');
     let waiting = waitFor('ready'); client.send(JSON.stringify({ type: 'hello', token: 'x'.repeat(40) }));
     assert.equal((await waiting).capabilities.speech, false);
-    waiting = waitFor('notice'); client.send(Buffer.alloc(640)); assert.match((await waiting).text, /OPENAI_API_KEY/);
+    waiting = waitFor('notice'); client.send(Buffer.alloc(640)); assert.match((await waiting).text, /STT provider/);
     waiting = waitFor('answer.delta'); client.send(JSON.stringify({ type: 'text.submit', text: '你好' }));
     assert.equal((await waiting).text, 'CLI answer');
   } finally { client.terminate(); await app.close(); }

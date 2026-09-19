@@ -20,14 +20,18 @@ The overview and this index are bilingual. Detailed guides below retain their ex
 ## Feature configuration
 
 - [Google Calendar (mixed Chinese/English)](google-calendar.md): OAuth, dedicated calendars, troubleshooting, credential recovery, confirmed writes, conflicts, and recurring meetings.
+- [Google Maps route setup](setup/GOOGLE_MAPS_ROUTES.md): volatile session phone location, 10-second SDK refresh, Places/Routes key restrictions, local/Linux gates, fallbacks, and coordinate privacy.
 - [Markdown and email](EMAIL_DELIVERY.md): dedicated Gmail, fixed recipient, generation/send confirmation, resend, and downloads.
 - [Calendar attachment design](CALENDAR_EMAIL_DESIGN.md): MD/ICS delivery and timezones; use the Calendar guide for real Google events.
 - [API / Codex CLI](CODEX_CLI_CHANNEL.md): channel selection, native search, authentication, and capability differences.
-- [Adaptive reasoning](ADAPTIVE_REASONING.md): application-level none / low / medium selection and safeguards.
+- [Cognitive mode, workflow, task kind, and tools](COGNITIVE_WORKFLOW_ROUTING.md): the current four-axis routing contract, allowlists, compatibility, and security boundaries.
+- [Scene-aware reasoning and topic threads](ADAPTIVE_REASONING.md): low / medium / high effort and isolated topic switching/resumption.
+- [Retired Conditional Task Orchestrator](CONDITIONAL_TASK_ORCHESTRATOR.md): historical design and tests; runtime planning now belongs to Luna with cautious read-tool fallbacks.
+- [Intent reasoning A/B](INTENT_REASONING_AB.md): low-versus-medium routing accuracy and latency measurement.
 
 ## Deployment, security, and contributions
 
-- [Deployment and account setup hub (Chinese)](setup/README.md): step-by-step Linux, Google OAuth production, and Tailscale guides for first-time operators.
+- [Deployment and account setup hub (Chinese)](setup/README.md): step-by-step Linux, Google OAuth production, Google Maps routes, and Tailscale guides for first-time operators.
 - [Production monitoring, logs, and recovery (Chinese)](setup/MONITORING_BACKUP_RECOVERY.md): health probes, bounded journald retention, verified daily backups, and recovery drills.
 - [WinSCP to Lightsail (Chinese)](setup/WINSCP_LIGHTSAIL.md): step-by-step private SFTP login over Tailscale, key conversion, host-key verification, and safe uploads.
 - [Project and deployment boundaries](PROJECT_STRUCTURE.md): allowlisted server builds and client/simulator separation.
@@ -42,7 +46,7 @@ These documents explain design evolution. They are not guarantees of current pri
 
 - [Development plan](DEVELOPMENT_PLAN.md): implementation baseline and longer-term direction.
 - [Conversation MVP](CONVERSATION_MVP.md): initial scope and interaction goals.
-- [STT evaluation plan](STT_BAKEOFF.md): historical options; the project now uses OpenAI, and the Soniox comparison was cancelled.
+- [STT evaluation plan](STT_BAKEOFF.md): provider architecture and regression method; Soniox is now the default, with OpenAI retained as rollback.
 - [GPT-5 Nano evaluation](GPT5_NANO_EVAL.md) · [Luna evaluation](LUNA_EVAL.md).
 - [Dynamic reasoning evaluation](DYNAMIC_REASONING_EVAL.md): small-sample results; see the adaptive-reasoning guide for implementation details.
 

@@ -97,11 +97,18 @@ export function eventBody(event: CalendarEvent) {
 }
 function identity(id: string) { if (!/^[a-v0-9]{5,1024}(?:_\d{8}(?:T\d{6}Z)?)?$/.test(id)) throw new CalendarError('CALENDAR_EVENT_INVALID'); }
 function previewEvent(remote: any): CalendarEvent {
-  // Google's returned RFC3339 can include seconds. Never infer missing timezones.
-  const shorten = (s: string) => typeof s === 'string' ? s.replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}):00(Z|[+-]\d\d:\d\d)$/, '$1$2') : s;
+  // Google can return an instant whose explicit offset disagrees with timeZone
+  // (notably for legacy events created before the timezone validator existed).
+  // Preserve the actual instant, then canonicalize its wall time and DST offset
+  // in Google's stated IANA zone. This never invents a zone or changes the event.
+  const timezone = remote.start?.date ? '' : remote.start?.timeZone ?? '';
+  const canonicalMinute = (value: unknown) => {
+    if (typeof value !== 'string' || !timezone || !Number.isFinite(Date.parse(value))) throw new CalendarError('CALENDAR_EVENT_INVALID');
+    return zonedMinute(Date.parse(value), timezone);
+  };
   return validateCalendar({ title: remote.summary ?? '', notes: remote.description ?? '', location: remote.location ?? '',
-    allDay: !!remote.start?.date, start: remote.start?.date ?? shorten(remote.start?.dateTime),
-    end: remote.end?.date ?? shorten(remote.end?.dateTime), timezone: remote.start?.date ? '' : remote.start?.timeZone ?? '',
+    allDay: !!remote.start?.date, start: remote.start?.date ?? canonicalMinute(remote.start?.dateTime),
+    end: remote.end?.date ?? canonicalMinute(remote.end?.dateTime), timezone,
     ...(remote.recurrence?.length ? { recurrence: remote.recurrence.length === 1 ? remote.recurrence[0] : 'unsupported' } : {}) });
 }
 /** Dedicated-calendar, managed-event-only service. Requires a preview and exact one-use confirmation. */
@@ -202,9 +209,13 @@ export class GoogleCalendarService {
         .map(r => { const op = JSON.parse(r.data) as Operation; return { id: op.id, eventId: op.eventId, kind: op.kind, state: op.state, error: op.error }; }) };
   }
   private supported(remote: any) {
+    // The private marker is written only by this backend on the dedicated
+    // calendar. Attendee response changes or an additional guest must not turn
+    // an Even-created event read-only. A positive non-self organizer signal is
+    // still rejected, as are locked/non-default events.
     return remote.extendedProperties?.private?.evenAssistant === '1' && typeof remote.etag === 'string'
-      && !(remote.attendees ?? []).some((a: any) => !this.allowedGuest || a.email?.toLowerCase() !== this.allowedGuest.toLowerCase())
-      && remote.status !== 'cancelled';
+      && remote.organizer?.self !== false && remote.locked !== true
+      && (remote.eventType === undefined || remote.eventType === 'default') && remote.status !== 'cancelled';
   }
   async query(start: string, end: string, timezone: string): Promise<{ items: CalendarItem[]; complete: boolean }> {
     // Read bounds are instants, unlike write-time wall-clock confirmations.

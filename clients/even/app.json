@@ -2,7 +2,7 @@
   "package_id": "com.eveng2assistant.glassassistant",
   "edition": "202601",
   "name": "Glass Assistant",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "min_sdk_version": "0.0.14",
   "entrypoint": "index.html",
   "permissions": [
@@ -17,6 +17,10 @@
     {
       "name": "g2-microphone",
       "desc": "Captures speech only after the user actively starts a conversation."
+    },
+    {
+      "name": "location",
+      "desc": "Reads phone location only after the user explicitly requests a one-time fix or continuous updates."
     }
   ],
   "supported_languages": ["en", "zh"]

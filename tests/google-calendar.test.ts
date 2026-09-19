@@ -88,7 +88,7 @@ test('update and cancel use latest event/etag and preserve the same ID', async t
   assert.equal(f.events.size, 0);
   assert.equal(f.service.list().events[0].cancelled, true);
 });
-test('external edit after preview produces conflict, never overwrites; unmanaged/invited events rejected', async t => {
+test('external edit after preview produces conflict, never overwrites; unmanaged/non-organizer events rejected', async t => {
   const f = await fixture(t); const create = await f.service.preview('create', event);
   await f.service.confirm(create.id, create.phrase);
   const edit = await f.service.preview('update', { ...event, title: 'changed' }, create.eventId);
@@ -96,8 +96,30 @@ test('external edit after preview produces conflict, never overwrites; unmanaged
   assert.equal((await f.service.confirm(edit.id, edit.phrase)).state, 'conflict');
   assert.equal(f.events.get(create.eventId).summary, event.title);
   await assert.rejects(f.service.preview('cancel', undefined, 'abcde'), /CALENDAR_HTTP_404/);
-  f.events.get(create.eventId).attendees = [{ email: 'guest@example.com' }];
+  f.events.get(create.eventId).organizer = { self: false };
   await assert.rejects(f.service.preview('cancel', undefined, create.eventId), /CALENDAR_UNSUPPORTED/);
+});
+
+test('Even-marked organizer events stay editable after RSVP/guest changes and legacy timezone offsets are canonicalized', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'even-google-owned-'));
+  const remote = { id: 'abcde', summary: '观看《爱乐之城》', description: '旧事件', location: 'New York', etag: '"v1"',
+    status: 'confirmed', eventType: 'default', organizer: { self: true },
+    extendedProperties: { private: { evenAssistant: '1' } },
+    attendees: [{ email: 'receiver@example.com', responseStatus: 'accepted' }, { email: 'partner@example.com', responseStatus: 'needsAction' }],
+    start: { dateTime: '2026-09-19T17:50:00-05:00', timeZone: 'America/New_York' },
+    end: { dateTime: '2026-09-19T18:50:00-05:00', timeZone: 'America/New_York' } };
+  const transport: CalendarTransport = async (method, path) => {
+    assert.equal(method, 'GET');
+    return path.startsWith('/events?') ? { items: [structuredClone(remote)] } : structuredClone(remote);
+  };
+  const service = await GoogleCalendarService.create(directory, 'dedicated', transport, Date.now, 'receiver@example.com');
+  try {
+    const result = await service.query('2026-09-19T00:00-04:00', '2026-09-20T00:00-04:00', 'America/New_York');
+    assert.equal(result.items[0].editable, true);
+    assert.equal(result.items[0].event?.start, '2026-09-19T18:50-04:00');
+    assert.equal(result.items[0].event?.end, '2026-09-19T19:50-04:00');
+    assert.match((await service.preview('cancel', undefined, remote.id)).preview, /观看《爱乐之城》/);
+  } finally { await service.close(); await rm(directory, { recursive: true, force: true }); }
 });
 test('recurring parent and occurrence require explicit scope before any write', async t => {
   const f = await fixture(t);

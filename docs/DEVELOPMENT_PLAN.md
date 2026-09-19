@@ -2,7 +2,7 @@
 
 > **近期交付范围已确认：** 优先完成 [Conversation MVP](./CONVERSATION_MVP.md)：手动启动、自动轮次判断、多轮文字对话、插话，以及基于意图的结束会话与系统确认退出。MD 文件生成/发送等工具在该版验收后再加入。该文优先于下文冲突的近期交互安排；[本地实验版](./CONVERSATION_LAB.md) 已实现部分能力并通过小样本真实 API 验证，G2/R1 与完整体验待验收。
 
-> **最新决策（覆盖下文旧选型内容）：** STT 固定 OpenAI `gpt-live-transcribe`，取消 Soniox bake-off。已经实现单 turn 的本地转写 POC，参见 [POC.md](./POC.md)。后续依次完成真实 API 验证、Even simulator/真机接入和意图理解。下文中多 STT 比较步骤不再适用。
+> **最新决策（覆盖下文旧选型内容）：** 当前默认 STT 为 Soniox `stt-rt-v5`，直接使用 G2 原生 PCM16/16 kHz，并针对中英文混说启用 `en`/`zh` hints 与自动语言识别；OpenAI `gpt-live-transcribe` adapter 仅保留为显式回退。仍须用未参与调试的新录音和真机进行准确率验收。
 
 **状态：** Accepted for V0 discovery
 
@@ -346,6 +346,53 @@ V2.5 gate：
 - 未确认的写操作永不执行；
 - 每次副作用均有可查询 audit trail。
 
+### V2.6 — Conditional Task Orchestrator
+
+> 2026-09-18 决策：该专用 runtime 已退役。多站点／户外／旅行请求统一进入 Luna 的
+> `planning`，避免单用途 schema 把完整目标压缩成一个地点。Maps／Routes／Weather／AQI／
+> Pollen 属于可降级的只读证据：结构化 Google read 失败时，可转入受配额限制的 Luna web
+> research，并明确不冒充实时路线或缺失数据。Calendar／Email 属于用户资产与交付能力，
+> 必须继续使用专用后端、预览确认、幂等和回执，禁止用模型猜测替代。本节以下内容作为历史
+> 设计、安全原则与测试资产保留。
+
+面向真正 personal assistant 的多步骤条件任务层。LLM 生成的是声明式计划，
+由后端验证成无环 dependency graph 后执行；LLM 不能声明新工具、风险级别、
+retry policy 或授权写入。
+
+- Calendar／location／Weather／AQI／Pollen／Places／Routes 等结构化 read tools；
+- 用户只表达户外目标，系统默认选择 Weather／AQI／Pollen 等 evidence pack；未来
+  增加经过审核的环境信号时，不要求用户背更长的调用口令；
+- 私人 Calendar 只在用户要求查询安排／空闲，或把执行条件绑定到空闲时读取；
+  普通室内目的地 ETA 不为“显得智能”而浪费无关花粉调用；
+- 先形成地点与户外建议，再对最终候选时段做 Calendar overlap 检查；默认在冲突时寻找
+  一个经过查询验证的邻近空档，并为新时段并发重查 Weather／AQI／Pollen；只有用户明确说
+  “冲突就不要安排”时才直接停止；
+- 每个 turn 独立重判 cognitive mode 与 workflow；户外话题中的地点详情、推荐理由、商业讨论、
+  深度问题和路线 ETA 不继承 `conditional_task`。它们分别选择 explain／research／planning／
+  deep_reasoning 等认知模式；路线是 navigation workflow，不再是认知模式。只有重新评估条件、
+  改时间或安排日程才重启 `conditional_task + outdoor_activity`；
+- dependency 与 restricted condition；满足依赖的只读节点安全并发；
+- 可暂停、纠正、版本化和恢复的 task state；
+- backend normalization + LLM synthesis，输出建议而非原始数据；
+- 复杂、多约束 decision 允许更多 read budget 和 medium/high reasoning；
+- preview-bound confirmation、单次 write、idempotency 和 unknown-result handling；
+- exact GPS 与健康偏好最小化，敏感结果不进入普通日志或持久化 snapshot。
+
+V2.6 gate：
+
+- false condition 不触发不相关的下游 API 或费用；Calendar 只在初步方案可行且用户要求
+  查询／安排时读取，方案本身不会因为尚未检查日历而被提前放弃；
+- independent read nodes 确实并发，dependent/write nodes 不越过顺序；
+- unknown tool、cycle、任意表达式和无 preview write 全部 fail closed；
+- Weather/AQI/Pollen 缺失显示 unknown，不等价于 safe/zero；
+- write 未确认执行次数为 0，确认后最多 1 次，timeout 后不自动 replay；
+- 输出包含明确 recommendation、关键 tradeoff 与 confidence，而不是 raw data dump；
+- 完成本地 fake integration、真实服务 adapter contract、本地 simulator、Linux
+  安全检查后，才允许进入新的 Even Hub package。
+
+详细产品原则、状态机、并发边界、fallback 与实施顺序见
+[Conditional Task Orchestrator](CONDITIONAL_TASK_ORCHESTRATOR.md)。
+
 ### V3 — Ambient Agent Platform
 
 #### V3.0 Multi-provider model router
@@ -487,13 +534,58 @@ audit_events
 
 原 V0/V1 的代码骨架、OpenAI 实时转录、连续对话、模拟器 HUD、公网 WSS、Linux 单机部署、安全加固、自动更新、监控、备份与恢复演练均已完成。Calendar、邮件、搜索和安全确认工具也已提前覆盖部分 V2.5/V3 范围。模拟器到生产 WSS 的中英混合语音及工具链路已经通过人工端到端测试。
 
-当前正式 gate 仍是 **V1.3 真机验收**，不能因为后端功能较多而跳过。客户端已配置生产域名与最小权限，官方 CLI 已生成本地 `.ehpk`。接下来的顺序是：
+当前 source 新增自动一次性定位、Google Places 候选／评分、Routes Matrix
+路线比较与简洁推荐。默认驾车，语音或伴随页可切换步行／骑车；近期候选仅在
+内存保留十分钟，用于“那走路呢”一类重算并重新请求一次定位。公交仍是后续
+独立 gate；天气、空气质量与花粉 adapter 已完成本地 contract 测试，但专用
+conditional-task runtime 已退役。正式 gate 仍是
+**V1.3 真机验收**，不能因为后端功能较多而跳过。已有 `.ehpk` 是较早的
+`0.2.0` 候选，不为每次 source 更新重复打包。接下来的顺序是：
 
-1. 登录 Even Hub CLI／Portal，检查 package ID，并上传 Private Testing build；
-2. 核对 packaged WebView 的真实 Origin，保持后端精确 allowlist；
-3. 在 G2/R1 上完成语音、手势、退出重连、网络切换与 30m/1h/2h 测试；
-4. 进入 Beta，完成 5 分钟锁屏与后台 reviewer-parity 测试；
-5. 通过 V1 gate 后，再扩展长期上下文／显式记忆等 V2 能力并准备公开提交材料。
+户外、多站点和旅行计划现统一由 Luna `planning` 处理。Google Maps／Routes 的
+结构化 read 失败时转入受配额限制的 web research，并明确不把公开资料冒充实时
+ETA、实时路况或当前位置。对有明确时间的户外计划，通用 planning loop 会使用一次性
+定位，并发读取 Weather／AQI／Pollen；可重试错误最多重试一次，仍失败的项目保持
+unknown，再由 Luna 进行受配额限制的公开资料补充。Calendar／Email 继续使用专用服务、确认与回执，
+不允许用模型 fallback。历史 DAG 设计与安全测试保留在
+[Orchestrator reference](CONDITIONAL_TASK_ORCHESTRATOR.md)。
+
+多站行程写入 Calendar 时采用渐进确认：Luna 先复用当前 topic 已知的出发时间、
+地点、已查询车程和活动时长，并可使用 5–10 分钟的可逆衔接缓冲；真正无法推断且
+会改变结果的信息每轮只问一个原子信息槽，不能在同一句中同时询问出发地与返回地、
+日期与时间或其他两个事实。该规则适用于普通对话和所有 workflow，不只适用于 Calendar。
+用户明确要求分别创建，或接受已有分点行程后要求写入 Calendar 时，系统一次规划最多 6 个
+事件，但眼镜每次只显示和确认一个；当前项保存后才展示下一项，任何一次“确认”
+都不能授权后续项目。
+
+眼镜长内容采用语义分页：编号／项目符号尽量一项一页；单项超过五行时按连续、
+不重叠的五行页拆分。Up／Down 每次进入新页，不再用重复两行的滑动窗口。
+
+地点解析遵循“合法候选不按类型硬删除”的原则：Target 门店、Target Mobile、
+停车场、药房或公交站都可能是用户真实目的地。只有候选用途不同时才由 Luna
+基于用户原话做结构化消歧；已明确则筛选对应类型，未明确则只问一个简短问题，
+用户回答后重新进行一次性定位与查询。坐标不会进入 Luna。
+
+Calendar 相对时间不再使用固定芝加哥时区：Google Time Zone API 是当前位置到
+IANA 时区的首选权威来源。可重试失败经过最多三次有界尝试后，Luna fallback 只看
+本 session 的有界上下文和手机验证过的 IANA 时区提示，不接收坐标、工具或 web
+search；它必须返回严格结构化时区，或在证据冲突／不足时一次只追问当前城市／地区。
+目的地和未来行程城市不能覆盖当前所在地。任何 fallback 都不降低 Calendar 的预览、
+冲突检查和用户确认要求。
+
+Calendar planner 采用严格 JSON Schema 加后端语义校验，等价于 Pydantic 风格的
+固定输入／输出边界。日期、时间顺序、DST 偏移、候选编号、重复规则或多段行程顺序
+校验失败时，只把受控的修复原因交回 Luna，最多三次规划尝试；不再把内部错误码直接
+显示给用户。待确认草稿的 notes／时间／地点／标题补充必须修改同一草稿并重新预览。
+这项 retry 只覆盖无副作用的 planning：Google Calendar 写入结果未知、冲突或失败时
+不得自动重放，仍须核对远端状态，避免重复创建。
+
+1. 完成开发者本地 build/test/security scan，再由用户在本地 simulator 验收附近地点比较、评分建议、交通方式切换、定位三次重试、权限提示和手动地址 fallback；
+2. 只有本地验收通过后，配置受限 Maps key，部署 Linux server-only release 并做 live route test；
+3. Linux 部署后完成端口、TLS/WSS、Origin/token、Secret 权限、service sandbox、Maps key/API/IP 限制和无坐标日志的 security check；
+4. 完成其他区域／网络／失败测试，再统一生成一个新的 `.ehpk` 并上传 Private Testing；
+5. 核对 packaged WebView Origin，在 G2/R1 上完成权限、语音、手势、退出重连、网络切换与 30m/1h/2h 测试；
+6. 进入 Beta，完成 5 分钟锁屏与后台 reviewer-parity 测试；通过 V1 gate 后，再扩展长期上下文／显式记忆等 V2 能力。
 
 发布边界：当前 Private Testing 包固定连接个人后端，只适合本人安装。公开源码的自建用户必须使用自己的域名、精确 network whitelist、访问 token 和后端凭据重新构建；在平台没有可审核的用户自定义 endpoint 方案之前，不能把连接维护者个人服务器的通用二进制发布给公众，也不能用 wildcard Origin／whitelist 绕过限制。手机文字输入、动态收件人和定位的详细安全设计见 [伴随输入、定位与安全分发](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)。
 
