@@ -206,6 +206,8 @@ export function createConversationServer(options: {
     wss.handleUpgrade(req, socket, head, client => wss.emit('connection', client, req));
   });
   const unauthenticatedSockets = new Set<WebSocket>();
+  const authenticatedSockets = new Map<string, WebSocket>();
+  const maxUnauthenticatedSockets = 4;
   type MailApproval = { id: string; token: string; expires: number; retryAttempt?: number };
   type ServerSessionRuntime = ManagedSessionRuntime<Event> & {
     conversation: Conversation;
@@ -387,7 +389,7 @@ export function createConversationServer(options: {
   wss.on('connection', (client, request) => {
     const connectionId = randomUUID(); let authenticated = false, authSlotHeld = true, closed = false, generation = 0, protocolV2 = false;
     unauthenticatedSockets.add(client);
-    if (unauthenticatedSockets.size > 4) {
+    if (unauthenticatedSockets.size > maxUnauthenticatedSockets) {
       const oldest = unauthenticatedSockets.values().next().value as WebSocket | undefined;
       if (oldest && oldest !== client) { unauthenticatedSockets.delete(oldest); oldest.terminate(); }
     }
@@ -493,7 +495,7 @@ export function createConversationServer(options: {
         binding = await registry.resume(msg.resume_session_id, connectionId, send, () => {
           credential = store.rotateResumeCredential({ secret: msg.resume_credential, clientId,
             sessionId: msg.resume_session_id, at: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
-        });
+        }, { clientId, allowTakeover: true });
         if (msg.credential_storage === 'even_host_v1') {
           const now = Date.now();
           // Re-provision on every authenticated resume. This closes the narrow
@@ -510,13 +512,13 @@ export function createConversationServer(options: {
           deviceCredential = store.rotateDeviceCredential({ secret: msg.device_credential, clientId, at: now,
             expiresAt: now + deviceCredentialTtlMs,
             persistDeadlineAt: now + deviceCredentialPersistWindowMs });
-        });
+        }, clientId);
       } else {
         const given = Buffer.from(typeof msg.token === 'string' ? msg.token : '');
         const expected = Buffer.from(options.token);
         if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Auth');
         store?.registerClient({ id: clientId, at: Date.now(), label: protocolV2 ? 'Even client' : 'Legacy client' });
-        binding = await registry.create(connectionId, send);
+        binding = await registry.create(connectionId, send, randomUUID(), undefined, clientId);
         if (store) credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
           createdAt: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
         if (store && protocolV2 && msg.credential_storage === 'even_host_v1') {
@@ -532,6 +534,12 @@ export function createConversationServer(options: {
       authenticatedClientId = clientId;
       session.setCaptureStop(connectionId, clearCapture);
       authenticated = true; releaseAuthSlot(); clearTimeout(authTimer);
+      authenticatedSockets.set(connectionId, client);
+      if (binding.replacedConnectionId) {
+        const replaced = authenticatedSockets.get(binding.replacedConnectionId);
+        authenticatedSockets.delete(binding.replacedConnectionId);
+        replaced?.terminate();
+      }
       const lastSeen = protocolV2 && Number.isSafeInteger(msg.last_seen_sequence) && msg.last_seen_sequence >= 0 ? msg.last_seen_sequence : 0;
       const sessionRecord = store?.getSession(binding.sessionId);
       const recoverable = store?.latestRecoverableTurn(binding.sessionId);
@@ -586,6 +594,9 @@ export function createConversationServer(options: {
         // Bound message bursts from local clients as well as total audio per session.
         if (Date.now() - budgetStart >= 1000) { budgetStart = Date.now(); budgetFrames = 0; }
         if (++budgetFrames > 250) throw new Error('Rate limit');
+        if (authenticated && session && registry.connectionFor(session.id) !== connectionId) {
+          client.close(4001, 'Input lease replaced'); return;
+        }
         if (binary) {
           if (!authenticated) throw new Error('Auth required');
           if (options.capabilities?.speech === false) { send({ type: 'notice', text: '当前为文字模式；请检查所选 STT provider 的 API key。' }); return; }
@@ -804,6 +815,7 @@ export function createConversationServer(options: {
       closed = true; releaseAuthSlot(); clearTimeout(authTimer); clearInterval(heartbeat); clearTimeout(pongDeadline);
       clearInterval(idle); clearTimeout(lifetime); clearTimeout(credentialRefresh);
       unsubscribeCalendarHealth?.();
+      if (authenticatedSockets.get(connectionId) === client) authenticatedSockets.delete(connectionId);
       clearCapture(); session?.setCaptureStop(connectionId, undefined);
       const sessionId = session?.id;
       void registry.detach(connectionId).then(() => expireOnClose && sessionId ? registry.expireDetached(sessionId) : undefined);

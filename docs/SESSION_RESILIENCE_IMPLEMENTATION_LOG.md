@@ -335,3 +335,32 @@ Recovery hardening PR 3 本地自动化、生产构建与安全 gate：**PASS**�
 ### Gate
 
 Recovery hardening PR 4 的本地自动化、生产构建、公开仓库扫描与最终 diff review：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建 `.ehpk`，也没有提前实现同 client lease takeover、`FOREGROUND_ENTER_EVENT`、audio `requires_reopen` 或 durable drafts。
+
+PR #38 已于 2026-09-20 squash merge 到 `main`，commit `07231e5`。
+
+## 2026-09-20 — Recovery hardening Rev 6 · PR 5 working tree
+
+### 实现
+
+- 服务端保持独立的认证前连接容量。未认证连接 churn 只能淘汰其他未认证连接，不能挤掉已经认证的 owner；认证后的单一 input lease 仍由 `SessionRegistry` 约束。
+- 持有效、未轮换 resume credential 的同一 `client_id` 可以立即抢占自己的旧 live／half-open lease，无需等待 TCP keepalive 或 heartbeat。凭证先验证、再换 lease；伪造 secret、不同 client 或不同 session 都不能驱逐 owner。
+- 抢占后旧连接会被终止；旧连接迟到的 message／close 都不能继续输入、detach 新 lease，或清除新连接安装的 capture cancellation hook。
+- 正常断线和 heartbeat detach 只撤销连接相关的 capture、location 与临时 approval，并移除 event sink；已经开始的模型回答不被 abort，可在无 viewer 时完成并提交 SQLite。只有显式 end、最终 expire 或 service shutdown 才完整 interrupt。
+- Even client 处理原生 `FOREGROUND_ENTER_EVENT`：恢复可见性与既有麦克风意图，并在 transport 已断开时立即触发 reconnect。`pagehide` 改为非破坏性，不再 dispose 可恢复的 connection controller。
+- `audioControl(true)` 明确返回 `false` 时进入 terminal `requires_reopen`，不做无效重试，也不保留 `desired=true`；抛出的暂时性 bridge error 仍走最多三次的 bounded retry，并显示不同的用户提示。
+
+### 自动化结果
+
+1. Registry／reconnect／half-open targeted tests：`26 passed / 0 failed`。
+2. Protocol／audio targeted tests：`14 passed / 0 failed`。
+3. Even lifecycle／connection／audio targeted tests：`28 passed / 0 failed`。
+4. Root full regression：366 个 tests 以 exit code 0 完成（当前 Windows 矩阵为 `364 passed / 0 failed / 2 platform skips`）。
+5. Even client full regression：`66 passed / 0 failed`。
+6. Root 与 Even client TypeScript：通过。
+7. Server-only build：通过；发布目录不含 browser lab、SDK、simulator、tests、credentials 或 local data。
+8. Even client production build：通过；release verifier 检查 2 个文件，未发现 debug fixture、source map、private key 或明显 credential。
+9. Public audit：277 个 working-tree source/document files 未发现禁止路径或 credential pattern；`git diff --check` 通过。
+
+### Gate
+
+Lifecycle and Connection Liveness 的本地自动化、生产构建、公开仓库扫描与最终 diff review：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建 `.ehpk`，也没有提前实现 durable drafts。

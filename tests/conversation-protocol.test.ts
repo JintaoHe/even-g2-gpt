@@ -115,7 +115,7 @@ test('device hello is a third exclusive auth mode and persisted ACK is exactly s
 
 test('protocol publishes orthogonal states and an explicit persistence/idempotency policy', () => {
   assert.deepEqual(CONNECTION_STATES, ['disconnected', 'connecting', 'connected', 'recovering']);
-  assert.deepEqual(AUDIO_STATES, ['off', 'starting', 'streaming', 'unavailable']);
+  assert.deepEqual(AUDIO_STATES, ['off', 'starting', 'streaming', 'unavailable', 'requires_reopen']);
   assert.deepEqual(CONVERSATION_STATES, ['idle', 'listening', 'thinking', 'answering', 'paused', 'exit_pending', 'closed']);
 
   assert.deepEqual(CLIENT_MESSAGE_POLICY['text.submit'], {
@@ -135,6 +135,8 @@ test('connection, audio and conversation transitions are independent and fail cl
   assert.equal(canTransitionAudio('off', 'starting'), true);
   assert.equal(canTransitionAudio('starting', 'streaming'), true);
   assert.equal(canTransitionAudio('unavailable', 'starting'), true);
+  assert.equal(canTransitionAudio('starting', 'requires_reopen'), true);
+  assert.equal(canTransitionAudio('requires_reopen', 'starting'), false);
   assert.equal(canTransitionAudio('off', 'streaming'), false);
 
   assert.equal(canTransitionConversation('listening', 'thinking'), true);

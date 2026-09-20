@@ -23,7 +23,6 @@ let locationController: LocationController | undefined, locationAvailable = fals
 let developmentLocation: { label: string; latitude: number; longitude: number; accuracy: number; timezone: string } | undefined;
 let connected = false, speech = false, audio = false, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
-let skipPagehideCleanup = false;
 let hasReady = false;
 const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
 let credentialStore: SessionCredentialStore;
@@ -309,8 +308,10 @@ void (async () => {
   audioController = new AudioController({
     bridge: candidate,
     onState: next => { audio = next === 'streaming'; status = next === 'starting' ? '正在开启麦克风'
-      : next === 'streaming' ? '正在听' : next === 'unavailable' ? '麦克风不可用' : status; refresh(); },
-    onUnavailable: () => { status = '麦克风连续开启失败，请重新打开应用'; refresh(); },
+      : next === 'streaming' ? '正在听' : next === 'requires_reopen' ? '麦克风需重新打开应用'
+        : next === 'unavailable' ? '麦克风暂时不可用' : status; refresh(); },
+    onUnavailable: () => { status = '麦克风暂时不可用，请稍后重试'; refresh(); },
+    onRequiresReopen: () => { status = '麦克风通道已卡住，请重新打开应用'; refresh(); },
   });
   locationController = new LocationController(candidate, report => send(report));
   candidate.onDeviceStatusChanged(device => {
@@ -322,7 +323,16 @@ void (async () => {
   console.info('[even-agent] ready');
   candidate.onEvenHubEvent(event => {
     const system = event.sysEvent?.eventType;
-    if (system === OsEventTypeList.FOREGROUND_EXIT_EVENT) { void audioController?.setVisible(false); return; }
+    if (system === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
+      void audioController?.setVisible(false);
+      locationController?.cancelAutomatic(); void locationController?.stop();
+      return;
+    }
+    if (system === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
+      void audioController?.setVisible(true);
+      if (!connected) connection.networkAvailable();
+      dirty = true; refresh(); return;
+    }
     if (system === OsEventTypeList.SYSTEM_EXIT_EVENT || system === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
       const confirmedExit = system === OsEventTypeList.SYSTEM_EXIT_EVENT && state === 'exit_pending' && connection.connected;
       exiting = true; display.close(); connected = false; state = 'closed'; answerId = undefined;
@@ -351,9 +361,11 @@ void (async () => {
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
 window.addEventListener('online', () => connection?.networkAvailable());
 window.addEventListener('pagehide', () => {
-  if (skipPagehideCleanup) return;
-  disposed = true; display.close(); clearInterval(timer); void audioController?.dispose();
-  locationController?.cancelAutomatic(); void locationController?.stop(); connection?.dispose();
+  // pagehide may mean a reversible iOS background/navigation transition. Do
+  // not destroy the resumable connection controller or mark the app disposed;
+  // native FOREGROUND_ENTER_EVENT is the supported restoration signal.
+  void audioController?.setVisible(false);
+  locationController?.cancelAutomatic(); void locationController?.stop();
 });
 document.addEventListener('visibilitychange', () => { void audioController?.setVisible(!document.hidden); });
 if (import.meta.env.DEV) {
@@ -364,9 +376,8 @@ if (import.meta.env.DEV) {
       if (!connection.connected || !credentialStore.load()) return false;
       await credentialStore.whenSettled();
       if (!connection.connected || !credentialStore.load() || !credentialStore.persistenceHealthy) return false;
-      skipPagehideCleanup = true;
       try { location.reload(); return true; }
-      catch { skipPagehideCleanup = false; return false; }
+      catch { return false; }
     },
     expire: () => connection.forgetResumeCredential() && connection.send({ type: 'test.session.expire' }),
     command: type => connection.send({ type }),

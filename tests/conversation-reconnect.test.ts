@@ -13,6 +13,12 @@ import { ConversationStore } from '../src/conversation-store.js';
 const token = 'r'.repeat(64);
 const unusedTranscriber = () => { throw new Error('audio not used'); };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 function waitFor(client: WebSocket, type: string, predicate: (event: any) => boolean = () => true) {
   return new Promise<any>((resolve, reject) => {
     const timeout = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for ${type}`)); }, 3_000);
@@ -258,6 +264,89 @@ test('a second live protocol v2 input client is rejected without stealing the fi
   }
 });
 
+test('a valid same-client resume takes over a live lease and the replacement remains usable', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-takeover-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('replacement answer') };
+  const server = await listen(store, model), clientId = randomUUID();
+  const first = new WebSocket(server.url); await once(first, 'open');
+  const firstReady = waitFor(first, 'ready');
+  first.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token }));
+  const initial = await firstReady;
+  const firstClosed = once(first, 'close');
+  const replacement = new WebSocket(server.url); await once(replacement, 'open');
+  try {
+    const replacementReady = waitFor(replacement, 'ready');
+    replacement.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+      resume_session_id: initial.session_id, resume_credential: initial.resume_credential, last_seen_sequence: 0 }));
+    const resumed = await replacementReady;
+    assert.equal(resumed.resumed, true);
+    assert.equal(resumed.session_id, initial.session_id);
+    await firstClosed;
+
+    const answer = waitFor(replacement, 'answer.done');
+    replacement.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: 'still usable' }));
+    await answer;
+    assert.equal(store.latestRecoverableTurn(initial.session_id)?.output?.content, 'replacement answer');
+  } finally { first.terminate(); replacement.terminate(); await server.app.close(); await store.close(); }
+});
+
+test('a replaced connection close cannot erase the new owner capture cancellation hook', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-capture-owner-'));
+  const store = await ConversationStore.create(root);
+  const jobs: Array<ReturnType<typeof deferred<string>>> = [];
+  let cancelled = 0;
+  const model: DialogueModel = { decide: async () => 'respond', reply: async () => {} };
+  const app = createConversationServer({ token, model, conversationStore: store,
+    transcriber: () => {
+      const job = deferred<string>(); jobs.push(job);
+      return { result: job.promise, push: () => {}, finish: () => {}, cancel: () => { cancelled++; } };
+    }, capabilities: { provider: 'api', delivery: 'api', webSearch: false, speech: true } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`, clientId = randomUUID();
+  const first = new WebSocket(url); await once(first, 'open');
+  const initialReady = waitFor(first, 'ready');
+  first.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token }));
+  const initial = await initialReady;
+  const replacement = new WebSocket(url); await once(replacement, 'open');
+  try {
+    const replacementReady = waitFor(replacement, 'ready');
+    replacement.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+      resume_session_id: initial.session_id, resume_credential: initial.resume_credential, last_seen_sequence: 0 }));
+    await replacementReady;
+    const started = waitFor(replacement, 'speech.started');
+    const loud = Buffer.alloc(6400); for (let index = 0; index < loud.length; index += 2) loud.writeInt16LE(4000, index);
+    replacement.send(loud); await started;
+    assert.equal(jobs.length, 1);
+    const paused = waitFor(replacement, 'state', event => event.state === 'paused');
+    replacement.send(JSON.stringify({ type: 'pause', command_id: randomUUID() }));
+    await paused;
+    assert.equal(cancelled, 1);
+  } finally { first.terminate(); replacement.terminate(); await app.close(); await store.close(); }
+});
+
+test('a forged same-client takeover cannot evict the current owner', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-takeover-invalid-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('owner answer') };
+  const server = await listen(store, model), clientId = randomUUID();
+  const owner = new WebSocket(server.url); await once(owner, 'open');
+  const ownerReady = waitFor(owner, 'ready');
+  owner.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token }));
+  const initial = await ownerReady;
+  const forged = new WebSocket(server.url); await once(forged, 'open');
+  try {
+    const rejected = waitFor(forged, 'error');
+    forged.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+      resume_session_id: initial.session_id, resume_credential: 'invalid'.repeat(8), last_seen_sequence: 0 }));
+    assert.equal((await rejected).code, 'SESSION_UNAVAILABLE');
+    const answer = waitFor(owner, 'answer.done');
+    owner.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: 'owner remains' }));
+    await answer;
+    assert.equal(store.latestRecoverableTurn(initial.session_id)?.output?.content, 'owner answer');
+  } finally { owner.terminate(); forged.terminate(); await server.app.close(); await store.close(); }
+});
+
 test('four unauthenticated sockets cannot prevent the owner from authenticating', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-auth-capacity-'));
   const store = await ConversationStore.create(root);
@@ -279,7 +368,31 @@ test('four unauthenticated sockets cannot prevent the owner from authenticating'
   }
 });
 
-test('raw half-open peer is BUSY before heartbeat release and its credential remains resumable', { timeout: 10_000 }, async () => {
+test('unauthenticated connection churn never evicts the authenticated owner', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-post-auth-capacity-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('owner retained') };
+  const server = await listen(store, model);
+  const owner = new WebSocket(server.url); await once(owner, 'open');
+  const ready = waitFor(owner, 'ready');
+  owner.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
+  const session = await ready;
+  const anonymous: WebSocket[] = [];
+  try {
+    for (let index = 0; index < 8; index++) {
+      const socket = new WebSocket(server.url); anonymous.push(socket); await once(socket, 'open');
+    }
+    const answer = waitFor(owner, 'answer.done');
+    owner.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: 'owner check' }));
+    await answer;
+    assert.equal(store.latestRecoverableTurn(session.session_id)?.output?.content, 'owner retained');
+  } finally {
+    owner.terminate(); for (const socket of anonymous) socket.terminate();
+    await server.app.close(); await store.close();
+  }
+});
+
+test('a valid same-client resume immediately replaces a raw half-open peer without waiting for heartbeat', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-heartbeat-'));
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
@@ -295,22 +408,16 @@ test('raw half-open peer is BUSY before heartbeat release and its credential rem
   const ready = await readyPromise;
   const silentClosed = once(silent, 'close');
 
-  const blocked = new WebSocket(url); await once(blocked, 'open');
-  const busyPromise = waitFor(blocked, 'error');
-  blocked.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
-    resume_session_id: ready.session_id, resume_credential: ready.resume_credential, last_seen_sequence: 0 }));
-  assert.equal((await busyPromise).code, 'BUSY');
-  blocked.terminate();
-
-  await silentClosed;
-
   const replacement = new WebSocket(url); await once(replacement, 'open');
   try {
     const resumedPromise = waitFor(replacement, 'ready');
     replacement.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
       resume_session_id: ready.session_id, resume_credential: ready.resume_credential, last_seen_sequence: 0 }));
-    assert.equal((await resumedPromise).resumed, true);
-  } finally { replacement.terminate(); await app.close(); await store.close(); }
+    const resumed = await resumedPromise;
+    assert.equal(resumed.resumed, true);
+    assert.equal(resumed.session_id, ready.session_id);
+    await silentClosed;
+  } finally { silent.terminate(); replacement.terminate(); await app.close(); await store.close(); }
 });
 
 test('a detached viewer does not abort an answer that can finish and commit without an event sink', { timeout: 10_000 }, async () => {

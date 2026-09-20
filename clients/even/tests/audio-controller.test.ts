@@ -20,10 +20,24 @@ test('opens only when desired, backend, device and visibility are all available'
   assert.deepEqual(calls, [true, false, true, false, true]);
 });
 
-test('start failure retries at most three times then exposes an actionable unavailable state', async () => {
-  let attempts = 0, unavailable = 0;
+test('a native false is terminal for this plugin process and requires reopen without retry', async () => {
+  let attempts = 0, reopen = 0;
   const audio = new AudioController({ bridge: { audioControl: async value => value ? (++attempts, false) : true },
-    retryDelay: async () => {}, onUnavailable: () => { unavailable++; } });
+    retryDelay: async () => {}, onRequiresReopen: () => { reopen++; } });
+  await audio.setBackendAvailable(true); await audio.setDesired(true);
+  assert.equal(attempts, 1); assert.equal(reopen, 1); assert.equal(audio.state, 'requires_reopen');
+  assert.equal(audio.desired, false);
+  await audio.setVisible(false); await audio.setDeviceAvailable(false); await audio.setBackendAvailable(false);
+  assert.equal(audio.state, 'requires_reopen', 'lifecycle changes must not hide the terminal state');
+  await audio.setDesired(true);
+  assert.equal(attempts, 1); assert.equal(audio.state, 'requires_reopen'); assert.equal(audio.desired, false);
+});
+
+test('thrown transient failures still use the bounded retry path', async () => {
+  let attempts = 0, unavailable = 0;
+  const audio = new AudioController({ bridge: { audioControl: async value => {
+    if (!value) return true; attempts++; throw new Error('temporary bridge error');
+  } }, retryDelay: async () => {}, onUnavailable: () => { unavailable++; } });
   await audio.setBackendAvailable(true); await audio.setDesired(true);
   assert.equal(attempts, 3); assert.equal(unavailable, 1); assert.equal(audio.state, 'unavailable');
 });

@@ -6,7 +6,7 @@ export const CONVERSATION_PROTOCOL_VERSION = 2 as const;
 export const CONNECTION_STATES = ['disconnected', 'connecting', 'connected', 'recovering'] as const;
 export type ConnectionState = typeof CONNECTION_STATES[number];
 
-export const AUDIO_STATES = ['off', 'starting', 'streaming', 'unavailable'] as const;
+export const AUDIO_STATES = ['off', 'starting', 'streaming', 'unavailable', 'requires_reopen'] as const;
 export type AudioState = typeof AUDIO_STATES[number];
 
 export const CONVERSATION_STATES = ['idle', 'listening', 'thinking', 'answering', 'paused', 'exit_pending', 'closed'] as const;
@@ -21,9 +21,10 @@ const CONNECTION_TRANSITIONS = {
 
 const AUDIO_TRANSITIONS = {
   off: ['starting'],
-  starting: ['streaming', 'unavailable', 'off'],
-  streaming: ['off', 'unavailable'],
+  starting: ['streaming', 'unavailable', 'requires_reopen', 'off'],
+  streaming: ['off', 'unavailable', 'requires_reopen'],
   unavailable: ['starting', 'off'],
+  requires_reopen: ['off'],
 } as const satisfies Record<AudioState, readonly AudioState[]>;
 
 const CONVERSATION_TRANSITIONS = {

@@ -247,6 +247,7 @@ export class ConnectionController {
 
   networkAvailable() {
     if (this.disposed || this.ending || this.connected) return false;
+    if (this.socketValue && this.socketValue.readyState < CLOSING) return false;
     this.cancelRetry();
     return this.open(true);
   }
