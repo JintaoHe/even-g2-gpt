@@ -104,3 +104,61 @@ test('development expiry requires a connected socket and retained in-memory acce
   assert.equal(ws.sent.at(-1).type, 'test.session.expire');
   assert.equal(f.credentials.load(), undefined);
 });
+
+test('development resume closes one connected socket and reconnects with its saved credential', () => {
+  const f = fixture(); f.controller.connect('t'.repeat(32)); const first = f.sockets[0]; first.open(); f.ready(first);
+  assert.equal(f.controller.simulateSessionResume(), true);
+  assert.equal(f.timers.size, 1);
+  [...f.timers.values()][0]();
+  const second = f.sockets[1]; second.open();
+  assert.equal(second.sent[0].resume_session_id, sessionId);
+  assert.equal(second.sent[0].resume_credential, 's'.repeat(32));
+});
+
+test('storage lab commands receive command ids before transport', () => {
+  const f = fixture(); f.controller.connect('t'.repeat(32)); const ws = f.sockets[0]; ws.open(); f.ready(ws);
+  for (const type of ['test.storage.inspect', 'test.storage.seed_expired', 'test.storage.cleanup_preview',
+    'test.storage.cleanup_apply']) {
+    assert.equal(f.controller.send({ type }), true);
+    assert.equal(ws.sent.at(-1).type, type);
+    assert.match(ws.sent.at(-1).command_id, /^[0-9a-f-]{36}$/i);
+  }
+});
+
+test('ten page-style controller recreations resume one session with the rotated credential', () => {
+  const data = new Map<string, string>();
+  const local = { getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => { data.set(key, value); }, removeItem: (key: string) => { data.delete(key); } };
+  let expectedSecret = 'a'.repeat(32);
+  const create = () => {
+    const sockets: FakeSocket[] = [];
+    const credentials = new SessionCredentialStore(local as any, () => 100, () => clientId);
+    const controller = new ConnectionController({ url: () => 'ws://test',
+      socket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+      credentials, onEvent() {}, uuid, random: () => 0.5 });
+    return { controller, sockets };
+  };
+
+  let current = create();
+  assert.equal(current.controller.connect('t'.repeat(32)), true);
+  current.sockets[0].open();
+  current.sockets[0].message({ type: 'ready', protocol_version: 2, connection_id: uuid(), session_id: sessionId,
+    resumed: false, latest_sequence: 0, resume_credential: expectedSecret, resume_expires_at: 1_000,
+    snapshot: { messages: [] } });
+  current.controller.dispose();
+
+  for (let refresh = 1; refresh <= 10; refresh++) {
+    current = create();
+    assert.equal(current.controller.resumeIfAvailable(), true);
+    const socket = current.sockets[0]; socket.open();
+    assert.equal(socket.sent[0].resume_session_id, sessionId);
+    assert.equal(socket.sent[0].resume_credential, expectedSecret);
+    expectedSecret = String.fromCharCode(97 + refresh).repeat(32);
+    socket.message({ type: 'ready', protocol_version: 2, connection_id: uuid(), session_id: sessionId,
+      resumed: true, latest_sequence: refresh, resume_credential: expectedSecret, resume_expires_at: 1_000,
+      snapshot: { messages: [] } });
+    assert.equal(current.controller.status.sessionId, sessionId);
+    assert.equal(current.controller.status.reason, 'resumed');
+    current.controller.dispose();
+  }
+});

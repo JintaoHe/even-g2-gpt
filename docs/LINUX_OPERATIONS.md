@@ -16,10 +16,12 @@ Set `EVEN_DATA_DIR=/var/lib/even-agent` on Linux (local default `.local`). Keep 
 
 ```
 /var/lib/even-agent/
+  assistant-memory.sqlite conversation sessions, messages, topics and summaries
+  assistant-memory.sqlite-wal / -shm when present
   jobs.sqlite          task states and queued snapshots
   jobs.sqlite-wal      SQLite transaction log when present
   jobs.sqlite-shm      SQLite coordination file when present
-  conversations/      saved dialogue JSON
+  conversations/      legacy dialogue JSON retained for migration verification
   search-usage.json    API-only search quota ledger
   cost-ledger.json      OpenAI/Soniox/Google monthly cost and Google SKU alert ledger
   artifacts/          UUID.md completed output; UUID.part temporary output
@@ -32,7 +34,7 @@ When migrating an existing installation, copy the complete data directory while 
 - Queued/running exports continue after browser disconnect; reconnect to list jobs/download completed output.
 - Queued exports resume after service restart. Running exports become interrupted; they are not automatically replayed. Failed/interrupted tasks require a new explicit export.
 - Publication order: write exclusive temporary file → fsync → rename → sync directory on Linux → mark completed in SQLite. Partial/unpublished files are never downloadable. Orphans are retained conservatively and counted against storage usage; no automatic destructive cleanup.
-- Limits: 20 pending jobs, 1,000 total records, 2 MiB input/output per export, 50 MiB artifact-directory contents. Conversation logs and SQLite storage are separate; a filesystem quota/backup/retention plan is still required.
+- Limits: 20 pending jobs, 1,000 total records, 2 MiB input/output per export, 50 MiB artifact-directory contents. Ended/expired conversation sessions default to a 1,095-day retention policy; artifact/job cleanup remains a separate operator responsibility.
 - Task cancellation is explicit. The stored snapshot is discarded on cancellation/completion/failure, but already created partial output may remain inaccessible until operator cleanup. No automatic expiration/deletion is implemented.
 - Downloads require the same application token as the WebSocket, supplied in an Authorization header (never URL query). The token stays only in page memory. Files are served as attachments with nosniff/no-store; no public static artifact directory. This is one trusted user's installation, not tenant isolation for a public multi-user service.
 
@@ -70,7 +72,7 @@ On Ubuntu, set the default host-firewall policy to deny incoming and allow outgo
 
 The supplied systemd unit drops Linux capabilities, blocks device/kernel/control-group mutation, gives the service a read-only OS and home tree, and permits writes only to `/var/lib/even-agent` and the dedicated Codex authentication directory. Do not enable `MemoryDenyWriteExecute`: Node/V8 uses executable JIT memory. Do not broaden `ReadWritePaths` to the source tree or web root.
 
-Conversation JSON, SQLite state and generated Markdown are protected by filesystem permissions but are not application-level encrypted, and the application does not currently expire them automatically. Root compromise can therefore expose them. Do not put secrets in Lightsail launch/user data, keep only necessary personal data, and choose an explicit retention and encrypted-backup policy before treating the host as a long-term personal archive.
+Conversation JSON, SQLite state and generated Markdown are protected by filesystem permissions but are not application-level encrypted. Ended/expired conversation sessions are automatically retained for 1,095 days by default; legacy JSON, artifacts, OAuth state and provider records have separate lifecycles. Root compromise can expose all of them. Do not put secrets in Lightsail launch/user data, keep only necessary personal data, and keep verified private backups before treating the host as a long-term personal archive. See [session migration and retention](setup/SESSION_MIGRATION_RETENTION.md).
 
 Before declaring the host ready, verify all of the following from the instance and from an external machine:
 

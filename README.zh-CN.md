@@ -161,7 +161,7 @@ docs/                  配置、产品、安全与验收文档
 
 `npm run build:server` 会生成独立的 `dist/server-*` 后端发布包。只部署已经验证的 server artifact，不要把整个开发 checkout 上传到服务器。发布包不包含网页实验室、SDK 源码、模拟器、测试、凭证和本地运行数据。
 
-从 [Linux 部署](docs/setup/LINUX_DEPLOYMENT.md)、[运维](docs/LINUX_OPERATIONS.md)、[自动更新与回滚](docs/setup/AUTOMATIC_UPDATES.md)及[监控／备份恢复](docs/setup/MONITORING_BACKUP_RECOVERY.md)开始。
+从 [Linux 部署](docs/setup/LINUX_DEPLOYMENT.md)、[运维](docs/LINUX_OPERATIONS.md)、[自动更新与回滚](docs/setup/AUTOMATIC_UPDATES.md)、[会话迁移／留存](docs/setup/SESSION_MIGRATION_RETENTION.md)及[监控／备份恢复](docs/setup/MONITORING_BACKUP_RECOVERY.md)开始。
 
 ## 验证
 

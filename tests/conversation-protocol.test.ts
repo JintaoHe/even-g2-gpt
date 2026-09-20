@@ -77,11 +77,16 @@ test('core commands are exactly shaped and carry idempotency ids', () => {
   assert.throws(() => parseCoreClientMessage({ type: 'made.up', command_id: commandId }), ProtocolValidationError);
 });
 
-test('session expiry control is impossible unless an explicit local-test gate is enabled', () => {
+test('session and storage controls are impossible unless an explicit local-test gate is enabled', () => {
   const commandId = randomUUID();
-  const input = { type: 'test.session.expire', command_id: commandId };
-  assert.throws(() => parseCoreClientMessage(input), ProtocolValidationError);
-  assert.deepEqual(parseCoreClientMessage(input, { allowSessionExpiryTestControl: true }), input);
+  for (const type of ['test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
+    'test.storage.cleanup_preview', 'test.storage.cleanup_apply'] as const) {
+    const input = { type, command_id: commandId };
+    assert.throws(() => parseCoreClientMessage(input), ProtocolValidationError);
+    assert.deepEqual(parseCoreClientMessage(input, { allowLocalTestControls: true }), input);
+    assert.throws(() => parseCoreClientMessage({ ...input, retention_days: 1_095 },
+      { allowLocalTestControls: true }), ProtocolValidationError);
+  }
 });
 
 test('protocol publishes orthogonal states and an explicit persistence/idempotency policy', () => {
@@ -93,6 +98,8 @@ test('protocol publishes orthogonal states and an explicit persistence/idempoten
     persistence: 'durable-before-ack', idempotency: 'message_id', replay: 'return-original-ack',
   });
   assert.equal(CLIENT_MESSAGE_POLICY['test.session.expire'].production, false);
+  assert.equal(CLIENT_MESSAGE_POLICY['test.storage.inspect'].production, false);
+  assert.equal(CLIENT_MESSAGE_POLICY['test.storage.cleanup_apply'].production, false);
   assert.equal(CLIENT_MESSAGE_POLICY['answer.retry'].replay, 'never-replay-automatically');
 });
 

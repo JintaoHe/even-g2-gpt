@@ -1,12 +1,12 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { chmod, lstat, mkdir } from 'node:fs/promises';
+import { chmod, lstat, mkdir, stat, statfs } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextSummary } from './context-builder.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -146,6 +146,70 @@ export type SummaryJobRecord = {
   errorCode?: string;
 };
 
+export type ConversationRetentionReport = {
+  enabled: boolean;
+  retentionDays: number;
+  cutoffAt?: number;
+  dryRun: boolean;
+  before: { sessions: number; messages: number };
+  eligibleSessions: number;
+  eligibleMessages: number;
+  deletedSessions: number;
+  deletedMessages: number;
+  after: { sessions: number; messages: number };
+};
+
+export type ConversationStorageHealth = {
+  databaseBytes: number;
+  availableDiskBytes: number;
+  sessions: number;
+  messages: number;
+  warnings: Array<'database_size' | 'low_disk_space'>;
+};
+
+export type LegacyImportRecord = {
+  sourceHash: string;
+  sourceName: string;
+  sessionId: string;
+  messageCount: number;
+  importedAt: number;
+};
+
+export type LegacySessionImport = {
+  sourceHash: string;
+  sourceName: string;
+  importedAt: number;
+  session: {
+    id: string;
+    ownerScope: string;
+    createdAt: number;
+    updatedAt: number;
+    endedAt: number;
+  };
+  topics: Array<{ id: string; label: string; createdAt: number; updatedAt: number }>;
+  turns: Array<{
+    id: string;
+    topicId: string;
+    inputMessageId?: string;
+    outputMessageId?: string;
+    status: 'committed' | 'interrupted';
+    cognitiveMode?: string;
+    createdAt: number;
+    updatedAt: number;
+  }>;
+  messages: Array<{
+    id: string;
+    turnId: string;
+    topicId: string;
+    sequence: number;
+    role: 'user' | 'assistant';
+    content: string;
+    citations?: unknown[];
+    createdAt: number;
+    updatedAt: number;
+  }>;
+};
+
 export class ConversationStoreConflictError extends Error {
   readonly code = 'MESSAGE_ID_CONFLICT';
   constructor() { super('Conversation message id conflicts with an existing message'); this.name = 'ConversationStoreConflictError'; }
@@ -269,7 +333,8 @@ function summaryJobRecord(row: any): SummaryJobRecord {
 export class ConversationStore {
   private closed = false;
 
-  private constructor(private db: DatabaseSync, private ownerToken: string) {}
+  private constructor(private db: DatabaseSync, private ownerToken: string,
+    private directory: string, private databasePath: string) {}
 
   static async create(directory: string) {
     const root = resolve(directory);
@@ -293,7 +358,7 @@ export class ConversationStore {
       ConversationStore.claim(db, ownerToken);
       ConversationStore.recoverInterrupted(db, Date.now());
       await chmod(path, 0o600);
-      return new ConversationStore(db, ownerToken);
+      return new ConversationStore(db, ownerToken, root, path);
     } catch (error) {
       db.close();
       throw error;
@@ -417,6 +482,19 @@ export class ConversationStore {
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (2,?,?)')
           .run('durable-session-summary-jobs', Date.now());
       }
+      if (latest < 3) {
+        db.exec(`
+          CREATE TABLE legacy_session_imports (
+            source_hash TEXT PRIMARY KEY CHECK(length(source_hash)=64),
+            source_name TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+            message_count INTEGER NOT NULL CHECK(message_count>=0),
+            imported_at INTEGER NOT NULL
+          ) STRICT;
+        `);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (3,?,?)')
+          .run('legacy-session-import-ledger', Date.now());
+      }
     });
   }
 
@@ -459,6 +537,78 @@ export class ConversationStore {
     const busyTimeoutMs = (this.db.prepare('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
     const schemaVersion = (this.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version;
     return { journalMode, synchronous, foreignKeys, busyTimeoutMs, schemaVersion };
+  }
+
+  cleanupExpiredSessions(input: {
+    retentionDays: number; now: number; dryRun: boolean; ownerScope?: string;
+  }): ConversationRetentionReport {
+    this.ensureOpen();
+    if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0 || input.retentionDays > 36_500
+      || !Number.isSafeInteger(input.now) || input.now < 0 || typeof input.dryRun !== 'boolean'
+      || (input.ownerScope !== undefined && (!input.ownerScope.trim() || input.ownerScope.length > 128))) {
+      throw new Error('Invalid conversation retention policy');
+    }
+    const count = () => {
+      const row = this.db.prepare(`SELECT
+        (SELECT COUNT(*) FROM sessions) AS sessions,
+        (SELECT COUNT(*) FROM messages) AS messages`).get() as { sessions: number; messages: number };
+      return { sessions: Number(row.sessions), messages: Number(row.messages) };
+    };
+    const before = count();
+    if (input.retentionDays === 0) return {
+      enabled: false, retentionDays: 0, dryRun: input.dryRun, before,
+      eligibleSessions: 0, eligibleMessages: 0, deletedSessions: 0, deletedMessages: 0, after: before,
+    };
+    const cutoffAt = input.now - input.retentionDays * 24 * 60 * 60 * 1000;
+    const eligibility = `s.status IN ('ended','expired') AND s.ended_at IS NOT NULL AND s.ended_at<?
+      ${input.ownerScope === undefined ? '' : 'AND s.owner_scope=?'}
+      AND NOT EXISTS (SELECT 1 FROM summary_jobs j WHERE j.session_id=s.id
+        AND j.status IN ('queued','running','unknown'))`;
+    const parameters = input.ownerScope === undefined ? [cutoffAt] : [cutoffAt, input.ownerScope];
+    return transaction(this.db, () => {
+      const eligible = this.db.prepare(`SELECT COUNT(DISTINCT s.id) AS sessions,COUNT(m.id) AS messages
+        FROM sessions s LEFT JOIN messages m ON m.session_id=s.id WHERE ${eligibility}`)
+        .get(...parameters) as { sessions: number; messages: number };
+      const eligibleSessions = Number(eligible.sessions), eligibleMessages = Number(eligible.messages);
+      let deletedSessions = 0, deletedMessages = 0;
+      if (!input.dryRun && eligibleSessions > 0) {
+        const removed = this.db.prepare(`DELETE FROM sessions WHERE id IN (
+          SELECT s.id FROM sessions s WHERE ${eligibility}
+        )`).run(...parameters);
+        deletedSessions = Number(removed.changes);
+        if (deletedSessions !== eligibleSessions) throw new Error('Conversation retention changed during cleanup');
+        deletedMessages = eligibleMessages;
+      }
+      const after = count();
+      return { enabled: true, retentionDays: input.retentionDays, cutoffAt, dryRun: input.dryRun,
+        before, eligibleSessions, eligibleMessages, deletedSessions, deletedMessages, after };
+    });
+  }
+
+  async storageHealth(input: { databaseWarningBytes?: number; diskFreeWarningBytes?: number } = {}): Promise<ConversationStorageHealth> {
+    this.ensureOpen();
+    const databaseWarningBytes = input.databaseWarningBytes ?? 1024 * 1024 * 1024;
+    const diskFreeWarningBytes = input.diskFreeWarningBytes ?? 2 * 1024 * 1024 * 1024;
+    if (![databaseWarningBytes, diskFreeWarningBytes].every(value => Number.isSafeInteger(value) && value >= 0)) {
+      throw new Error('Invalid conversation storage warning threshold');
+    }
+    const size = async (path: string) => {
+      try { return (await stat(path)).size; }
+      catch (error: any) { if (error?.code === 'ENOENT') return 0; throw error; }
+    };
+    const databaseBytes = (await Promise.all([
+      size(this.databasePath), size(`${this.databasePath}-wal`), size(`${this.databasePath}-shm`),
+    ])).reduce((total, value) => total + value, 0);
+    const disk = await statfs(this.directory, { bigint: true });
+    const available = disk.bavail * disk.bsize;
+    const availableDiskBytes = available > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(available);
+    const counts = this.db.prepare(`SELECT
+      (SELECT COUNT(*) FROM sessions) AS sessions,
+      (SELECT COUNT(*) FROM messages) AS messages`).get() as { sessions: number; messages: number };
+    const warnings: ConversationStorageHealth['warnings'] = [];
+    if (databaseBytes >= databaseWarningBytes) warnings.push('database_size');
+    if (availableDiskBytes <= diskFreeWarningBytes) warnings.push('low_disk_space');
+    return { databaseBytes, availableDiskBytes, sessions: Number(counts.sessions), messages: Number(counts.messages), warnings };
   }
 
   createSession(input: CreateSession): SessionRecord {
@@ -514,6 +664,116 @@ export class ConversationStore {
     if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
     return (this.db.prepare('SELECT * FROM topics WHERE session_id=? ORDER BY created_at,id')
       .all(sessionId) as any[]).map(topicRecord);
+  }
+
+  listLegacyImports(): LegacyImportRecord[] {
+    this.ensureOpen();
+    return (this.db.prepare('SELECT * FROM legacy_session_imports ORDER BY imported_at,source_name').all() as any[])
+      .map(row => ({ sourceHash: row.source_hash, sourceName: row.source_name, sessionId: row.session_id,
+        messageCount: row.message_count, importedAt: row.imported_at }));
+  }
+
+  importLegacySession(input: LegacySessionImport): 'imported' | 'duplicate' {
+    this.ensureOpen();
+    const session = input.session;
+    const validTime = (value: number) => Number.isSafeInteger(value) && value >= 0;
+    if (!/^[a-f0-9]{64}$/i.test(input.sourceHash) || input.sourceName.length !== 41
+      || !input.sourceName.toLowerCase().endsWith('.json') || !validUuid(input.sourceName.slice(0, -5))
+      || !validTime(input.importedAt) || !validUuid(session.id) || !session.ownerScope
+      || session.ownerScope.length > 128 || !validTime(session.createdAt) || !validTime(session.updatedAt)
+      || !validTime(session.endedAt) || session.updatedAt < session.createdAt || session.endedAt < session.createdAt
+      || input.messages.length > 10_000 || input.topics.length < 1 || input.topics.length > 1_000
+      || input.turns.length > 10_000) throw new Error('Invalid legacy conversation import');
+
+    const topicIds = new Set<string>();
+    for (const topic of input.topics) {
+      const label = topic.label.trim();
+      if (!validUuid(topic.id) || topicIds.has(topic.id) || !label || label.length > 80
+        || !validTime(topic.createdAt) || !validTime(topic.updatedAt)) throw new Error('Invalid legacy conversation import');
+      topicIds.add(topic.id);
+    }
+    const turnIds = new Set<string>(), messageIds = new Set<string>();
+    const turnById = new Map<string, LegacySessionImport['turns'][number]>();
+    for (const turn of input.turns) {
+      if (!validUuid(turn.id) || turnIds.has(turn.id) || !topicIds.has(turn.topicId)
+        || (turn.inputMessageId !== undefined && !validUuid(turn.inputMessageId))
+        || (turn.outputMessageId !== undefined && !validUuid(turn.outputMessageId))
+        || !['committed', 'interrupted'].includes(turn.status)
+        || (turn.cognitiveMode !== undefined && (!turn.cognitiveMode || turn.cognitiveMode.length > 64))
+        || !validTime(turn.createdAt) || !validTime(turn.updatedAt)) throw new Error('Invalid legacy conversation import');
+      turnIds.add(turn.id);
+      turnById.set(turn.id, turn);
+    }
+    const messageById = new Map<string, LegacySessionImport['messages'][number]>();
+    for (const message of input.messages) {
+      const content = message.content.trim();
+      if (!validUuid(message.id) || messageIds.has(message.id) || !turnIds.has(message.turnId)
+        || !topicIds.has(message.topicId) || !Number.isSafeInteger(message.sequence) || message.sequence < 1
+        || !['user', 'assistant'].includes(message.role) || !content || content.length > 120_000
+        || !validTime(message.createdAt) || !validTime(message.updatedAt)
+        || (message.citations !== undefined && (!Array.isArray(message.citations)
+          || Buffer.byteLength(JSON.stringify(message.citations)) > 65_536))) {
+        throw new Error('Invalid legacy conversation import');
+      }
+      messageIds.add(message.id);
+      messageById.set(message.id, message);
+    }
+    if (input.messages.some((message, index) => message.sequence !== index + 1)) {
+      throw new Error('Invalid legacy conversation import');
+    }
+    for (const turn of input.turns) {
+      const user = turn.inputMessageId ? messageById.get(turn.inputMessageId) : undefined;
+      const assistant = turn.outputMessageId ? messageById.get(turn.outputMessageId) : undefined;
+      if ((turn.inputMessageId && (!user || user.role !== 'user' || user.turnId !== turn.id || user.topicId !== turn.topicId))
+        || (turn.outputMessageId && (!assistant || assistant.role !== 'assistant'
+          || assistant.turnId !== turn.id || assistant.topicId !== turn.topicId))) throw new Error('Invalid legacy conversation import');
+    }
+    for (const message of input.messages) {
+      const turn = turnById.get(message.turnId)!;
+      if (turn.topicId !== message.topicId
+        || (message.role === 'user' ? turn.inputMessageId !== message.id : turn.outputMessageId !== message.id)) {
+        throw new Error('Invalid legacy conversation import');
+      }
+    }
+
+    return transaction(this.db, () => {
+      const duplicate = this.db.prepare('SELECT session_id,source_name FROM legacy_session_imports WHERE source_hash=?')
+        .get(input.sourceHash) as { session_id: string; source_name: string } | undefined;
+      if (duplicate) {
+        if (duplicate.session_id !== session.id || duplicate.source_name !== input.sourceName) {
+          throw new ConversationStoreConflictError();
+        }
+        return 'duplicate';
+      }
+      if (this.db.prepare('SELECT 1 FROM legacy_session_imports WHERE source_name=? OR session_id=?')
+        .get(input.sourceName, session.id) || this.db.prepare('SELECT 1 FROM sessions WHERE id=?').get(session.id)) {
+        throw new ConversationStoreConflictError();
+      }
+
+      this.db.prepare(`INSERT INTO sessions(id,owner_scope,status,created_at,updated_at,last_activity_at,
+        ended_at,end_reason,latest_sequence,summary_through_sequence)
+        VALUES (?,?,'ended',?,?,?,?, 'legacy_import',?,0)`).run(session.id, session.ownerScope, session.createdAt,
+        session.updatedAt, session.updatedAt, session.endedAt, input.messages.length);
+      const topicStatement = this.db.prepare(`INSERT INTO topics(id,session_id,label,status,created_at,updated_at)
+        VALUES (?, ?, ?, 'completed', ?, ?)`);
+      for (const topic of input.topics) topicStatement.run(topic.id, session.id, topic.label.trim(), topic.createdAt, topic.updatedAt);
+
+      const turnStatement = this.db.prepare(`INSERT INTO turns(id,session_id,topic_id,input_message_id,output_message_id,
+        status,cognitive_mode,created_at,updated_at,error_code) VALUES (?,?,?,?,?,?,?,?,?,?)`);
+      for (const turn of input.turns) turnStatement.run(turn.id, session.id, turn.topicId, turn.inputMessageId ?? null,
+        turn.outputMessageId ?? null, turn.status, turn.cognitiveMode ?? null, turn.createdAt, turn.updatedAt,
+        turn.status === 'interrupted' ? 'LEGACY_MISSING_ANSWER' : null);
+
+      const messageStatement = this.db.prepare(`INSERT INTO messages(id,session_id,turn_id,topic_id,sequence,role,status,
+        content,citations_json,created_at,updated_at) VALUES (?,?,?,?,?,?,'committed',?,?,?,?)`);
+      for (const message of input.messages) messageStatement.run(message.id, session.id, message.turnId, message.topicId,
+        message.sequence, message.role, message.content.trim(), message.citations === undefined ? null : JSON.stringify(message.citations),
+        message.createdAt, message.updatedAt);
+      this.db.prepare(`INSERT INTO legacy_session_imports(source_hash,source_name,session_id,message_count,imported_at)
+        VALUES (?,?,?,?,?)`).run(input.sourceHash.toLowerCase(), input.sourceName, session.id, input.messages.length,
+        input.importedAt);
+      return 'imported';
+    });
   }
 
   registerClient(input: { id: string; at: number; label?: string }): void {

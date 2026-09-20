@@ -1,6 +1,8 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BACKOFF = [500, 1000, 2000, 5000, 10000, 30000];
 const COMMANDS = new Set(['turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry', 'exit.request']);
+const LOCAL_TEST_COMMANDS = new Set(['test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
+  'test.storage.cleanup_preview', 'test.storage.cleanup_apply']);
 const CLIENT_KEY = 'conversation-lab.client-id.v2', RESUME_KEY = 'conversation-lab.resume.v2';
 
 export function isLoopbackHost(hostname) { return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname); }
@@ -78,7 +80,7 @@ export class BrowserSessionClient {
   networkAvailable() { if (this.disposed || this.ending || this.socket?.readyState === WebSocket.OPEN) return false; this.cancelTimer(); return this.open(true); }
   envelope(value) { const message = { ...value };
     if (message.type === 'text.submit' && !message.message_id) message.message_id = this.uuid();
-    if ((COMMANDS.has(message.type) || ['exit.confirm', 'test.session.expire'].includes(message.type)) && !message.command_id) message.command_id = this.uuid();
+    if ((COMMANDS.has(message.type) || message.type === 'exit.confirm' || LOCAL_TEST_COMMANDS.has(message.type)) && !message.command_id) message.command_id = this.uuid();
     return message; }
   send(value) { if (this.socket?.readyState !== WebSocket.OPEN) return false; const message = this.envelope(value);
     if (message.type === 'text.submit') this.lastSubmission = message; this.socket.send(JSON.stringify(message)); return true; }
@@ -86,6 +88,8 @@ export class BrowserSessionClient {
   repeatLastSubmission() { if (!this.lastSubmission || this.socket?.readyState !== WebSocket.OPEN) return false;
     this.socket.send(JSON.stringify(this.lastSubmission)); return true; }
   simulateDrop() { if (!this.socket) return false; this.socket.close(4000, 'Simulator drop'); return true; }
+  simulateResume() { return this.simulateDrop(); }
+  storageTest(type) { return LOCAL_TEST_COMMANDS.has(type) && type !== 'test.session.expire' ? this.send({ type }) : false; }
   simulateExpiry() { if (this.socket?.readyState !== WebSocket.OPEN || !this.token) return false;
     this.forceFresh = true; this.recoveryFailed = true; this.clearCredential(); return this.send({ type: 'test.session.expire' }); }
   confirmExit(confirm) { if (confirm) { this.ending = true; this.clearCredential(); this.cancelTimer(); } return this.send({ type: 'exit.confirm', confirm }); }

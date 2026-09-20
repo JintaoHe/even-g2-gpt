@@ -34,10 +34,10 @@ async function listen(store: ConversationStore, model: DialogueModel) {
   return { app, url: `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation` };
 }
 
-test('session expiry test control cannot be exposed by a configured public server', () => {
+test('local session and storage test controls cannot be exposed by a configured public server', () => {
   const model: DialogueModel = { decide: async () => 'respond', reply: async () => {} };
   assert.throws(() => createConversationServer({ token, model, transcriber: unusedTranscriber,
-    allowSessionExpiryTestControl: true,
+    allowLocalTestControls: true,
     ingress: { publicHosts: ['calendar.eveng2assistant.com'], allowedOrigins: ['https://calendar.eveng2assistant.com'] },
   }), /loopback/i);
 });
@@ -164,17 +164,25 @@ test('a second live protocol v2 input client is rejected without stealing the fi
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
   const server = await listen(store, model);
-  const first = new WebSocket(server.url), second = new WebSocket(server.url);
-  await Promise.all([once(first, 'open'), once(second, 'open')]);
+  const first = new WebSocket(server.url);
+  let second: WebSocket | undefined;
+  await once(first, 'open');
   try {
     const firstReady = waitFor(first, 'ready');
     first.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
     await firstReady;
+
+    // Establish the contender only after the first client visibly owns the
+    // input lease. Opening both transports concurrently makes this an
+    // upgrade-order test instead of the active-session invariant we intend to
+    // verify, and produced a nondeterministic Linux CI failure.
+    second = new WebSocket(server.url);
+    await once(second, 'open');
     const error = waitFor(second, 'error');
     second.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
     assert.equal((await error).code, 'BUSY');
   } finally {
-    first.terminate(); second.terminate(); await server.app.close(); await store.close();
+    first.terminate(); second?.terminate(); await server.app.close(); await store.close();
   }
 });
 
@@ -229,7 +237,7 @@ test('loopback-only test control detaches then expires the session immediately',
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
   const app = createConversationServer({ token, model, conversationStore: store, transcriber: unusedTranscriber,
-    allowSessionExpiryTestControl: true });
+    allowLocalTestControls: true });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
   const client = new WebSocket(url); await once(client, 'open');
@@ -244,5 +252,44 @@ test('loopback-only test control detaches then expires the session immediately',
       await new Promise(resolve => setImmediate(resolve));
     }
     assert.equal(store.getSession(ready.session_id)?.status, 'expired');
+  } finally { client.terminate(); await app.close(); await store.close(); }
+});
+
+test('loopback storage lab reports safe metadata and cleans only fixed retention fixtures', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-storage-lab-'));
+  const store = await ConversationStore.create(root);
+  const oldRealId = randomUUID(), oldAt = Date.now() - 1095 * 24 * 60 * 60 * 1000 - 120_000;
+  store.createSession({ id: oldRealId, ownerScope: 'single-user', createdAt: oldAt - 1 });
+  store.endSession(oldRealId, oldAt, 'user_exit');
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
+  const app = createConversationServer({ token, model, conversationStore: store, transcriber: unusedTranscriber,
+    allowLocalTestControls: true });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
+  const client = new WebSocket(url); await once(client, 'open');
+  try {
+    const readyPromise = waitFor(client, 'ready');
+    client.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
+    await readyPromise;
+    const command = async (type: string) => {
+      const response = waitFor(client, 'test.storage.report');
+      client.send(JSON.stringify({ type, command_id: randomUUID() }));
+      return response;
+    };
+    const inspected = await command('test.storage.inspect');
+    assert.equal(inspected.action, 'inspect');
+    assert.equal(inspected.sqlite.schema_version, 3);
+    assert.equal(inspected.retention.test_eligible_sessions, 0);
+    assert.doesNotMatch(JSON.stringify(inspected), /content|transcript|database_path|session_id/i);
+
+    const seeded = await command('test.storage.seed_expired');
+    assert.equal(seeded.retention.test_eligible_sessions, 1);
+    const preview = await command('test.storage.cleanup_preview');
+    assert.equal(preview.retention.test_eligible_sessions, 1);
+    assert.equal(preview.retention.deleted_sessions, 0);
+    const applied = await command('test.storage.cleanup_apply');
+    assert.equal(applied.retention.deleted_sessions, 1);
+    assert.equal(applied.retention.test_eligible_sessions, 1);
+    assert.ok(store.getSession(oldRealId), 'real old history remains outside the fixed simulator scope');
   } finally { client.terminate(); await app.close(); await store.close(); }
 });

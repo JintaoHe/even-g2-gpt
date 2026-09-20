@@ -31,6 +31,7 @@ import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type Planning
 import { CostLedger } from './cost-ledger.js';
 import { createMeteredOpenAIFetch } from './metered-openai.js';
 import { ConversationStore, ResumeCredentialError } from './conversation-store.js';
+import { readConversationMaintenanceConfig, runConversationMaintenance } from './conversation-maintenance.js';
 import { StoreConversationPersistence } from './conversation-persistence.js';
 import { ContextBuilder } from './context-builder.js';
 import { OpenAISessionSummaryGenerator, SessionSummaryService } from './session-summary.js';
@@ -52,12 +53,14 @@ export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
   conversationStore?: ConversationStore;
+  storageWarningBytes?: { databaseWarningBytes: number; diskFreeWarningBytes: number };
   sessionSummary?: SessionSummaryService;
   resumeWindowMs?: number;
   /** Test override. Production refreshes at two-thirds of the resume window. */
   resumeCredentialRefreshMs?: number;
   ownerScope?: string;
-  allowSessionExpiryTestControl?: boolean;
+  /** Enables fixed, non-arbitrary simulator controls. Never valid with a public host. */
+  allowLocalTestControls?: boolean;
   models?: { intent: string; reply: string };
   capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean; speechProvider?: string; location?: boolean; routes?: boolean;
     environment?: boolean; conditionalTasks?: boolean };
@@ -87,8 +90,8 @@ export function createConversationServer(options: {
     const parsed = new URL(origin);
     if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) throw new Error('Invalid allowed origin');
   }
-  if (options.allowSessionExpiryTestControl && publicHosts.size) {
-    throw new Error('Session expiry test control is restricted to loopback development servers');
+  if (options.allowLocalTestControls && publicHosts.size) {
+    throw new Error('Local test controls are restricted to loopback development servers');
   }
   const hostAllowed = (host: string) => localHost.test(host) || publicHosts.has(host.toLowerCase());
   const originAllowed = (host: string, origin?: string) => !origin
@@ -123,6 +126,26 @@ export function createConversationServer(options: {
       } catch {
         res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end('{"status":"unavailable","calendar":"error"}');
+      }
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/internal/health/storage') {
+      if (!localHost.test(host)) { res.writeHead(404); res.end(); return; }
+      if (!options.conversationStore) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('{"status":"ok","storage":"disabled"}');
+        return;
+      }
+      try {
+        const health = await options.conversationStore.storageHealth(options.storageWarningBytes);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff' });
+        res.end(JSON.stringify({ status: health.warnings.length ? 'warning' : 'ok',
+          database_bytes: health.databaseBytes, available_disk_bytes: health.availableDiskBytes,
+          sessions: health.sessions, messages: health.messages, warnings: health.warnings }));
+      } catch {
+        res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('{"status":"unavailable","storage":"error"}');
       }
       return;
     }
@@ -492,8 +515,9 @@ export function createConversationServer(options: {
           return;
         }
         if (protocolV2 && ['text.submit', 'turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry',
-          'exit.request', 'exit.confirm', 'test.session.expire'].includes(String(msg.type))) msg = parseCoreClientMessage(msg, {
-            allowSessionExpiryTestControl: options.allowSessionExpiryTestControl === true && localTestConnection,
+          'exit.request', 'exit.confirm', 'test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
+          'test.storage.cleanup_preview', 'test.storage.cleanup_apply'].includes(String(msg.type))) msg = parseCoreClientMessage(msg, {
+            allowLocalTestControls: options.allowLocalTestControls === true && localTestConnection,
           });
         const active = session!;
         const conversation = active.conversation, delivery = active.delivery, calendarControl = active.calendarControl;
@@ -628,11 +652,41 @@ export function createConversationServer(options: {
             if (msg.confirm) { await registry.end(active.id); client.close(1000, 'Conversation ended'); }
             break;
           case 'test.session.expire':
-            if (!options.allowSessionExpiryTestControl || !localTestConnection) throw new Error('Test control disabled');
+            if (!options.allowLocalTestControls || !localTestConnection) throw new Error('Test control disabled');
             expireOnClose = true;
             send({ type: 'notice', text: '正在模拟恢复窗口过期；重连后应创建新会话。' });
             client.close(1000, 'Simulated session expiry');
             break;
+          case 'test.storage.inspect':
+          case 'test.storage.seed_expired':
+          case 'test.storage.cleanup_preview':
+          case 'test.storage.cleanup_apply': {
+            if (!options.allowLocalTestControls || !localTestConnection || !store) throw new Error('Test control disabled');
+            const retentionDays = 1095, ownerScope = 'local-retention-test', now = Date.now();
+            if (msg.type === 'test.storage.seed_expired') {
+              const endedAt = now - retentionDays * 24 * 60 * 60 * 1000 - 60_000;
+              const fixtureId = randomUUID();
+              store.createSession({ id: fixtureId, ownerScope, createdAt: endedAt - 1,
+                initialTopic: { id: randomUUID(), label: 'Retention test fixture' } });
+              store.endSession(fixtureId, endedAt, 'retention_test_fixture');
+            }
+            const apply = msg.type === 'test.storage.cleanup_apply';
+            const retention = store.cleanupExpiredSessions({ retentionDays, now, dryRun: !apply, ownerScope });
+            const [storage, sqlite, current] = await Promise.all([
+              store.storageHealth(options.storageWarningBytes), Promise.resolve(store.health()),
+              Promise.resolve(store.getSession(active.id)),
+            ]);
+            send({ type: 'test.storage.report', action: msg.type.slice('test.storage.'.length),
+              generated_at: now, sqlite: { schema_version: sqlite.schemaVersion, journal_mode: sqlite.journalMode,
+                foreign_keys: sqlite.foreignKeys },
+              storage: { database_bytes: storage.databaseBytes, available_disk_bytes: storage.availableDiskBytes,
+                sessions: storage.sessions, messages: storage.messages, warnings: storage.warnings },
+              current_session: current ? { status: current.status, latest_sequence: current.latestSequence } : undefined,
+              retention: { retention_days: retention.retentionDays, cutoff_at: retention.cutoffAt,
+                test_eligible_sessions: retention.eligibleSessions, test_eligible_messages: retention.eligibleMessages,
+                deleted_sessions: retention.deletedSessions, deleted_messages: retention.deletedMessages } });
+            break;
+          }
           default: throw new Error('Unknown message');
         }
       } catch { send({ type: 'error', code: 'INVALID_MESSAGE' }); client.close(1008); }
@@ -692,6 +746,20 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const environmentProvider = createEnvironmentProvider(process.env, costs);
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer(process.env, openaiFetch));
   const conversationStore = await ConversationStore.create(dataDirectory);
+  const maintenanceConfig = readConversationMaintenanceConfig(process.env);
+  let maintenance: Promise<void> | undefined;
+  const maintain = () => maintenance ??= runConversationMaintenance(conversationStore, maintenanceConfig).then(result => {
+    const report = { retention_days: result.retention.retentionDays, retention_enabled: result.retention.enabled,
+      eligible_sessions: result.retention.eligibleSessions, deleted_sessions: result.retention.deletedSessions,
+      deleted_messages: result.retention.deletedMessages, sessions: result.storage.sessions, messages: result.storage.messages,
+      database_bytes: result.storage.databaseBytes, available_disk_bytes: result.storage.availableDiskBytes,
+      warnings: result.storage.warnings };
+    console.log(`Conversation maintenance: ${JSON.stringify(report)}`);
+  }).catch(() => { console.error('Conversation maintenance failed; no unverified cleanup retry was attempted.');
+  }).finally(() => { maintenance = undefined; });
+  await maintain();
+  const maintenanceTimer = setInterval(() => { void maintain(); }, 24 * 60 * 60 * 1000);
+  maintenanceTimer.unref();
   const sessionSummary = hybrid.provider === 'api' && key
     ? new SessionSummaryService(conversationStore,
       new OpenAISessionSummaryGenerator(key, process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply,
@@ -717,8 +785,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
     conversationStore,
+    storageWarningBytes: maintenanceConfig,
     sessionSummary,
     resumeWindowMs: resumeMinutes * 60_000,
+    allowLocalTestControls: !publicHost,
     jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner(process.env, openaiFetch) : undefined,
     calendarItineraryPlanner: calendar && hybrid.provider === 'api' && key
       ? createCalendarItineraryPlanner(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',
@@ -745,8 +815,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let stopping: Promise<void> | undefined;
   function shutdown() {
     return stopping ??= (async () => {
+      clearInterval(maintenanceTimer);
       const deadline = setTimeout(() => process.exit(1), 25000); deadline.unref();
       try {
+        await maintenance;
         await Promise.allSettled([app.close()]);
         await calendar?.close();
         await Promise.all([hybrid.close(), jobs.close(), conversationStore.close()]);

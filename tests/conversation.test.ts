@@ -13,6 +13,7 @@ import { createConversationServer, fileSaver } from '../src/conversation-server.
 import { LiveTranscriber } from '../src/live-transcriber.js';
 import { SonioxTranscriber } from '../src/soniox-transcriber.js';
 import { createSttProvider } from '../src/stt-provider.js';
+import { ConversationStore } from '../src/conversation-store.js';
 import { createServer, request } from 'node:http';
 import { runInNewContext } from 'node:vm';
 
@@ -372,7 +373,10 @@ test('local WebSocket authenticates, runs dialogue, pauses and rejects cross-ori
 });
 
 test('production ingress accepts only the configured public host and origin', { timeout: 10000 }, async () => {
+  const data = await mkdtemp(join(tmpdir(), 'even-storage-health-'));
+  const conversationStore = await ConversationStore.create(data);
   const app = createConversationServer({ token: 'p'.repeat(64), model: immediate, transcriber: () => { throw new Error('not used'); },
+    conversationStore,
     ingress: { publicHosts: ['calendar.eveng2assistant.com'], allowedOrigins: ['https://calendar.eveng2assistant.com'] } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
@@ -382,6 +386,11 @@ test('production ingress accepts only the configured public host and origin', { 
     assert.equal(localHealth.headers.get('cache-control'), 'no-store');
     const calendarHealth = await fetch(url.replace('ws://', 'http://').replace('/ws/conversation', '/internal/health/calendar'));
     assert.equal(calendarHealth.status, 200); assert.deepEqual(await calendarHealth.json(), { status: 'ok', calendar: 'disabled' });
+    const storageHealth = await fetch(url.replace('ws://', 'http://').replace('/ws/conversation', '/internal/health/storage'));
+    assert.equal(storageHealth.status, 200);
+    const storage = await storageHealth.json() as any;
+    assert.equal(storage.status, 'ok'); assert.equal(storage.sessions, 0); assert.equal(storage.messages, 0);
+    assert.equal(typeof storage.database_bytes, 'number'); assert.equal(typeof storage.available_disk_bytes, 'number');
     const address = app.http.address() as { port: number };
     const blockedInternal = await new Promise<number>((resolve, reject) => {
       const req = request({ hostname: '127.0.0.1', port: address.port, path: '/internal/health/calendar',
@@ -389,13 +398,19 @@ test('production ingress accepts only the configured public host and origin', { 
       req.on('error', reject); req.end();
     });
     assert.equal(blockedInternal, 404);
+    const blockedStorage = await new Promise<number>((resolve, reject) => {
+      const req = request({ hostname: '127.0.0.1', port: address.port, path: '/internal/health/storage',
+        headers: { host: 'calendar.eveng2assistant.com' } }, response => { response.resume(); resolve(response.statusCode ?? 0); });
+      req.on('error', reject); req.end();
+    });
+    assert.equal(blockedStorage, 404);
     const trusted = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'calendar.eveng2assistant.com' } });
     await once(trusted, 'open'); trusted.close(); await once(trusted, 'close');
     const wrongOrigin = new WebSocket(url, { origin: 'https://evil.example', headers: { host: 'calendar.eveng2assistant.com' } });
     await once(wrongOrigin, 'error'); wrongOrigin.terminate();
     const wrongHost = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'other.eveng2assistant.com' } });
     await once(wrongHost, 'error'); wrongHost.terminate();
-  } finally { await app.close(); }
+  } finally { await app.close(); await conversationStore.close(); }
 });
 
 test('audio pipeline waits for ordered final transcripts; pause drops late results', { timeout: 10000 }, async () => {

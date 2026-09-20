@@ -18,6 +18,7 @@ const display = new DisplaySession();
 let shutdown: Promise<void> | undefined;
 pager.reset('请在伴随页面连接后端。\n连接后可输入文字或开启麦克风。');
 let bridge: EvenAppBridge | undefined, audioController: AudioController | undefined;
+let developmentSessionControls: { handleEvent: (event: any) => boolean } | undefined;
 let locationController: LocationController | undefined, locationAvailable = false;
 let developmentLocation: { label: string; latitude: number; longitude: number; accuracy: number; timezone: string } | undefined;
 let connected = false, speech = false, audio = false, state = 'closed', channel = '?';
@@ -113,6 +114,7 @@ function handleConnectionStatus(next: ConnectionStatus) {
 }
 
 function handleServerEvent(event: any) {
+    developmentSessionControls?.handleEvent(event);
     if (event.type === 'ready') {
       if (event.resumed === true && Array.isArray(event.snapshot?.messages)) pager.restoreSnapshot(event.snapshot.messages, !hasReady);
       else if (hasReady && connection.status.reason === 'new_session') pager.reset('原会话已过期，已建立新会话。\n请继续说话或输入文字。');
@@ -347,10 +349,12 @@ window.addEventListener('online', () => connection.networkAvailable());
 window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void audioController?.dispose(); locationController?.cancelAutomatic(); void locationController?.stop(); connection.dispose(); });
 document.addEventListener('visibilitychange', () => { void audioController?.setVisible(!document.hidden); });
 if (import.meta.env.DEV) {
-  void import('../dev/session-controls').then(({ installSessionControls }) => installSessionControls({
+  void import('../dev/session-controls').then(({ installSessionControls }) => { developmentSessionControls = installSessionControls({
     backendUrl: conversationWebSocketUrl(location, packagedBackendOrigin),
+    resume: () => connection.simulateSessionResume(),
     expire: () => connection.simulateSessionExpiry(),
-  }));
+    command: type => connection.send({ type }),
+  }); });
   void import('../dev/location-presets').then(({ installLocationPresets }) => installLocationPresets(location => {
     developmentLocation = location;
     status = location ? `已选择模拟位置 · ${location.label}` : '已恢复真实 SDK 定位';

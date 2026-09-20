@@ -187,3 +187,52 @@ Phase 2 server foundation 与 Phase 3 write-safety foundation：**PASS**。客�
 ### Gate
 
 Phase 4：**PASS（自动化与构建）**。进入 Phase 5 前仍需通过 PR review；本阶段的 browser/Even simulator 人工断线体验将在后续本地验收 gate 统一执行，不提前部署 Linux 或构建 `.ehpk`。
+
+## 2026-09-19 — Phase 5 bounded long context（PR #32）
+
+### 实现
+
+- SQLite 成为 conversation 唯一权威历史；`ContextBuilder` 只读取有界 summary、当前 topic、相关旧 topic 片段和近期 turns。
+- durable summary job 使用固定 sequence boundary，schema invalid 最多自修复一次；失败不阻塞对话，也不获得 Web／Calendar／Email 工具。
+- 超过 100 条消息的 session 不再硬停止；500-message 中英文历史仍保持有界输入和 topic 恢复。
+- MD 导出冻结用户选择的 topic/document，不再把 100-message 限制错误复用为导出上限。
+
+### Gate
+
+PR #32 已 squash merge 到 `main`，commit `356f81c`。Phase 5 自动化、构建及 public audit 已通过；人工 simulator 验收统一留到 PR5 gate。
+
+## 2026-09-20 — Phase 6 与 Phase 7 自动化 gate（PR5 working tree）
+
+### 实现
+
+- schema v3 增加 legacy import ledger；迁移只接受 UUID 普通 JSON 文件、严格 schema 与有界大小，默认 dry-run，`--apply` 才写入／隔离异常文件。成功原文件保留，来源 SHA-256 保证幂等。
+- 读取使用 no-follow file handle、inode/device 复核和 bounded buffer；单文件错误不阻止其他合法文件，graph/reference 在 transaction 前完整验证。
+- backup verifier 要求 `jobs.sqlite` 与 `assistant-memory.sqlite`，运行 integrity/foreign-key/reference/sequence 检查，并在隔离目录重新打开 conversation store。输出只含计数，不含正文。
+- 默认 `SESSION_RETENTION_DAYS=1095`；`0` 明确关闭自动 conversation 清理。只有超过 Unix-time cutoff 的 ended/expired session 可删，active/idle 和 queued/running/unknown summary job 保留。
+- retention 使用 transaction + foreign-key cascade；服务启动和每 24 小时运行一次。数据库/WAL/SHM 字节数、session/message 数和剩余磁盘只进入 metadata health/log，不读取或打印正文。
+- `/internal/health/storage` 仅回环可访问，Caddy 不代理；公网 `/healthz` 保持最小响应。
+- server-only release 包含两个离线入口：`sessions:migrate` 与 `sessions:maintain`；二者默认 dry-run，正式执行要求显式 `--apply` 与 SQLite 独占。
+- 新增面向初学者的迁移、留存、备份边界文档；没有部署 Linux，也没有构建 `.ehpk`。
+
+### 自动化结果
+
+1. Root full regression：`338 passed / 0 failed / 2 Windows platform skips`，共 340 tests。两个 skip 均为当前 Windows 权限不允许创建测试用 file symlink；Linux gate 必须重跑。
+2. Root TypeScript：通过。
+3. Even client：`47 passed / 0 failed`；包含连续 10 次 page-style controller 重建与轮换 credential 恢复同一 session。
+4. Even client production build：通过；release verifier 只发现 2 个预期文件，无 debug fixture、source map、private key 或明显 credential。
+5. Server-only build：通过；发布包包含 compiled migration/maintenance CLI，不包含 browser lab、simulator、测试、凭证或本地数据。
+6. Public audit：274 个 working-tree source/document files 与 556 个 Git-history files 均未发现禁止路径或 credential pattern。
+7. Fault injection 覆盖 user commit 前后、stream/final commit 边界、服务重启、重复 ID、120/500-message context、双客户端争用、Calendar/Email 断线和 provider ACK 丢失；无重复副作用。
+8. 自动回归未调用 OpenAI、Soniox、Google、SMTP 或真实 Calendar。
+
+### Gate
+
+Phase 6 与 Phase 7.1/7.2：**PASS**。Phase 7.3 用户本地 simulator 验收仍待完成；在用户确认前不得创建部署 PR、部署 Linux 或构建新 `.ehpk`。
+
+### Simulator 会话／SQLite 实验台补充
+
+- companion simulator 与本地 browser lab 新增一键 `session resume`、SQLite metadata、写入固定三年前测试记录、清理预览和清理测试记录按钮。
+- 所有 wire command 默认拒绝，只有 server 显式启用 local controls 且 WebSocket 对端是 loopback 时才接受；配置 public host 会在 server 构造阶段失败。production client build 不包含动态开发面板。
+- 状态报告只包含 schema/WAL/foreign-key、session/message 数、数据库与可用磁盘字节、警告、当前会话状态和 retention 计数，不包含正文、数据库路径、session ID 或 credential。
+- simulator 清理固定使用 `local-retention-test` owner scope；测试证明真实三年前历史不会被该按钮删除。
+- 补充后 root regression 为 `340 passed / 0 failed / 2 Windows platform skips`，Even client 为 `50 passed / 0 failed`；root/client typecheck、server/client build 与 public audit 通过。
