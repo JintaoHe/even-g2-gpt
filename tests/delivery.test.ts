@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Conversation, type DialogueModel } from '../src/conversation.js';
 import { DeliveryDialogue } from '../src/delivery-dialogue.js';
-import { createDraftGenerator, protectedDocumentEntities, type Draft, type DraftGenerator } from '../src/delivery-draft.js';
+import { createDraftGenerator, protectedDocumentEntities, readDraftGenerationConfig, type Draft, type DraftGenerator } from '../src/delivery-draft.js';
 import { presentation } from '../src/document-presentation.js';
 import { JobStore } from '../src/job-store.js';
 import type { DeliveryAction } from '../src/delivery-intent.js';
@@ -126,7 +126,7 @@ test('contextual email assent cannot send or create an artifact without a formal
 
 test('a bound long-form offer accepts natural assent, generates a document preview, and never sends email', async () => {
   const offer = `向量数据库按语义相似度检索，并不替代 SQL 的精确事务查询。\n${CHINESE_LONG_FORM_OFFER}`;
-  for (const phrase of ['要', '好的', '嗯，想看', '要完整长文', '好，发给我']) {
+  for (const phrase of ['要', '好的', '好啊', '嗯，想看', '要完整长文', '好，发给我']) {
     await fixture(async ({ conversation, store, route, sent }) => {
       route('none'); await conversation.submit('详细解释向量数据库', true);
       assert.equal(conversation.history.at(-1)?.content, offer);
@@ -135,6 +135,18 @@ test('a bound long-form offer accepts natural assent, generates a document previ
       assert.match(conversation.history.at(-1)!.content, /文件已生成[\s\S]*确认发送/);
     }, async () => structuredClone(draft), undefined, offer);
   }
+});
+
+test('a failed bound document offer permits one exact-message-bound natural retry', async () => {
+  const offer = `先给你结论。\n${CHINESE_LONG_FORM_OFFER}`; let attempts = 0;
+  await fixture(async ({ conversation, store, route }) => {
+    route('none'); await conversation.submit('详细说明', true);
+    await conversation.submit('好啊', true);
+    assert.equal(store.list().length, 0); assert.match(conversation.history.at(-1)!.content, /重试生成 Markdown/);
+    await conversation.submit('好啊', true);
+    assert.equal(store.list().length, 0); assert.match(conversation.history.at(-1)!.content, /仍未能完整生成/);
+  }, async () => { attempts++; throw Error('DRAFT_INCOMPLETE'); }, undefined, offer);
+  assert.equal(attempts, 2);
 });
 
 test('long-form assent is one-turn, exact-message-bound and rejects negation or questions', async () => {
@@ -193,7 +205,7 @@ test('negation, quoted approval, conditional approval and vague assent cannot se
   });
 });
 test('revisions supersede old artifacts, require fresh confirmation, and deliver only the new version', async () => {
-  let version = 0;
+  let version = 0, sawPrevious = false;
   await fixture(async ({ conversation, store, route, sent }) => {
     await conversation.submit('生成文档', true); const old = store.list()[0].id;
     route('revise'); await conversation.submit('把步骤二改掉，然后发吧', true);
@@ -201,7 +213,11 @@ test('revisions supersede old artifacts, require fresh confirmation, and deliver
     await assert.rejects(store.email(old, async () => { assert.fail('must not send old version'); }));
     route('confirm'); await conversation.submit('确认发送', true);
     assert.equal(sent.length, 1); assert.match(sent[0].document.markdown, /版本2/);
-  }, async () => ({ document: { ...draft.document, markdown: `# 版本${++version}` } }));
+  }, async (_history, kind, previous) => {
+    if (kind === 'revise') { sawPrevious = previous?.document.markdown === '# 版本1'; assert.equal(sawPrevious, true); }
+    return { document: { ...draft.document, markdown: `# 版本${++version}` } };
+  });
+  assert.equal(sawPrevious, true);
 });
 test('expiry, unrelated turns, explicit cancellation and lifecycle invalidation require a new preview', async () => {
   await fixture(async ({ conversation, route, sent, advance, model }) => {
@@ -254,19 +270,53 @@ test('late cancelled generation cannot publish a sendable artifact or confirmati
   }, () => new Promise(resolve => { finish = resolve; }));
 });
 test('draft API has no tools or mail access, preserves standalone content and fails closed', async () => {
-  let body: any, status = 'completed';
-  let output: any = { clarification: '', title: '部署步骤', summary: '部署清单', markdown: '1. Test\n\n[来源](https://example.com)', calendar: null };
+  const bodies: any[] = []; let replies: any[] = [];
+  const plan = { clarification: '', title: '部署步骤', summary: '部署清单',
+    sections: [{ heading: '执行', brief: '测试并保留来源。' }], calendar: null };
   const generate = createDraftGenerator({ OPENAI_API_KEY: 'fake', CONVERSATION_TIMEZONE: 'America/Chicago' }, async (_url, init) => {
-    body = JSON.parse(init!.body as string);
-    return new Response(JSON.stringify({ status, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(output) }] }] }));
+    bodies.push(JSON.parse(init!.body as string));
+    return new Response(JSON.stringify(replies.shift()));
   });
+  const completed = (text: string) => ({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] });
+  replies = [completed(JSON.stringify(plan)), completed('1. Test\n\n[来源](https://example.com)')];
   const result = await generate([{ role: 'user', content: '导出刚才的步骤' }], 'document', undefined, new AbortController().signal);
-  assert.equal(body.tools, undefined); assert.equal(body.store, false); assert.equal(body.text.format.strict, true);
+  assert.ok(bodies.every(body => body.tools === undefined && body.store === false));
+  assert.equal(bodies[0].text.format.strict, true); assert.equal(bodies[1].text.format.type, 'text');
   assert.ok('document' in result); assert.match(result.document.markdown, /https:\/\/example.com/); assert.doesNotMatch(result.document.markdown, /完整对话/);
-  assert.match(body.instructions, /project codenames, ticket IDs, person names and event titles verbatim/);
-  status = 'incomplete'; await assert.rejects(generate([], 'document', undefined, new AbortController().signal));
-  status = 'completed'; output = { ...output, calendar: { start: 'Friday' } };
+  assert.match(bodies[0].instructions, /project codenames, ticket IDs, person names and event titles verbatim/);
+  replies = [{ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }];
+  await assert.rejects(generate([], 'document', undefined, new AbortController().signal), /DRAFT_INCOMPLETE/);
+  replies = [completed(JSON.stringify({ ...plan, calendar: { start: 'Friday' } }))];
   assert.ok('clarification' in await generate([], 'calendar', undefined, new AbortController().signal));
+});
+
+test('section generation uses one bounded continuation and never publishes a second incomplete response', async () => {
+  const completed = (text: string) => ({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] });
+  const plan = completed(JSON.stringify({ clarification: '', title: '长文', summary: '结构化长文。',
+    sections: [{ heading: '风险', brief: '分析风险和缓解措施。' }], calendar: null }));
+  const bodies: any[] = [];
+  let replies: any[] = [plan, { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+    output: [{ type: 'message', content: [{ type: 'output_text', text: '第一部分尚未结束' }] }] }, completed('，这里完成。')];
+  const request = async (_url: any, init: any) => { bodies.push(JSON.parse(init.body)); return new Response(JSON.stringify(replies.shift())); };
+  const generate = createDraftGenerator({ OPENAI_API_KEY: 'fake' }, request);
+  const result = await generate([{ role: 'user', content: '写一份长文' }], 'document', undefined, new AbortController().signal);
+  assert.ok('document' in result); assert.match(result.document.markdown, /第一部分尚未结束\n，?这里完成/);
+  assert.equal(bodies.length, 3); assert.match(bodies[2].instructions, /only continuation attempt/i);
+  assert.match(JSON.parse(bodies[2].input[0].content).alreadyWritten, /第一部分尚未结束/);
+
+  replies = [plan, { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+    output: [{ type: 'message', content: [{ type: 'output_text', text: '片段' }] }] },
+    { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }];
+  await assert.rejects(generate([{ role: 'user', content: '再写一份长文' }], 'document', undefined, new AbortController().signal),
+    /DRAFT_CONTINUATION_INCOMPLETE/);
+});
+
+test('document generation settings are bounded and fail closed at startup', () => {
+  assert.deepEqual(readDraftGenerationConfig({}), { maxOutputTokens: 6000, timeoutMs: 90000 });
+  assert.deepEqual(readDraftGenerationConfig({ OPENAI_DOCUMENT_MAX_OUTPUT_TOKENS: '8000', OPENAI_DOCUMENT_TIMEOUT_MS: '120000' }),
+    { maxOutputTokens: 8000, timeoutMs: 120000 });
+  assert.throws(() => readDraftGenerationConfig({ OPENAI_DOCUMENT_MAX_OUTPUT_TOKENS: '999999' }));
+  assert.throws(() => readDraftGenerationConfig({ OPENAI_DOCUMENT_TIMEOUT_MS: 'five minutes' }));
 });
 
 test('document entity hints preserve unusual event titles, project codenames, tickets and quoted names', () => {
