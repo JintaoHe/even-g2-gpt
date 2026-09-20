@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { ConversationStore } from '../src/conversation-store.js';
+import { reopenRestoredConversationStore } from '../src/conversation-restore-verify-cli.js';
 import { JobStore } from '../src/job-store.js';
 // The production verifier stays dependency-free JavaScript so it can run from
 // /usr/local/lib without the source checkout.
@@ -45,11 +46,40 @@ test('backup verifier checks conversation integrity and the restored store can r
   assert.equal(report.conversation.latestSequence, 2);
   assert.equal(report.conversation.summaryThroughSequence, 2);
 
+  const health = await reopenRestoredConversationStore(root, root);
+  assert.ok(health.schemaVersion >= 3);
   const reopened = await ConversationStore.create(root);
-  try {
-    assert.equal(reopened.getSession(sessionId)?.status, 'ended');
-    assert.equal(reopened.listMessages(sessionId, 0, 10).length, 2);
-  } finally { await reopened.close(); }
+  try { assert.equal(reopened.getSession(sessionId)?.status, 'ended'); }
+  finally { await reopened.close(); }
+});
+
+test('calendar-enabled backups require the ledger and both OAuth JSON files', async () => {
+  const { root } = await restoredFixture();
+  await assert.rejects(verifyBackupRoot(root, { expectedRoot: root, calendarEnabled: true }), /Calendar-enabled/i);
+  const decoy = join(root, 'nested'); await mkdir(decoy);
+  const decoyCalendar = new DatabaseSync(join(decoy, 'google-calendar.sqlite'));
+  try { decoyCalendar.exec('CREATE TABLE operations (id TEXT PRIMARY KEY, data TEXT NOT NULL)'); }
+  finally { decoyCalendar.close(); }
+  await writeFile(join(decoy, 'google-oauth-client.json'), '{}');
+  await writeFile(join(decoy, 'google-calendar-auth.json'), '{}');
+  await assert.rejects(verifyBackupRoot(root, { expectedRoot: root, calendarEnabled: true }), /Calendar-enabled/i);
+  const calendar = new DatabaseSync(join(root, 'google-calendar.sqlite'));
+  try { calendar.exec('CREATE TABLE operations (id TEXT PRIMARY KEY, data TEXT NOT NULL)'); }
+  finally { calendar.close(); }
+  await writeFile(join(root, 'google-oauth-client.json'), JSON.stringify({ web: { client_id: 'synthetic' } }));
+  await writeFile(join(root, 'google-calendar-auth.json'), JSON.stringify({ refresh_token: 'synthetic' }));
+  const report = await verifyBackupRoot(root, { expectedRoot: root, calendarEnabled: true });
+  assert.equal(report.foundCalendar, true);
+  assert.equal(report.foundOAuthClient, true);
+  assert.equal(report.foundCalendarAuth, true);
+});
+
+test('backup verifier rejects a jobs database that still has a live owner row', async () => {
+  const { root } = await restoredFixture();
+  const jobs = new DatabaseSync(join(root, 'jobs.sqlite'));
+  try { jobs.prepare('INSERT OR REPLACE INTO service_owner VALUES (1,?,?,?)').run('owner', 123, 'host'); }
+  finally { jobs.close(); }
+  await assert.rejects(verifyBackupRoot(root, { expectedRoot: root }), /Jobs database.*released ownership/i);
 });
 
 test('backup verifier rejects foreign-key damage without echoing transcript content', async () => {

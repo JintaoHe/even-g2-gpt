@@ -31,7 +31,8 @@ import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type Planning
 import { CostLedger } from './cost-ledger.js';
 import { createMeteredOpenAIFetch } from './metered-openai.js';
 import { ConversationStore, ResumeCredentialError } from './conversation-store.js';
-import { readConversationMaintenanceConfig, runConversationMaintenance } from './conversation-maintenance.js';
+import { runConversationMaintenance } from './conversation-maintenance.js';
+import { readConversationStartupConfig } from './conversation-startup-config.js';
 import { StoreConversationPersistence } from './conversation-persistence.js';
 import { ContextBuilder } from './context-builder.js';
 import { OpenAISessionSummaryGenerator, SessionSummaryService } from './session-summary.js';
@@ -59,8 +60,11 @@ export function createConversationServer(options: {
   /** Test override. Production refreshes at two-thirds of the resume window. */
   resumeCredentialRefreshMs?: number;
   ownerScope?: string;
-  /** Enables fixed, non-arbitrary simulator controls. Never valid with a public host. */
-  allowLocalTestControls?: boolean;
+  /** Fixed, non-arbitrary simulator controls. Never valid with a public host. */
+  localTestControls?: { read: boolean; write: boolean };
+  /** Application-level peer detection; tests may shorten these values. */
+  heartbeatIntervalMs?: number;
+  heartbeatTimeoutMs?: number;
   models?: { intent: string; reply: string };
   capabilities?: { provider: string; delivery: string; webSearch: boolean; speech: boolean; speechProvider?: string; location?: boolean; routes?: boolean;
     environment?: boolean; conditionalTasks?: boolean };
@@ -90,8 +94,11 @@ export function createConversationServer(options: {
     const parsed = new URL(origin);
     if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) throw new Error('Invalid allowed origin');
   }
-  if (options.allowLocalTestControls && publicHosts.size) {
+  if ((options.localTestControls?.read || options.localTestControls?.write) && publicHosts.size) {
     throw new Error('Local test controls are restricted to loopback development servers');
+  }
+  if (options.localTestControls?.write && !options.localTestControls.read) {
+    throw new Error('Write test controls require read test controls');
   }
   const hostAllowed = (host: string) => localHost.test(host) || publicHosts.has(host.toLowerCase());
   const originAllowed = (host: string, origin?: string) => !origin
@@ -183,12 +190,19 @@ export function createConversationServer(options: {
     }
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 32768 });
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 20_000;
+  const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 10_000;
+  if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs < 10
+    || !Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs < 10) {
+    throw new Error('Invalid WebSocket heartbeat configuration');
+  }
   http.on('upgrade', (req, socket, head) => {
     const host = req.headers.host ?? '', origin = req.headers.origin;
     if (req.url !== '/ws/conversation' || !hostAllowed(host)
-      || !originAllowed(host, origin) || wss.clients.size >= 4) { socket.destroy(); return; }
+      || !originAllowed(host, origin)) { socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, client => wss.emit('connection', client, req));
   });
+  const unauthenticatedSockets = new Set<WebSocket>();
   type MailApproval = { id: string; token: string; expires: number; retryAttempt?: number };
   type ServerSessionRuntime = ManagedSessionRuntime<Event> & {
     conversation: Conversation;
@@ -199,7 +213,7 @@ export function createConversationServer(options: {
     locationDialogue?: LocationDialogue;
     artifactSource(): Message[];
     mailApproval?: MailApproval;
-    setCaptureStop(stop: (() => void) | undefined): void;
+    setCaptureStop(connectionId: string, stop: (() => void) | undefined): void;
   };
   const resumeWindowMs = options.resumeWindowMs ?? 15 * 60_000;
   const resumeCredentialTtlMs = Math.min(resumeWindowMs + 60_000, 16 * 60_000);
@@ -209,7 +223,8 @@ export function createConversationServer(options: {
     || resumeCredentialRefreshMs >= resumeCredentialTtlMs) throw new Error('Invalid resume credential refresh interval');
   const store = options.conversationStore;
   const buildRuntime = async (id: string, hydrate = false): Promise<ServerSessionRuntime> => {
-    let sink: ((event: Event) => void) | undefined, captureStop: (() => void) | undefined;
+    let sink: ((event: Event) => void) | undefined;
+    let captureStop: { connectionId: string; stop: () => void } | undefined;
     let conversation!: Conversation;
     let ended = false, started = false;
     const send = (event: Event) => sink?.(event);
@@ -254,7 +269,7 @@ export function createConversationServer(options: {
     const model = planningEvidenceDialogue ?? locationDialogue ?? calendarDialogue ?? delivery ?? options.model;
     let runtime!: ServerSessionRuntime;
     const invalidate = () => {
-      captureStop?.(); delivery?.invalidate(); runtime.mailApproval = undefined;
+      captureStop?.stop(); delivery?.invalidate(); runtime.mailApproval = undefined;
       calendarControl?.invalidate(); calendarDialogue?.invalidate(); locationDialogue?.invalidate();
     };
     const baseContextBuilder = new ContextBuilder();
@@ -320,8 +335,14 @@ export function createConversationServer(options: {
         if (next) { start(); store?.markSessionAttached(id, Date.now()); }
         else if (store && ['active', 'idle'].includes(store.getSession(id)?.status ?? '')) store.markSessionDetached(id, Date.now());
       },
+      async detach(_reason) {
+        // Connection-bound capture and approvals are revoked, but the durable
+        // model turn keeps running without an event sink and may still commit.
+        invalidate();
+        locationBroker.cancel();
+      },
       async interrupt(_reason: SessionInterruptReason) {
-        captureStop?.(); invalidate(); locationBroker.cancel(); conversation.interrupt();
+        captureStop?.stop(); invalidate(); locationBroker.cancel(); conversation.interrupt();
       },
       async dispose(reason: SessionDisposeReason) {
         invalidate(); locationBroker.cancel(); locationBroker.clear();
@@ -334,7 +355,10 @@ export function createConversationServer(options: {
         else if (reason === 'expired') store.expireSession(id, Date.now());
         else store.markSessionDetached(id, Date.now());
       },
-      setCaptureStop(stop) { captureStop = stop; },
+      setCaptureStop(connectionId, stop) {
+        if (stop) captureStop = { connectionId, stop };
+        else if (captureStop?.connectionId === connectionId) captureStop = undefined;
+      },
     };
     return runtime;
   };
@@ -351,7 +375,12 @@ export function createConversationServer(options: {
   sessionSweep.unref();
 
   wss.on('connection', (client, request) => {
-    const connectionId = randomUUID(); let authenticated = false, closed = false, generation = 0, protocolV2 = false;
+    const connectionId = randomUUID(); let authenticated = false, authSlotHeld = true, closed = false, generation = 0, protocolV2 = false;
+    unauthenticatedSockets.add(client);
+    if (unauthenticatedSockets.size > 4) {
+      const oldest = unauthenticatedSockets.values().next().value as WebSocket | undefined;
+      if (oldest && oldest !== client) { unauthenticatedSockets.delete(oldest); oldest.terminate(); }
+    }
     const remote = request.socket.remoteAddress ?? '';
     const localTestConnection = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote);
     let expireOnClose = false, credentialRefresh: NodeJS.Timeout | undefined;
@@ -360,6 +389,12 @@ export function createConversationServer(options: {
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
     let unsubscribeCalendarHealth: (() => void) | undefined;
+    let pongDeadline: NodeJS.Timeout | undefined;
+    const releaseAuthSlot = () => {
+      if (!authSlotHeld) return;
+      authSlotHeld = false;
+      unauthenticatedSockets.delete(client);
+    };
     const send = (event: Event) => {
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 262144) client.send(JSON.stringify(event));
       else client.close(1013, 'Client too slow');
@@ -412,6 +447,19 @@ export function createConversationServer(options: {
       const job = current; current = undefined; job?.finish(); send({ type: 'speech.ended', segment_id: segmentId });
     });
     const authTimer = setTimeout(() => client.close(1008, 'Auth timeout'), 5000);
+    const heartbeat = setInterval(() => {
+      if (client.readyState !== WebSocket.OPEN || pongDeadline) return;
+      try {
+        client.ping();
+        pongDeadline = setTimeout(() => client.terminate(), heartbeatTimeoutMs);
+        pongDeadline.unref();
+      } catch { client.terminate(); }
+    }, heartbeatIntervalMs);
+    heartbeat.unref();
+    client.on('pong', () => {
+      if (!pongDeadline) return;
+      clearTimeout(pongDeadline); pongDeadline = undefined;
+    });
     const idle = setInterval(() => {
       if (authenticated && session?.conversation.state === 'listening' && !detector.active && slots.length === 0
         && Date.now() - lastActivity >= (options.idleMs ?? 180000)) {
@@ -443,8 +491,8 @@ export function createConversationServer(options: {
           createdAt: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
       }
       session = binding.runtime as ServerSessionRuntime;
-      session.setCaptureStop(clearCapture);
-      authenticated = true; clearTimeout(authTimer);
+      session.setCaptureStop(connectionId, clearCapture);
+      authenticated = true; releaseAuthSlot(); clearTimeout(authTimer);
       const lastSeen = protocolV2 && Number.isSafeInteger(msg.last_seen_sequence) && msg.last_seen_sequence >= 0 ? msg.last_seen_sequence : 0;
       const sessionRecord = store?.getSession(binding.sessionId);
       const recoverable = store?.latestRecoverableTurn(binding.sessionId);
@@ -517,7 +565,7 @@ export function createConversationServer(options: {
         if (protocolV2 && ['text.submit', 'turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry',
           'exit.request', 'exit.confirm', 'test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
           'test.storage.cleanup_preview', 'test.storage.cleanup_apply'].includes(String(msg.type))) msg = parseCoreClientMessage(msg, {
-            allowLocalTestControls: options.allowLocalTestControls === true && localTestConnection,
+            allowLocalTestControls: localTestConnection && (options.localTestControls?.read === true || options.localTestControls?.write === true),
           });
         const active = session!;
         const conversation = active.conversation, delivery = active.delivery, calendarControl = active.calendarControl;
@@ -652,7 +700,7 @@ export function createConversationServer(options: {
             if (msg.confirm) { await registry.end(active.id); client.close(1000, 'Conversation ended'); }
             break;
           case 'test.session.expire':
-            if (!options.allowLocalTestControls || !localTestConnection) throw new Error('Test control disabled');
+            if (!options.localTestControls?.write || !localTestConnection) throw new Error('Test control disabled');
             expireOnClose = true;
             send({ type: 'notice', text: '正在模拟恢复窗口过期；重连后应创建新会话。' });
             client.close(1000, 'Simulated session expiry');
@@ -661,14 +709,19 @@ export function createConversationServer(options: {
           case 'test.storage.seed_expired':
           case 'test.storage.cleanup_preview':
           case 'test.storage.cleanup_apply': {
-            if (!options.allowLocalTestControls || !localTestConnection || !store) throw new Error('Test control disabled');
+            const write = msg.type === 'test.storage.seed_expired' || msg.type === 'test.storage.cleanup_apply';
+            if (!options.localTestControls?.read || (write && !options.localTestControls.write)
+              || !localTestConnection || !store) throw new Error('Test control disabled');
             const retentionDays = 1095, ownerScope = 'local-retention-test', now = Date.now();
             if (msg.type === 'test.storage.seed_expired') {
               const endedAt = now - retentionDays * 24 * 60 * 60 * 1000 - 60_000;
-              const fixtureId = randomUUID();
-              store.createSession({ id: fixtureId, ownerScope, createdAt: endedAt - 1,
-                initialTopic: { id: randomUUID(), label: 'Retention test fixture' } });
-              store.endSession(fixtureId, endedAt, 'retention_test_fixture');
+              const existing = store.cleanupExpiredSessions({ retentionDays, now, dryRun: true, ownerScope });
+              if (existing.eligibleSessions === 0) {
+                const fixtureId = randomUUID();
+                store.createSession({ id: fixtureId, ownerScope, createdAt: endedAt - 1,
+                  initialTopic: { id: randomUUID(), label: 'Retention test fixture' } });
+                store.endSession(fixtureId, endedAt, 'retention_test_fixture');
+              }
             }
             const apply = msg.type === 'test.storage.cleanup_apply';
             const retention = store.cleanupExpiredSessions({ retentionDays, now, dryRun: !apply, ownerScope });
@@ -695,9 +748,10 @@ export function createConversationServer(options: {
     client.on('message', (raw, binary) => { incoming = incoming.then(() => handleMessage(raw, binary)); });
     client.on('error', () => client.close());
     client.on('close', () => {
-      closed = true; clearTimeout(authTimer); clearInterval(idle); clearTimeout(lifetime); clearTimeout(credentialRefresh);
+      closed = true; releaseAuthSlot(); clearTimeout(authTimer); clearInterval(heartbeat); clearTimeout(pongDeadline);
+      clearInterval(idle); clearTimeout(lifetime); clearTimeout(credentialRefresh);
       unsubscribeCalendarHealth?.();
-      clearCapture(); session?.setCaptureStop(undefined);
+      clearCapture(); session?.setCaptureStop(connectionId, undefined);
       const sessionId = session?.id;
       void registry.detach(connectionId).then(() => expireOnClose && sessionId ? registry.expireDetached(sessionId) : undefined);
     });
@@ -732,10 +786,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const key = process.env.OPENAI_API_KEY, token = process.env.G2_CLIENT_TOKEN;
   if (!token) throw new Error('Set G2_CLIENT_TOKEN in .env');
   const dataDirectory = resolve(process.env.EVEN_DATA_DIR ?? '.local');
-  const resumeMinutes = Number(process.env.SESSION_RESUME_WINDOW_MINUTES ?? 15);
-  if (!Number.isSafeInteger(resumeMinutes) || resumeMinutes < 1 || resumeMinutes > 15) {
-    throw new Error('SESSION_RESUME_WINDOW_MINUTES must be an integer from 1 to 15');
-  }
+  // Parse every setting that can fail before a store is opened or migrated.
+  const startup = readConversationStartupConfig(process.env);
   const mail = createMailSender();
   const costs = await CostLedger.create(resolve(dataDirectory, 'cost-ledger.json'), process.env, createCostAlertSender());
   const openaiFetch = createMeteredOpenAIFetch(costs);
@@ -746,7 +798,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const environmentProvider = createEnvironmentProvider(process.env, costs);
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer(process.env, openaiFetch));
   const conversationStore = await ConversationStore.create(dataDirectory);
-  const maintenanceConfig = readConversationMaintenanceConfig(process.env);
+  const maintenanceConfig = startup.maintenance;
   let maintenance: Promise<void> | undefined;
   const maintain = () => maintenance ??= runConversationMaintenance(conversationStore, maintenanceConfig).then(result => {
     const report = { retention_days: result.retention.retentionDays, retention_enabled: result.retention.enabled,
@@ -787,8 +839,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     conversationStore,
     storageWarningBytes: maintenanceConfig,
     sessionSummary,
-    resumeWindowMs: resumeMinutes * 60_000,
-    allowLocalTestControls: !publicHost,
+    resumeWindowMs: startup.resumeWindowMs,
+    localTestControls: startup.localTestControls,
     jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner(process.env, openaiFetch) : undefined,
     calendarItineraryPlanner: calendar && hybrid.provider === 'api' && key
       ? createCalendarItineraryPlanner(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',

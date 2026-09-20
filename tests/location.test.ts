@@ -74,6 +74,15 @@ test('manual route cache rejects low-accuracy fixes', () => {
   } }, now)), false);
 });
 
+test('cancelling a pending client request does not clear the resumable session fix', async () => {
+  const broker = new LocationRequestBroker(() => {}, () => '123e4567-e89b-12d3-a456-426614174000', 1000, () => now);
+  assert.equal(broker.prime(parseLocationReport({ type: 'location.report', mode: 'once', location: {
+    latitude: 41.58, longitude: -93.62, accuracy: 12, timestamp: now,
+  } }, now)), true);
+  broker.cancel();
+  assert.equal((await broker.request(new AbortController().signal)).latitude, 41.58);
+});
+
 test('device timezone is only a hint; a resolved session timezone survives coordinate clearing', () => {
   const broker = new LocationRequestBroker(() => {}, () => '123e4567-e89b-12d3-a456-426614174000', 1000, () => now);
   assert.equal(broker.prime(parseLocationReport({ type: 'location.report', mode: 'once', location: {

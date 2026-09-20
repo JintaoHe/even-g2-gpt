@@ -135,7 +135,7 @@ For this personal deployment, the application now enforces a persistent `$80` mo
 ## Security and privacy boundaries
 
 - Commit source, synthetic fixtures, and documentation only—not `.env`, OAuth JSON, CLI authentication, recordings, private conversations, generated documents, or runtime databases.
-- Exact GPS coordinates live only in volatile session adapters. They refresh at most every 10 seconds, become unusable after two minutes, never enter Luna/search/history/logs/artifacts, and are cleared on stop, disconnect, or session exit.
+- Exact GPS coordinates live only in volatile session adapters. They refresh at most every 10 seconds, become unusable after two minutes, never enter Luna/search/history/logs/artifacts, and may survive a transport disconnect inside the same resumable session; explicit session exit or final expiry clears them.
 - Calendar and email credentials stay in the backend. The model cannot select arbitrary recipients, read arbitrary server files, or directly execute a shell.
 - A cognitive mode, previous confirmation, or model statement never grants write permission. Every side effect is revalidated against its current preview.
 - Unknown Calendar/email write results are checked rather than automatically replayed, preventing duplicate events or messages.

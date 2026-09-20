@@ -699,7 +699,7 @@ npm run audit:public
 
 1. 正式环境和 simulator 都使用 15 分钟恢复窗口；simulator 提供严格受限的开发过期按钮；
 2. 默认保存三年（`SESSION_RETENTION_DAYS=1095`），`0` 只作为明确关闭自动清理的可选值；
-3. 普通回答断线后标记中断，只有用户明确请求时才补发 committed 回答或新建 turn 重新回答；
+3. 普通连接断开只移除 viewer 并取消依赖客户端的 capture／location 工作；已经开始的模型回答继续完成并提交 SQLite。只有明确 end、最终 expire 或 service shutdown 才完整 interrupt；用户仍可明确请求补发最近的 committed 回答；
 4. 第二个输入客户端默认拒绝；
 5. Calendar／Email 先核对 provider/audit 状态，无法确认时绝不自动重放；需要修改或再次发送时重新预览、确认；
 6. 按 5 个 PR 和逐项 gate 顺序实施。
@@ -707,3 +707,17 @@ npm run audit:public
 7. 允许把第 4.1 节所述的短期、受限、可吊销 resume credential 存入 Even SDK local storage；主 `G2_CLIENT_TOKEN` 仍不得持久化。
 
 本计划已获批准。实施必须遵守逐项测试和停止 gate，不因批准而跳过验证。
+
+## 12. Recovery hardening Rev 6（取代旧的后续 PR 顺序）
+
+本节记录 2026-09-20 owner 批准的冷启动恢复要求。它不改写已经完成的 PR 1–5 历史；从当前 `main` 开始，后续实现按以下七个独立 PR gate 推进：
+
+1. **Recovery Safety：** 启动前统一校验 migration-sensitive 配置；测试控件默认关闭并拆分 read/write；storage warning 真正触发 health 告警；Calendar-enabled backup 完整性、current-code restore open、pre-update 数据快照与失败回滚；同时提前加入 20 秒 ping + 10 秒 pong deadline 的服务端 heartbeat。
+2. **Even Host Storage：** 通过 `bridge.getLocalStorage`／`setLocalStorage` 建立异步 host-side adapter，把现有短期 resume credential 从 browser storage 安全迁走；主 token 永不持久化。
+3. **Recovery Test Harness：** 在任何生命周期重构之前提供 simulator forced cold-start／kill 控件和 raw half-open integration test，使后续每个 PR 都能重放真实故障。
+4. **Scoped Device Credential：** 新表、第三种 hello、可吊销 device scope、persisted ACK，以及有明确到期上界的双代 credential 窗口；`setLocalStorage` 只有返回 `true` 才可 ACK。
+5. **Lifecycle and Connection Liveness：** `FOREGROUND_ENTER_EVENT` reconnect、非破坏性 pagehide、认证前后容量边界、同一 `client_id` 持有效 credential 抢占旧 lease、connection-owned capture hook、audio `requires_reopen`。registry 现有 late-close guard 保留，不重复实现。
+6. **Durable Draft and Side-effect Recovery：** 持久化可恢复草稿和 recovery manifest；Calendar／Email 的 `sending`／`unknown` 必须查服务端最终状态，不能盲目重放；冷启动后重新 preview、重新确认，旧 approval 失效。Calendar operation 的 id／期望短语／expiry／state 继续保存在 ledger；用户说出口的授权和“已经同意”事实不得持久化。ordinal candidates、route/location context 维持 ephemeral，冷启动后需要重新查询。
+7. **Physical Acceptance：** 真机重复 cold start、锁屏、network switching、memory pressure、audio wedge、15 分钟窗口和 Calendar／Email duplicate-protection 验收。
+
+硬边界：每次 plugin 启动都按 cold boot 设计；15 分钟内恢复同一 session，超时创建新 session 且不弹 master token；SQLite 对 sessions/messages/turns/summaries/jobs/calendar operations/durable drafts 是权威来源。只要某一 PR 的目标测试、完整回归、安全扫描或人工 gate 不通过，就停止，不开始下一个 PR。

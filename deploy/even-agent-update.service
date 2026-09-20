@@ -32,4 +32,4 @@ LockPersonality=true
 RemoveIPC=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/opt/even-agent /var/lib/even-agent-updater /run/lock
+ReadWritePaths=/opt/even-agent /var/lib/even-agent-updater /var/lib/even-agent /run/lock

@@ -37,7 +37,7 @@ async function listen(store: ConversationStore, model: DialogueModel) {
 test('local session and storage test controls cannot be exposed by a configured public server', () => {
   const model: DialogueModel = { decide: async () => 'respond', reply: async () => {} };
   assert.throws(() => createConversationServer({ token, model, transcriber: unusedTranscriber,
-    allowLocalTestControls: true,
+    localTestControls: { read: true, write: true },
     ingress: { publicHosts: ['calendar.eveng2assistant.com'], allowedOrigins: ['https://calendar.eveng2assistant.com'] },
   }), /loopback/i);
 });
@@ -186,7 +186,53 @@ test('a second live protocol v2 input client is rejected without stealing the fi
   }
 });
 
-test('an interrupted answer is regenerated only after explicit retry and links the new turn', { timeout: 10_000 }, async () => {
+test('four unauthenticated sockets cannot prevent the owner from authenticating', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-auth-capacity-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
+  const server = await listen(store, model);
+  const anonymous: WebSocket[] = [];
+  try {
+    for (let index = 0; index < 4; index++) {
+      const socket = new WebSocket(server.url); anonymous.push(socket); await once(socket, 'open');
+    }
+    const owner = new WebSocket(server.url); await once(owner, 'open');
+    anonymous.push(owner);
+    const ready = waitFor(owner, 'ready');
+    owner.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
+    assert.equal((await ready).resumed, false);
+  } finally {
+    for (const socket of anonymous) socket.terminate();
+    await server.app.close(); await store.close();
+  }
+});
+
+test('heartbeat terminates a peer that does not pong and releases its lease', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-heartbeat-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
+  const app = createConversationServer({ token, model, conversationStore: store, transcriber: unusedTranscriber,
+    heartbeatIntervalMs: 20, heartbeatTimeoutMs: 60,
+    capabilities: { provider: 'api', delivery: 'api', webSearch: false, speech: false } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
+  const clientId = randomUUID();
+  const silent = new WebSocket(url, { autoPong: false } as any); await once(silent, 'open');
+  const readyPromise = waitFor(silent, 'ready');
+  silent.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token }));
+  const ready = await readyPromise;
+  await once(silent, 'close');
+
+  const replacement = new WebSocket(url); await once(replacement, 'open');
+  try {
+    const resumedPromise = waitFor(replacement, 'ready');
+    replacement.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+      resume_session_id: ready.session_id, resume_credential: ready.resume_credential, last_seen_sequence: 0 }));
+    assert.equal((await resumedPromise).resumed, true);
+  } finally { replacement.terminate(); await app.close(); await store.close(); }
+});
+
+test('a detached viewer does not abort an answer that can finish and commit without an event sink', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-interrupted-'));
   const store = await ConversationStore.create(root);
   let calls = 0, release!: () => void;
@@ -194,8 +240,7 @@ test('an interrupted answer is regenerated only after explicit retry and links t
   const model: DialogueModel = {
     decide: async () => 'respond',
     reply: async (_history, _signal, delta) => {
-      if (++calls === 1) { delta('partial'); await blocked; return; }
-      delta('recovered answer');
+      calls++; delta('partial'); await blocked; delta(' complete');
     },
   };
   const server = await listen(store, model), clientId = randomUUID();
@@ -207,12 +252,13 @@ test('an interrupted answer is regenerated only after explicit retry and links t
   first.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: 'long question' }));
   await partial;
   first.terminate(); await once(first, 'close');
-  for (let attempt = 0; attempt < 20 && store.listMessages(ready.session_id).at(-1)?.status !== 'interrupted'; attempt++) {
+  release();
+  for (let attempt = 0; attempt < 100 && store.listMessages(ready.session_id).at(-1)?.status !== 'committed'; attempt++) {
     await new Promise(resolve => setImmediate(resolve));
   }
-  release();
-  const interrupted = store.latestRecoverableTurn(ready.session_id)!;
-  assert.equal(interrupted.output?.status, 'interrupted');
+  const completed = store.latestRecoverableTurn(ready.session_id)!;
+  assert.equal(completed.output?.status, 'committed');
+  assert.equal(completed.output?.content, 'partial complete');
 
   const second = new WebSocket(server.url); await once(second, 'open');
   try {
@@ -220,15 +266,9 @@ test('an interrupted answer is regenerated only after explicit retry and links t
     second.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
       resume_session_id: ready.session_id, resume_credential: ready.resume_credential, last_seen_sequence: 0 }));
     const resumed = await resumedPromise;
-    assert.equal(resumed.snapshot.interrupted_turn_id, interrupted.turn.id);
-    const donePromise = waitFor(second, 'answer.done', event => !event.replayed);
-    second.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(),
-      text: '刚才的回答中断了，请重新回答。' }));
-    await donePromise;
-    assert.equal(calls, 2);
-    const retried = store.latestRecoverableTurn(ready.session_id)!;
-    assert.equal(retried.turn.retryOfTurnId, interrupted.turn.id);
-    assert.equal(retried.output?.content, 'recovered answer');
+    assert.equal(resumed.snapshot.interrupted_turn_id, undefined);
+    assert.equal(resumed.snapshot.messages.at(-1)?.content, 'partial complete');
+    assert.equal(calls, 1);
   } finally { second.terminate(); await server.app.close(); await store.close(); }
 });
 
@@ -237,7 +277,7 @@ test('loopback-only test control detaches then expires the session immediately',
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
   const app = createConversationServer({ token, model, conversationStore: store, transcriber: unusedTranscriber,
-    allowLocalTestControls: true });
+    localTestControls: { read: true, write: true } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
   const client = new WebSocket(url); await once(client, 'open');
@@ -255,6 +295,28 @@ test('loopback-only test control detaches then expires the session immediately',
   } finally { client.terminate(); await app.close(); await store.close(); }
 });
 
+test('read-only local test controls cannot invoke a database mutation', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-read-controls-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
+  const app = createConversationServer({ token, model, conversationStore: store, transcriber: unusedTranscriber,
+    localTestControls: { read: true, write: false } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  const client = new WebSocket(`ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`);
+  await once(client, 'open');
+  try {
+    let response = waitFor(client, 'ready');
+    client.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
+    await response;
+    response = waitFor(client, 'test.storage.report');
+    client.send(JSON.stringify({ type: 'test.storage.inspect', command_id: randomUUID() }));
+    assert.equal((await response).action, 'inspect');
+    const error = waitFor(client, 'error');
+    client.send(JSON.stringify({ type: 'test.storage.seed_expired', command_id: randomUUID() }));
+    assert.equal((await error).code, 'INVALID_MESSAGE');
+  } finally { client.terminate(); await app.close(); await store.close(); }
+});
+
 test('loopback storage lab reports safe metadata and cleans only fixed retention fixtures', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-storage-lab-'));
   const store = await ConversationStore.create(root);
@@ -263,7 +325,7 @@ test('loopback storage lab reports safe metadata and cleans only fixed retention
   store.endSession(oldRealId, oldAt, 'user_exit');
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
   const app = createConversationServer({ token, model, conversationStore: store, transcriber: unusedTranscriber,
-    allowLocalTestControls: true });
+    localTestControls: { read: true, write: true } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
   const client = new WebSocket(url); await once(client, 'open');
@@ -284,6 +346,8 @@ test('loopback storage lab reports safe metadata and cleans only fixed retention
 
     const seeded = await command('test.storage.seed_expired');
     assert.equal(seeded.retention.test_eligible_sessions, 1);
+    const seededAgain = await command('test.storage.seed_expired');
+    assert.equal(seededAgain.retention.test_eligible_sessions, 1);
     const preview = await command('test.storage.cleanup_preview');
     assert.equal(preview.retention.test_eligible_sessions, 1);
     assert.equal(preview.retention.deleted_sessions, 0);

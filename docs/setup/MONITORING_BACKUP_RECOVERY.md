@@ -12,7 +12,7 @@
 | backup timer | 短暂停止应用，归档整个私有数据目录并校验恢复副本 | 不上传备份，不覆盖生产数据 |
 | Lightsail snapshot | 主机级灾难恢复 | 不代替应用数据一致性检查 |
 
-公开 `/healthz` 只返回 `{"status":"ok"}`。Calendar 探测和 metadata-only storage health 分别只存在于回环地址 `/internal/health/calendar` 与 `/internal/health/storage`，Caddy 不代理这些路径。storage health 不包含正文、session ID 或凭证。
+公开 `/healthz` 只返回 `{"status":"ok"}`。Calendar 探测和 metadata-only storage health 分别只存在于回环地址 `/internal/health/calendar` 与 `/internal/health/storage`，Caddy 不代理这些路径。storage health 不包含正文、session ID 或凭证。health timer 会对短暂 storage 读取失败进行最多五次有界重试；响应格式无效或出现容量 warning 时仍会失败并触发告警，而不是把 warning 当作健康。
 
 ## 安装监控文件
 
@@ -73,7 +73,7 @@ sudo systemctl start even-agent-backup.service
 sudo systemctl enable --now even-agent-backup.timer
 ```
 
-每天 09:00 UTC（芝加哥夏令时约 04:00、冬令时约 03:00）运行，最多随机延迟 15 分钟。备份会短暂停止应用，完成压缩与 checksum 后立即恢复；随后在隔离目录解压，解析有界 JSON，并对每个 SQLite 数据库运行 `PRAGMA integrity_check`。conversation DB 还执行 `foreign_key_check`、引用与 sequence 验证，并确认最新 session／committed message／summary metadata 可读；输出不包含正文。只有验证成功才会清理旧备份，最多保留 7 份。
+每天 09:00 UTC（芝加哥夏令时约 04:00、冬令时约 03:00）运行，最多随机延迟 15 分钟。备份会短暂停止应用，完成压缩与 checksum 后立即恢复；随后在隔离目录解压，解析有界 JSON，并对每个 SQLite 数据库运行 `PRAGMA integrity_check`。conversation DB 还执行 `foreign_key_check`、引用与 sequence 验证，并由当前 release 的代码真正重新打开一次，确保 schema／migration guard 可启动；conversation 和 jobs DB 都必须已经释放 service owner。启用 Google Calendar 时，备份还必须包含 Calendar ledger、OAuth client 配置和授权记录。输出不包含正文。只有验证成功才会清理旧备份，最多保留 7 份。
 
 ```bash
 systemctl list-timers even-agent-backup.timer --all
