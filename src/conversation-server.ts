@@ -256,9 +256,13 @@ export function createConversationServer(options: {
         messageId: message.id, sequence: message.sequence, status: message.status,
       }));
     };
+    const recoveryPersistence = <T extends object>(kind: 'calendar' | 'delivery') => store ? {
+      save(value: T) { store.putRecoveryDraft({ sessionId: id, kind, payload: value as Record<string, unknown>, at: Date.now() }); },
+      clear() { store.deleteRecoveryDraft(id, kind); },
+    } : undefined;
     const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
       (jobId, result) => { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); },
-      artifactSource) : undefined;
+      artifactSource, recoveryPersistence('delivery')) : undefined;
     const locationBroker = new LocationRequestBroker(send, randomUUID);
     const resolveCalendarTimezone = async (history: Message[], signal: AbortSignal) => {
       const cached = locationBroker.timezone();
@@ -271,7 +275,7 @@ export function createConversationServer(options: {
     const calendarControl = options.calendar ? new CalendarControl(options.calendar, send) : undefined;
     const calendarDialogue = options.calendar && options.calendarPlanner ? new CalendarDialogue(delivery ?? options.model, options.calendar, options.calendarPlanner,
       text => send({ type: 'notice', text }), Date.now, options.calendarAnswerer, options.calendarItineraryPlanner,
-      options.capabilities?.location === true ? resolveCalendarTimezone : undefined) : undefined;
+      options.capabilities?.location === true ? resolveCalendarTimezone : undefined, recoveryPersistence('calendar')) : undefined;
     const locationDialogue = options.routeProvider && options.capabilities?.location === true
       ? new LocationDialogue(calendarDialogue ?? delivery ?? options.model, locationBroker, options.routeProvider,
         process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', Date.now, options.model) : undefined;
@@ -324,14 +328,18 @@ export function createConversationServer(options: {
             messageId: message.id, sequence: message.sequence, status: message.status,
           };
         }));
+      await delivery?.restoreRecovery(store.getRecoveryDraft(id, 'delivery')?.payload);
+      await calendarDialogue?.restoreRecovery(store.getRecoveryDraft(id, 'calendar')?.payload);
     }
     const start = () => {
       if (started) return;
       started = true; options.model.startSession?.(); locationDialogue?.startSession();
     };
-    const finish = () => {
+    const finish = (clearRecovery: boolean) => {
       if (!started || ended) return;
-      ended = true; locationDialogue?.endSession(); calendarDialogue?.endSession(); options.model.endSession?.();
+      ended = true; locationDialogue?.endSession();
+      if (clearRecovery) { delivery?.endSession(); calendarDialogue?.endSession(); }
+      options.model.endSession?.();
     };
     runtime = {
       id,
@@ -359,7 +367,7 @@ export function createConversationServer(options: {
       async dispose(reason: SessionDisposeReason) {
         invalidate(); locationBroker.cancel(); locationBroker.clear();
         if (conversation.state !== 'closed') conversation.close();
-        finish();
+        finish(reason === 'ended' || reason === 'expired');
         if (!store) return;
         const current = store.getSession(id);
         if (!current || ['ended', 'expired'].includes(current.status)) return;
@@ -556,6 +564,10 @@ export function createConversationServer(options: {
           device_persist_deadline_at: deviceCredential.persistDeadlineAt } : {}),
         snapshot: { state: session.conversation.state, messages: snapshot,
           ...(recoverable?.turn.status === 'interrupted' ? { interrupted_turn_id: recoverable.turn.id } : {}) },
+        recovery: { calendar: session.calendarDialogue?.recoveryManifest() ?? null,
+          delivery: session.delivery?.recoveryManifest() ?? null,
+          uncertainMail: options.jobs?.list().filter(job => ['sending', 'unknown'].includes(job.mail_state ?? '')).length ?? 0,
+          uncertainCalendar: (options.calendar?.list().operations ?? []).filter(operation => ['sending', 'unknown'].includes(operation.state)).length },
         models: options.models, capabilities: { ...options.capabilities, email: !!options.mail, calendar: !!options.calendar } });
       pendingDeviceCredentialId = deviceCredential?.id;
       if (protocolV2 && store) {

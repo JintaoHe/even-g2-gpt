@@ -364,3 +364,29 @@ PR #38 已于 2026-09-20 squash merge 到 `main`，commit `07231e5`。
 ### Gate
 
 Lifecycle and Connection Liveness 的本地自动化、生产构建、公开仓库扫描与最终 diff review：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建 `.ehpk`，也没有提前实现 durable drafts。
+
+PR #39 已于 2026-09-20 squash merge 到 `main`，commit `20d0d4a`。
+
+## 2026-09-20 — Recovery hardening Rev 6 · PR 6 working tree
+
+### 实现
+
+- conversation SQLite schema 升至 v5，新增按 `session_id + kind` 唯一的 `recovery_drafts`。单项 JSON 上限 256 KiB、外键随 session 删除；只有 active／idle session 可写，明确结束或 15 分钟最终过期会删除草稿，普通 detach 与服务重启保留。
+- Email durable state 只保存完成 artifact 的 JobStore ID。冷启动从 JobStore 重建 MD／presentation／可选 ICS；不保存 approval token、收件人、SMTP credential 或“已经同意”。首个发送请求只重新预览，下一轮才可确认；`sending`／`unknown`／`accepted` 读取 ledger 并禁止盲目重发。
+- Calendar durable state 保存当前 draft、批次进度及 operation ID，不复制 operation ledger 的授权字段。query candidates、ordinal binding、read choice、route/location 和用户口头确认保持 ephemeral。冷启动先只读 reconcile：已成功则推进／完成，未知则阻塞，其他旧状态必须重新读取并生成预览。
+- `ready.recovery` 只返回有限状态摘要；恢复后的 Even client 主动请求 `jobs.list` 与 `calendar.list`，以服务端 SQLite／provider ledger 为权威。列表事件不会进入眼镜对话正文。
+- 正常 disconnect、pause、lease replacement 继续只撤销临时 authorization；`shutdown` 保留 durable draft，只有明确 end／expire 清除。所有恢复路径都要求新的不可变预览与独立确认。
+
+### 自动化结果
+
+1. Root full regression：371 个 tests 以 exit code 0 完成（`369 passed / 0 failed / 2 Windows platform skips`）。两个 skip 仍是 Windows 无权创建测试 symlink，Linux gate 需重跑。
+2. 新增 cold-start Calendar re-preview、Calendar uncertain reconciliation、Email JobStore hydration 与完整 server restart/resume 测试均通过。
+3. Even client full regression：`66 passed / 0 failed`。
+4. Root 与 Even client TypeScript：通过。
+5. Server-only build：通过；发布目录不含 browser lab、SDK、simulator、tests、credentials 或 local data。
+6. Even client production build：通过；release verifier 检查 2 个文件，未发现 debug fixture、source map、private key 或明显 credential。
+7. Public audit：278 个 staged source/document files 未发现禁止路径或 credential pattern；`git diff --check` 通过。
+
+### Gate
+
+Durable Draft and Side-effect Recovery 的本地自动化、production builds、公开仓库扫描与最终 diff review：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建 `.ehpk`；Physical Acceptance 仍须等待独立 PR 和真机 gate。

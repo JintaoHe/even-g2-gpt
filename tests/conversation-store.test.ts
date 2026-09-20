@@ -16,17 +16,17 @@ test('conversation store creates a private WAL database with idempotent migratio
   let store = await ConversationStore.create(root);
   const health = store.health();
   assert.deepEqual(health, {
-    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 4,
+    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 5,
   });
   await store.close();
 
   // Simulate a production database created by PR1 before summary jobs existed.
   const legacy = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
-  legacy.exec('DROP TABLE summary_jobs; DROP TABLE legacy_session_imports; DROP TABLE device_credentials; DELETE FROM schema_migrations WHERE version>=2;');
+  legacy.exec('DROP TABLE summary_jobs; DROP TABLE legacy_session_imports; DROP TABLE device_credentials; DROP TABLE recovery_drafts; DELETE FROM schema_migrations WHERE version>=2;');
   legacy.close();
 
   store = await ConversationStore.create(root);
-  assert.equal(store.health().schemaVersion, 4);
+  assert.equal(store.health().schemaVersion, 5);
   await store.close();
 
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
@@ -35,10 +35,11 @@ test('conversation store creates a private WAL database with idempotent migratio
       [{ version: 1, name: 'conversation-foundation' },
         { version: 2, name: 'durable-session-summary-jobs' },
         { version: 3, name: 'legacy-session-import-ledger' },
-        { version: 4, name: 'scoped-device-credentials' }]);
+        { version: 4, name: 'scoped-device-credentials' },
+        { version: 5, name: 'durable-recovery-drafts' }]);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(row => row.name);
     for (const table of ['sessions', 'clients', 'resume_credentials', 'topics', 'turns', 'messages', 'session_summaries',
-      'summary_jobs', 'legacy_session_imports', 'device_credentials']) {
+      'summary_jobs', 'legacy_session_imports', 'device_credentials', 'recovery_drafts']) {
       assert.ok(tables.includes(table), `missing table ${table}`);
     }
   } finally { db.close(); }
@@ -47,6 +48,37 @@ test('conversation store creates a private WAL database with idempotent migratio
     assert.equal((await lstat(root)).mode & 0o777, 0o700);
     assert.equal((await lstat(join(root, 'assistant-memory.sqlite'))).mode & 0o777, 0o600);
   }
+});
+
+test('recovery drafts are durable, bounded and removed only with a terminal session', async () => {
+  const root = await directory(), sessionId = randomUUID(), topicId = randomUUID();
+  let store = await ConversationStore.create(root);
+  const jobId = randomUUID();
+  store.createSession({ id: sessionId, ownerScope: 'single-user', createdAt: 100,
+    initialTopic: { id: topicId, label: 'General' } });
+  assert.deepEqual(store.putRecoveryDraft({ sessionId, kind: 'delivery', payload: { version: 1, jobId }, at: 110 }), {
+    sessionId, kind: 'delivery', payload: { version: 1, jobId }, createdAt: 110, updatedAt: 110,
+  });
+  const first = store.getRecoveryDraft(sessionId, 'delivery')!;
+  store.markSessionDetached(sessionId, 120);
+  await store.close();
+
+  store = await ConversationStore.create(root);
+  try {
+    assert.deepEqual(store.getRecoveryDraft(sessionId, 'delivery'), first);
+    store.putRecoveryDraft({ sessionId, kind: 'calendar', payload: { version: 1, draft: { kind: 'create', event: {
+      title: 'Recovery test', start: '2026-10-01T09:00-05:00', end: '2026-10-01T10:00-05:00',
+      timezone: 'America/Chicago', allDay: false, location: '', notes: '',
+    } } }, at: 130 });
+    assert.deepEqual(store.listRecoveryDrafts(sessionId).map(item => item.kind), ['calendar', 'delivery']);
+    assert.throws(() => store.putRecoveryDraft({ sessionId, kind: 'delivery',
+      payload: { version: 1, jobId, approvalToken: 'must-not-persist' }, at: 135 }), /invalid recovery draft/i);
+    assert.throws(() => store.putRecoveryDraft({ sessionId, kind: 'delivery',
+      payload: { value: 'x'.repeat(300_000) }, at: 140 }), /invalid recovery draft|too large/i);
+    store.endSession(sessionId, 150, 'user_exit');
+    assert.deepEqual(store.listRecoveryDrafts(sessionId), []);
+    assert.throws(() => store.putRecoveryDraft({ sessionId, kind: 'delivery', payload: { version: 1, jobId }, at: 160 }), /unavailable/i);
+  } finally { await store.close(); }
 });
 
 test('conversation store enforces one live owner and releases ownership on close', async () => {

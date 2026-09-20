@@ -9,14 +9,16 @@ import { wantsCalendarDetails, detailsFallback, type CalendarAnswerer } from './
 import { boundRecurrenceRequest, revisedRecurrenceNotes } from './calendar-recurrence.js';
 import { wantsSeparateItineraryCalendars, type CalendarItineraryPlanner } from './calendar-itinerary-planner.js';
 import { TimezoneClarificationError } from './timezone.js';
+import { parseCalendarRecoveryState, type CalendarRecoveryState, type CalendarRecoveryTarget,
+  type RecoveryPersistence } from './recovery-drafts.js';
 
 type Preview = Awaited<ReturnType<GoogleCalendarService['preview']>>;
 type Approval = Preview & { prompt: string };
 type ReadChoice = { items: CalendarItem[]; timezone: string; prompt: string; expires: number };
 type Draft = { kind: 'create' | 'update' | 'cancel'; event: CalendarEvent; before?: CalendarEvent;
-  eventId?: string; scope?: CalendarScope; context: CalendarContext; blocked?: boolean };
+  eventId?: string; scope?: CalendarScope; context: CalendarContext; blocked?: boolean; operationId?: string };
 type Batch = { events: CalendarEvent[]; index: number };
-type CancelBatch = { items: CalendarItem[]; retained: CalendarItem[]; index: number };
+type CancelBatch = { items: CalendarRecoveryTarget[]; retainedTitles: string[]; index: number };
 type CalendarTimezoneResolver = (history: Message[], signal: AbortSignal) => Promise<string>;
 
 function namedTimezone(text: string) {
@@ -108,7 +110,7 @@ function contextualCancelIntent(text: string, candidates: CalendarItem[]) {
   return new RegExp(`(?:帮我|请|把|将|这|那|都|全部|全都|其他|其余|剩下).{0,160}${cancel}|${cancel}.{0,160}(?:这|那|都|全部|全都|其他|其余|剩下|第\\d)`, 'i').test(text);
 }
 
-function eventTitle(item: CalendarItem, maximum = 32) {
+function eventTitle(item: { title: string }, maximum = 32) {
   const title = item.title.replace(/[\r\n\t]+/g, ' ').trim();
   return title.length > maximum ? `${title.slice(0, maximum - 1)}…` : title;
 }
@@ -181,9 +183,73 @@ export class CalendarDialogue implements DialogueModel {
     selected?: number | 'reject'; itinerary?: boolean; draftStatus?: boolean; acknowledgement?: string }>();
   constructor(private base: DialogueModel, private service: GoogleCalendarService, private planner: CalendarPlanner,
     private notify?: (text: string) => void, private now = Date.now, private answerDetails?: CalendarAnswerer,
-    private itineraryPlanner?: CalendarItineraryPlanner, private resolveTimezone?: CalendarTimezoneResolver) {}
-  invalidate() { if (this.approval) this.service.dismiss(this.approval.id); this.approval = undefined; this.readChoice = undefined; }
-  endSession() { this.invalidate(); this.draft = undefined; this.batch = undefined; this.cancelBatch = undefined; this.batchQuestion = undefined; this.context = { candidates: [] }; }
+    private itineraryPlanner?: CalendarItineraryPlanner, private resolveTimezone?: CalendarTimezoneResolver,
+    private recovery?: RecoveryPersistence<CalendarRecoveryState>) {}
+  private persistDraft() {
+    if (!this.draft) { this.recovery?.clear(); return; }
+    this.recovery?.save({ version: 1, draft: { kind: this.draft.kind, event: this.draft.event,
+      ...(this.draft.before ? { before: this.draft.before } : {}), ...(this.draft.eventId ? { eventId: this.draft.eventId } : {}),
+      ...(this.draft.scope ? { scope: this.draft.scope } : {}), ...(this.draft.blocked ? { blocked: true } : {}),
+      ...(this.draft.operationId ? { operationId: this.draft.operationId } : {}) },
+      ...(this.batch ? { batch: this.batch } : {}), ...(this.cancelBatch ? { cancelBatch: this.cancelBatch } : {}) });
+  }
+  private clearDraft() {
+    this.draft = undefined; this.batch = undefined; this.cancelBatch = undefined; this.batchQuestion = undefined;
+    this.recovery?.clear();
+  }
+  async restoreRecovery(value: unknown) {
+    this.approval = undefined; this.readChoice = undefined; this.context = { candidates: [] };
+    const recovered = parseCalendarRecoveryState(value);
+    if (!recovered) { this.clearDraft(); return; }
+    this.batch = recovered.batch;
+    this.cancelBatch = recovered.cancelBatch;
+    this.draft = { ...recovered.draft, context: { candidates: [], draft: recovered.draft.event } };
+    this.context = this.draft.context; this.contextAt = this.now();
+    if (!recovered.draft.operationId) { this.persistDraft(); return; }
+    let result: Awaited<ReturnType<GoogleCalendarService['reconcile']>>;
+    try { result = await this.service.reconcile(recovered.draft.operationId); }
+    catch {
+      // A missing/corrupt provider ledger must never turn into a repeated write.
+      this.draft = { ...this.draft, blocked: true, operationId: recovered.draft.operationId };
+      this.persistDraft(); return;
+    }
+    if (result.state === 'succeeded') {
+      if (this.batch && this.batch.index + 1 < this.batch.events.length) {
+        this.batch.index++;
+        const event = this.batch.events[this.batch.index];
+        this.draft = { kind: 'create', event, context: { candidates: [], draft: event } };
+      } else if (this.cancelBatch && this.cancelBatch.index + 1 < this.cancelBatch.items.length) {
+        this.cancelBatch.index++;
+        const target = this.cancelBatch.items[this.cancelBatch.index];
+        try {
+          const resolved = await this.service.scopedTarget(target.id);
+          this.draft = { kind: 'cancel', event: resolved.event, before: resolved.event,
+            eventId: resolved.id, context: { candidates: [], draft: resolved.event } };
+        } catch {
+          // The completed item is safe, but the next selection can no longer be
+          // rebound reliably. Require a fresh Calendar query instead of guessing.
+          this.clearDraft(); return;
+        }
+      } else { this.clearDraft(); return; }
+    } else if (['unknown', 'sending'].includes(result.state)) {
+      this.draft = { ...this.draft, blocked: true, operationId: recovered.draft.operationId };
+    } else {
+      const { operationId: _operationId, blocked: _blocked, ...draft } = this.draft;
+      this.draft = draft;
+    }
+    this.context = this.draft.context; this.contextAt = this.now(); this.persistDraft();
+  }
+  recoveryManifest() {
+    if (!this.draft) return undefined;
+    return { draft: true, action: this.draft.kind, uncertain: !!this.draft.blocked,
+      requiresPreview: !this.draft.blocked, batchRemaining: this.batch ? this.batch.events.length - this.batch.index
+        : this.cancelBatch ? this.cancelBatch.items.length - this.cancelBatch.index : 1 };
+  }
+  invalidate() {
+    if (this.approval) this.service.dismiss(this.approval.id);
+    this.approval = undefined; this.readChoice = undefined; this.persistDraft();
+  }
+  endSession() { this.invalidate(); this.clearDraft(); this.context = { candidates: [] }; }
   private async previewBatch(signal: AbortSignal, lead = '') {
     const batch = this.batch;
     if (!batch || batch.index >= batch.events.length) throw new Error('CALENDAR_ITINERARY_INVALID');
@@ -191,7 +257,9 @@ export class CalendarDialogue implements DialogueModel {
     const context: CalendarContext = { candidates: [], draft: event };
     this.context = context; this.contextAt = this.now();
     this.draft = { kind: 'create', event, context };
+    this.persistDraft();
     const pending = await this.service.preview('create', event, undefined, undefined, true); signal.throwIfAborted();
+    this.draft.operationId = pending.id; this.persistDraft();
     const prompt = `${lead}第${batch.index + 1}/${batch.events.length}项\n${pending.preview}`;
     this.approval = { ...pending, prompt };
     return prompt;
@@ -201,10 +269,12 @@ export class CalendarDialogue implements DialogueModel {
     if (!batch || batch.index >= batch.items.length) throw new Error('CALENDAR_CANCEL_BATCH_INVALID');
     const item = batch.items[batch.index];
     const resolved = await this.service.scopedTarget(item.id); signal.throwIfAborted();
-    const context: CalendarContext = { candidates: [item], draft: resolved.event };
+    const context: CalendarContext = { candidates: [], draft: resolved.event };
     this.context = context; this.contextAt = this.now();
     this.draft = { kind: 'cancel', event: resolved.event, before: resolved.event, eventId: resolved.id, context };
+    this.persistDraft();
     const pending = await this.service.preview('cancel', resolved.event, resolved.id, resolved.event, true); signal.throwIfAborted();
+    this.draft.operationId = pending.id; this.persistDraft();
     const prompt = `${lead}第${batch.index + 1}/${batch.items.length}项\n${pending.preview}`;
     this.approval = { ...pending, prompt };
     return prompt;
@@ -223,12 +293,12 @@ export class CalendarDialogue implements DialogueModel {
         event = draft.kind === 'cancel' ? latest : validateCalendar({ ...latest, ...patch });
       }
       pending = await this.service.preview(draft.kind, event, draft.eventId, before, true, draft.scope); signal.throwIfAborted();
-      this.draft = { ...draft, event, before };
+      this.draft = { ...draft, event, before, blocked: false, operationId: pending.id };
       this.context = { ...draft.context, draft: event }; this.contextAt = this.now();
       const prompt = this.cancelBatch
         ? `第${this.cancelBatch.index + 1}/${this.cancelBatch.items.length}项\n${pending.preview}`
         : this.batch ? `第${this.batch.index + 1}/${this.batch.events.length}项\n${pending.preview}` : pending.preview;
-      this.approval = { ...pending, prompt }; delta(prompt);
+      this.approval = { ...pending, prompt }; this.persistDraft(); delta(prompt);
     } catch (error) {
       if (pending) this.service.dismiss(pending.id);
       signal.throwIfAborted();
@@ -393,7 +463,7 @@ export class CalendarDialogue implements DialogueModel {
               message = `已删除“${eventTitle(completedItem)}”（${completed}/${total}）；下一项暂时没能生成确认预览。其余日程没有删除，请稍后说“继续取消其余日程”。`;
             }
           } else {
-            const retained = this.cancelBatch.retained.map(item => `“${eventTitle(item)}”`).join('、');
+            const retained = this.cancelBatch.retainedTitles.map(title => `“${eventTitle({ title })}”`).join('、');
             this.cancelBatch = undefined;
             message = `已删除“${eventTitle(completedItem)}”（${completed}/${total}）。\n${total}项都已删除${retained ? `；已保留${retained}，没有改动` : ''}。${result.notifyGuests ? '已请求通知受邀人。' : ''}`;
           }
@@ -407,7 +477,7 @@ export class CalendarDialogue implements DialogueModel {
         console.warn(JSON.stringify({ event: 'calendar_write_failed', code: calendarError(error) }));
         message = 'Google 没有确认本次操作是否完成。请先核对日历，不要重复提交。';
       }
-      this.context = { candidates: [] };
+      this.context = { candidates: [] }; this.persistDraft();
       if (signal.aborted) { this.notify?.(message); return; }
       delta(message); return;
     }
@@ -453,8 +523,8 @@ export class CalendarDialogue implements DialogueModel {
             delta('所选事件包含重复会议。请先说明要取消单次还是整个系列；尚未删除任何事件。'); return;
           }
           const selectedIds = new Set(selectedForCancel.map(item => item.id));
-          this.cancelBatch = { items: selectedForCancel,
-            retained: this.context.candidates.filter(item => !selectedIds.has(item.id)), index: 0 };
+          this.cancelBatch = { items: selectedForCancel.map(item => ({ id: item.id, title: item.title })),
+            retainedTitles: this.context.candidates.filter(item => !selectedIds.has(item.id)).map(item => item.title), index: 0 };
           delta(await this.previewCancelBatch(signal)); return;
         }
       }
@@ -532,12 +602,15 @@ export class CalendarDialogue implements DialogueModel {
       }
       this.context = { candidates: selected ? [selected] : [], request, draft: event }; this.contextAt = this.now();
       this.draft = { kind: request.action, event, before, eventId: targetId, scope, context: this.context };
+      this.persistDraft();
       pending = await this.service.preview(request.action, event, targetId, before, true, scope); signal.throwIfAborted();
+      this.draft.operationId = pending.id; this.persistDraft();
       const prompt = this.batch && request.action === 'create'
         ? `第${this.batch.index + 1}/${this.batch.events.length}项\n${pending.preview}` : pending.preview;
       this.approval = { ...pending, prompt }; delta(prompt);
     } catch (error) {
       if (pending) this.service.dismiss(pending.id);
+      if (this.draft) { this.draft.operationId = undefined; this.persistDraft(); }
       signal.throwIfAborted();
       const code = calendarError(error);
       console.warn(JSON.stringify({ event: 'calendar_planning_failed', code }));

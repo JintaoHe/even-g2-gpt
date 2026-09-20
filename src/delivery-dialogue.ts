@@ -3,6 +3,7 @@ import type { Draft, DraftGenerator } from './delivery-draft.js';
 import type { MailSender } from './mail.js';
 import { JobStore } from './job-store.js';
 import { calendarDetails, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
+import { parseDeliveryRecoveryState, type DeliveryRecoveryState, type RecoveryPersistence } from './recovery-drafts.js';
 
 type Approval = { id: string; prompt: string; expires: number; retryAttempt?: number };
 type Plan = { plan: TurnPlan; approval?: Approval };
@@ -55,8 +56,35 @@ export class DeliveryDialogue implements DialogueModel {
   constructor(private base: DialogueModel, private jobs: JobStore, private generate: DraftGenerator,
     private sender?: MailSender, private now: () => number = Date.now,
     private notifyResult?: (id: string, result: string) => void,
-    private artifactSource?: () => Message[]) {}
+    private artifactSource?: () => Message[],
+    private recovery?: RecoveryPersistence<DeliveryRecoveryState>) {}
   invalidate() { this.approval = undefined; }
+  private persistDraft() {
+    if (!this.jobId) { this.recovery?.clear(); return; }
+    this.recovery?.save({ version: 1, jobId: this.jobId });
+  }
+  async restoreRecovery(value: unknown) {
+    this.invalidate(); this.draft = undefined; this.jobId = undefined;
+    const recovered = parseDeliveryRecoveryState(value);
+    if (!recovered) { this.recovery?.clear(); return; }
+    const job = this.jobs.get(recovered.jobId);
+    const metadata = this.jobs.metadata(recovered.jobId);
+    if (!job || job.state !== 'completed' || !metadata || this.jobs.superseded(recovered.jobId) || this.jobs.mailReceived(recovered.jobId)) {
+      this.recovery?.clear(); return;
+    }
+    try {
+      const markdown = (await this.jobs.download(recovered.jobId)).toString('utf8');
+      this.draft = { document: { presentation: metadata, markdown }, calendar: this.jobs.calendar(recovered.jobId) };
+      this.jobId = recovered.jobId;
+    } catch { this.recovery?.clear(); }
+  }
+  recoveryManifest() {
+    if (!this.jobId || !this.draft) return undefined;
+    return { draft: true, jobState: this.jobs.get(this.jobId)?.state ?? 'missing',
+      mailState: this.jobs.mailState(this.jobId) ?? null,
+      requiresPreview: !this.jobs.mailState(this.jobId) };
+  }
+  endSession() { this.invalidate(); this.draft = undefined; this.jobId = undefined; this.recovery?.clear(); }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan> {
     const approval = this.approval; this.invalidate();
     let plan = this.base.plan ? await this.base.plan(history, text, forced, signal)
@@ -102,7 +130,7 @@ export class DeliveryDialogue implements DialogueModel {
     if (action === 'not_received') { this.retryPreview(delta); return; }
     if (action === 'received') {
       if (!this.jobId || !this.jobs.mailState(this.jobId) || this.jobs.mailState(this.jobId) === 'sending') { delta('谢谢反馈。当前没有可关联的已结束发送记录；你也可以在网页文件列表标记对应邮件已收到。'); return; }
-      this.jobs.acknowledgeReceipt(this.jobId); this.invalidate();
+      this.jobs.acknowledgeReceipt(this.jobId); this.invalidate(); this.recovery?.clear();
       delta('好的，已记录你确认收到，不会再重发这份文件。' + (this.draft?.calendar ? '日历仍需你打开 ICS 附件确认导入。' : '')); return;
     }
     if (action === 'cancel') {
@@ -139,7 +167,7 @@ export class DeliveryDialogue implements DialogueModel {
       this.preview(delta, this.draft ? this.draft.document.markdown + '\n\n' : ''); return;
     }
     if (this.jobId) this.jobs.supersede(this.jobId);
-    this.invalidate();
+    this.invalidate(); this.draft = undefined; this.jobId = undefined; this.recovery?.clear();
     update?.({ type: 'artifact.status', status: 'generating' });
     let newJob: string | undefined;
     try {
@@ -161,10 +189,11 @@ export class DeliveryDialogue implements DialogueModel {
       }
       signal.throwIfAborted();
       if (this.jobs.get(job.id)?.state !== 'completed') throw Error('DRAFT_SAVE_FAILED');
-      this.draft = generated; this.jobId = job.id;
+      this.draft = generated; this.jobId = job.id; this.persistDraft();
       this.preview(delta);
     } catch {
       if (newJob) { this.jobs.cancel(newJob); this.jobs.supersede(newJob); }
+      this.draft = undefined; this.jobId = undefined; this.recovery?.clear();
       signal.throwIfAborted();
       delta('文件未能完整生成或保存，没有发送邮件。请重新提出生成请求；不会用聊天记录代替你要求的文档。');
     }
