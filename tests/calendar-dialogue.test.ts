@@ -8,6 +8,7 @@ import { CalendarDialogue } from '../src/calendar-dialogue.js';
 import { Conversation, type TurnPlan } from '../src/conversation.js';
 import { createCalendarPlanner, type CalendarRequest } from '../src/calendar-planner.js';
 import { TimezoneClarificationError } from '../src/timezone.js';
+import type { CalendarRecoveryState } from '../src/recovery-drafts.js';
 
 const original = { title: '测试 A', start: '2026-10-01T18:00-05:00', end: '2026-10-01T19:00-05:00', timezone: 'America/Chicago', allDay: false, location: '原地点', notes: '原备注' };
 const empty = { title: null, start: null, end: null, timezone: null, allDay: null, location: null, notes: null };
@@ -76,6 +77,59 @@ test('one request can cancel two listed events through sequential previews and c
   await conversation.submit('好，可以', true);
   assert.equal(f.writes(), 4); assert.equal(f.records.size, 0);
   assert.match(conversation.history.at(-1)!.content, /已删除“测试 B”（2\/2）[\s\S]*2项都已删除/);
+});
+
+test('cold-started Calendar draft reconciles the ledger, re-previews and never reuses old approval', async t => {
+  const f = await fixture(t); let saved: CalendarRecoveryState | undefined;
+  const persistence = { save(value: CalendarRecoveryState) { saved = structuredClone(value); }, clear() { saved = undefined; } };
+  const create = { action: 'create', clarification: '', ...range, targetIndex: 0, titleQuery: '',
+    changes: { ...empty, title: '恢复测试', start: '2026-10-02T09:00-05:00', end: '2026-10-02T10:00-05:00',
+      timezone: 'America/Chicago', allDay: false, location: '测试地点', notes: '冷启动草稿' } } as CalendarRequest;
+  const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'create' }; },
+    async decide() { return 'respond' as const; }, async reply() {} };
+  const first = new CalendarDialogue(base, f.service, async () => create, undefined, Date.now, undefined, undefined,
+    undefined, persistence);
+  const firstConversation = new Conversation(first, () => {});
+  await firstConversation.submit('创建恢复测试日程', true);
+  const oldOperation = saved?.draft.operationId;
+  assert.ok(oldOperation); assert.equal(f.writes(), 2);
+  first.invalidate(); firstConversation.close();
+
+  const restarted = new CalendarDialogue(base, f.service, async () => { throw new Error('fresh preview must not re-plan'); },
+    undefined, Date.now, undefined, undefined, undefined, persistence);
+  await restarted.restoreRecovery(saved);
+  const conversation = new Conversation(restarted, () => {});
+  await conversation.submit('确认创建', true);
+  assert.equal(f.writes(), 2); assert.match(conversation.history.at(-1)!.content, /确认创建/);
+  assert.notEqual(saved?.draft.operationId, oldOperation);
+  await conversation.submit('确认创建', true);
+  assert.equal(f.writes(), 3); assert.ok([...f.records.values()].some(event => event.summary === '恢复测试'));
+  assert.equal(saved, undefined);
+  conversation.close();
+});
+
+test('cold-start reconciliation proves an uncertain Calendar write instead of replaying it', async t => {
+  const f = await fixture(t); let saved: CalendarRecoveryState | undefined;
+  const persistence = { save(value: CalendarRecoveryState) { saved = structuredClone(value); }, clear() { saved = undefined; } };
+  const create = { action: 'create', clarification: '', ...range, targetIndex: 0, titleQuery: '',
+    changes: { ...empty, title: '不确定写入测试', start: '2026-10-03T09:00-05:00', end: '2026-10-03T10:00-05:00',
+      timezone: 'America/Chicago', allDay: false, location: '', notes: '' } } as CalendarRequest;
+  const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'create' }; },
+    async decide() { return 'respond' as const; }, async reply() {} };
+  const first = new CalendarDialogue(base, f.service, async () => create, undefined, Date.now, undefined, undefined,
+    undefined, persistence);
+  const conversation = new Conversation(first, () => {});
+  await conversation.submit('创建不确定写入测试', true);
+  f.makeWriteUncertain();
+  await conversation.submit('确认创建', true);
+  assert.ok(saved?.draft.blocked); const writes = f.writes(); conversation.close();
+
+  const restarted = new CalendarDialogue(base, f.service, async () => create, undefined, Date.now, undefined, undefined,
+    undefined, persistence);
+  await restarted.restoreRecovery(saved);
+  assert.equal(f.writes(), writes);
+  assert.equal(saved, undefined);
+  assert.ok([...f.records.values()].some(event => event.summary === '不确定写入测试'));
 });
 
 test('disconnect-style invalidation retains a cancel batch but requires a fresh preview for each remaining write', async t => {

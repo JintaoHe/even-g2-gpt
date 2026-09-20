@@ -13,6 +13,7 @@ import { once } from 'node:events';
 import WebSocket from 'ws';
 import { createConversationServer } from '../src/conversation-server.js';
 import { paginate } from '../clients/even/src/pager.js';
+import type { DeliveryRecoveryState } from '../src/recovery-drafts.js';
 
 const draft: Draft = { document: { markdown: '# 部署步骤\n\n1. 检查配置\n2. 运行测试\n', presentation: presentation('部署步骤', '两步部署清单，不是聊天记录。', 'summary') } };
 async function fixture(run: (f: { conversation: Conversation; store: JobStore; model: DeliveryDialogue; route: (a: DeliveryAction) => void; sent: Draft[]; advance: () => void }) => Promise<void>, generator: DraftGenerator = async () => structuredClone(draft), artifactSource?: () => import('../src/conversation.js').Message[]) {
@@ -52,6 +53,42 @@ test('requested standalone document saves before preview and sends only on a lat
     assert.match(conversation.history.at(-1)!.content, /确认是否收到/);
     await conversation.submit('确认发送', true); assert.equal(sent.length, 1);
   });
+});
+test('cold-started delivery draft rebuilds from JobStore and requires a fresh confirmation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-delivery-recovery-')), store = await JobStore.create(root);
+  let saved: DeliveryRecoveryState | undefined, sends = 0;
+  const persistence = { save(value: DeliveryRecoveryState) { saved = structuredClone(value); }, clear() { saved = undefined; } };
+  const base: DialogueModel = { plan: async () => ({ decision: 'respond', deliveryAction: 'confirm' }),
+    decide: async () => 'respond', reply: async () => {} };
+  const sender = async () => { sends++; return 'accepted' as const; };
+  const first = new DeliveryDialogue(base, store, async () => structuredClone(draft), sender, Date.now, undefined, undefined, persistence);
+  const firstConversation = new Conversation(first, () => {});
+  try {
+    // Force generation for the first turn, then simulate loss of all in-memory approval state.
+    const generatingBase: DialogueModel = { plan: async () => ({ decision: 'respond', deliveryAction: 'document' }),
+      decide: async () => 'respond', reply: async () => {} };
+    const generating = new DeliveryDialogue(generatingBase, store, async () => structuredClone(draft), sender, Date.now,
+      undefined, undefined, persistence);
+    const generatingConversation = new Conversation(generating, () => {});
+    await generatingConversation.submit('生成一份部署文档', true);
+    generating.invalidate(); generatingConversation.close();
+    assert.ok(saved); assert.equal(sends, 0);
+
+    await first.restoreRecovery(saved);
+    await firstConversation.submit('确认发送', true);
+    assert.equal(sends, 0); assert.match(firstConversation.history.at(-1)!.content, /文件已生成/);
+    await firstConversation.submit('确认发送', true);
+    assert.equal(sends, 1); assert.match(firstConversation.history.at(-1)!.content, /邮件服务器已接受/);
+
+    first.invalidate();
+    const restarted = new DeliveryDialogue(base, store, async () => structuredClone(draft), sender, Date.now,
+      undefined, undefined, persistence);
+    await restarted.restoreRecovery(saved);
+    const restartedConversation = new Conversation(restarted, () => {});
+    await restartedConversation.submit('确认发送', true);
+    assert.equal(sends, 1); assert.match(restartedConversation.history.at(-1)!.content, /邮件服务器已接受/);
+    restartedConversation.close();
+  } finally { firstConversation.close(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 test('explicit document and send wording recovers from model routing misses without bypassing preview', async () => {
   await fixture(async ({ conversation, store, route, sent }) => {

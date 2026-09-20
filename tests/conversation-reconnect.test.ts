@@ -528,7 +528,7 @@ test('loopback storage lab reports safe metadata and cleans only fixed retention
     };
     const inspected = await command('test.storage.inspect');
     assert.equal(inspected.action, 'inspect');
-    assert.equal(inspected.sqlite.schema_version, 4);
+    assert.equal(inspected.sqlite.schema_version, 5);
     assert.equal(inspected.retention.test_eligible_sessions, 0);
     assert.doesNotMatch(JSON.stringify(inspected), /content|transcript|database_path|session_id/i);
 

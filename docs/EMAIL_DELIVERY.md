@@ -12,7 +12,7 @@ If the intent model mistakes a natural “send this plan to my email” request 
 
 Corrections create a new immutable artifact; old versions remain downloadable but are marked superseded and cannot be emailed. The new version needs fresh confirmation. The user can ask to review the full draft or cancel sending. No email is sent during generation. Once SMTP submission has started, interruption cannot guarantee recall; its result remains in the durable delivery ledger. No automatic resend is performed.
 
-Saved drafts remain available after restart, but conversational approvals do not survive; use the web preview/confirmation flow to deliver a saved artifact. Engineering files in this version are Markdown specifications or code blocks, not arbitrary executable files or project archives.
+Saved drafts remain available after restart. The API conversation reconnects the session to the completed immutable JobStore artifact, but conversational approvals do not survive: the first send request after a cold start only shows a fresh preview, and a later separate confirmation can send. A prior `sending`/`unknown`/`accepted` mail ledger state is reported rather than replayed. The web preview/confirmation flow remains available independently. Engineering files in this version are Markdown specifications or code blocks, not arbitrary executable files or project archives.
 
 ## Presentation and summary
 

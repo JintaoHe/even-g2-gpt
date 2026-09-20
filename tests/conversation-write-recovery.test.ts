@@ -10,6 +10,7 @@ import { createConversationServer } from '../src/conversation-server.js';
 import { ConversationStore } from '../src/conversation-store.js';
 import { JobStore } from '../src/job-store.js';
 import type { MailResult } from '../src/mail.js';
+import { presentation } from '../src/document-presentation.js';
 
 const token = 'w'.repeat(64);
 const model = { decide: async () => 'respond' as const, reply: async () => {} };
@@ -171,4 +172,49 @@ test('Calendar success after the socket drops is not replayed by an old confirma
     assert.equal((await recovered).recovered, true);
     assert.equal(confirms, 1);
   } finally { second.client.terminate(); await app.close(); await store.close(); }
+});
+
+test('service restart hydrates a durable Email draft but never restores its approval', { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-write-recovery-cold-email-'));
+  const jobsRoot = join(root, 'jobs'), conversationRoot = join(root, 'conversation');
+  let jobs = await JobStore.create(jobsRoot), store = await ConversationStore.create(conversationRoot);
+  let action = 'document', sends = 0;
+  const dialogueModel = { plan: async () => ({ decision: 'respond' as const, deliveryAction: action as any }),
+    decide: async () => 'respond' as const, reply: async () => {} };
+  const generator = async () => ({ document: { markdown: '# Cold restart\n\nDurable draft',
+    presentation: presentation('Cold restart', 'Durable draft recovery test.', 'summary') } });
+  let app = createConversationServer({ token, jobs, conversationStore: store, draftGenerator: generator,
+    mail: async () => { sends++; return 'accepted'; }, model: dialogueModel,
+    transcriber: () => { throw new Error('unused'); } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  let url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`, clientId = randomUUID();
+  const first = await connect(url, { client_id: clientId, token });
+  const done = waitFor(first.client, 'answer.done');
+  first.client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: '生成恢复测试文档' }));
+  await done;
+  assert.equal(store.getRecoveryDraft(first.ready.session_id, 'delivery')?.payload.version, 1);
+  first.client.terminate(); await once(first.client, 'close');
+  await app.close(); await Promise.all([jobs.close(), store.close()]);
+
+  jobs = await JobStore.create(jobsRoot); store = await ConversationStore.create(conversationRoot); action = 'confirm';
+  app = createConversationServer({ token, jobs, conversationStore: store, draftGenerator: generator,
+    mail: async () => { sends++; return 'accepted'; }, model: dialogueModel,
+    transcriber: () => { throw new Error('unused'); } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;
+  const second = await connect(url, { client_id: clientId, resume_session_id: first.ready.session_id,
+    resume_credential: first.ready.resume_credential, last_seen_sequence: 0 });
+  try {
+    assert.equal(second.ready.resumed, true);
+    assert.equal(second.ready.recovery.delivery.draft, true);
+    assert.equal(second.ready.recovery.delivery.requiresPreview, true);
+    let answer = waitFor(second.client, 'answer.done');
+    second.client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: '确认发送' }));
+    await answer; assert.equal(sends, 0);
+    answer = waitFor(second.client, 'answer.done');
+    second.client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: '确认发送' }));
+    await answer; assert.equal(sends, 1);
+  } finally {
+    second.client.terminate(); await app.close(); await Promise.all([jobs.close(), store.close()]);
+  }
 });

@@ -4,9 +4,11 @@ import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextSummary } from './context-builder.js';
+import { parseCalendarRecoveryState, parseDeliveryRecoveryState } from './recovery-drafts.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+const MAX_RECOVERY_DRAFT_BYTES = 256 * 1024;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const MAX_DEVICE_CREDENTIAL_MS = 366 * 24 * 60 * 60_000;
 const MAX_DEVICE_ROTATION_WINDOW_MS = 10 * 60_000;
@@ -184,6 +186,16 @@ export type LegacyImportRecord = {
   sessionId: string;
   messageCount: number;
   importedAt: number;
+};
+
+export type RecoveryDraftKind = 'calendar' | 'delivery';
+
+export type RecoveryDraftRecord = {
+  sessionId: string;
+  kind: RecoveryDraftKind;
+  payload: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type LegacySessionImport = {
@@ -531,6 +543,21 @@ export class ConversationStore {
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (4,?,?)')
           .run('scoped-device-credentials', Date.now());
       }
+      if (latest < 5) {
+        db.exec(`
+          CREATE TABLE recovery_drafts (
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK(kind IN ('calendar','delivery')),
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(session_id,kind)
+          ) STRICT;
+          CREATE INDEX recovery_drafts_updated_idx ON recovery_drafts(updated_at);
+        `);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (5,?,?)')
+          .run('durable-recovery-drafts', Date.now());
+      }
     });
   }
 
@@ -672,6 +699,64 @@ export class ConversationStore {
     if (!validUuid(id)) return undefined;
     const row = this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id);
     return row ? sessionRecord(row) : undefined;
+  }
+
+  putRecoveryDraft(input: {
+    sessionId: string; kind: RecoveryDraftKind; payload: Record<string, unknown>; at: number;
+  }): RecoveryDraftRecord {
+    this.ensureOpen();
+    if (!validUuid(input.sessionId) || !['calendar', 'delivery'].includes(input.kind)
+      || !input.payload || Array.isArray(input.payload) || typeof input.payload !== 'object'
+      || !Number.isSafeInteger(input.at) || input.at < 0) throw new Error('Invalid recovery draft');
+    const normalized = input.kind === 'calendar'
+      ? parseCalendarRecoveryState(input.payload) : parseDeliveryRecoveryState(input.payload);
+    if (!normalized) throw new Error('Invalid recovery draft');
+    const payload = JSON.stringify(normalized);
+    if (Buffer.byteLength(payload) > MAX_RECOVERY_DRAFT_BYTES) throw new Error('Recovery draft is too large');
+    return transaction(this.db, () => {
+      const session = this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND status IN ('active','idle')")
+        .get(input.sessionId);
+      if (!session) throw new Error('Conversation session is unavailable');
+      this.db.prepare(`INSERT INTO recovery_drafts(session_id,kind,payload_json,created_at,updated_at)
+        VALUES (?,?,?,?,?) ON CONFLICT(session_id,kind) DO UPDATE SET
+        payload_json=excluded.payload_json,updated_at=MAX(recovery_drafts.updated_at,excluded.updated_at)`)
+        .run(input.sessionId, input.kind, payload, input.at, input.at);
+      return this.getRecoveryDraft(input.sessionId, input.kind)!;
+    });
+  }
+
+  getRecoveryDraft(sessionId: string, kind: RecoveryDraftKind): RecoveryDraftRecord | undefined {
+    this.ensureOpen();
+    if (!validUuid(sessionId) || !['calendar', 'delivery'].includes(kind)) throw new Error('Invalid recovery draft query');
+    const row = this.db.prepare('SELECT * FROM recovery_drafts WHERE session_id=? AND kind=?')
+      .get(sessionId, kind) as any;
+    if (!row) return undefined;
+    let payload: unknown;
+    try { payload = JSON.parse(row.payload_json); }
+    catch { throw new Error('Invalid stored recovery draft'); }
+    const normalized = row.kind === 'calendar' ? parseCalendarRecoveryState(payload) : parseDeliveryRecoveryState(payload);
+    if (!normalized) throw new Error('Invalid stored recovery draft');
+    return { sessionId: row.session_id, kind: row.kind, payload: normalized as unknown as Record<string, unknown>,
+      createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+
+  listRecoveryDrafts(sessionId: string): RecoveryDraftRecord[] {
+    this.ensureOpen();
+    if (!validUuid(sessionId)) throw new Error('Invalid recovery draft query');
+    return (['calendar', 'delivery'] as const).flatMap(kind => {
+      const draft = this.getRecoveryDraft(sessionId, kind);
+      return draft ? [draft] : [];
+    });
+  }
+
+  deleteRecoveryDraft(sessionId: string, kind?: RecoveryDraftKind): number {
+    this.ensureOpen();
+    if (!validUuid(sessionId) || (kind !== undefined && !['calendar', 'delivery'].includes(kind))) {
+      throw new Error('Invalid recovery draft query');
+    }
+    return Number((kind === undefined
+      ? this.db.prepare('DELETE FROM recovery_drafts WHERE session_id=?').run(sessionId)
+      : this.db.prepare('DELETE FROM recovery_drafts WHERE session_id=? AND kind=?').run(sessionId, kind)).changes);
   }
 
   ensureTopic(input: { sessionId: string; id: string; label: string; at: number }): TopicRecord {
@@ -1033,6 +1118,7 @@ export class ConversationStore {
       if (result.changes !== 1) throw new Error('Conversation session is unavailable');
       this.db.prepare(`UPDATE resume_credentials SET revoked_at=?
         WHERE session_id=? AND revoked_at IS NULL`).run(at, sessionId);
+      this.db.prepare('DELETE FROM recovery_drafts WHERE session_id=?').run(sessionId);
       return sessionRecord(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId));
     });
   }

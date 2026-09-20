@@ -285,6 +285,8 @@ Calendar 的模型边界采用严格 JSON Schema（作用等同于 Pydantic 风�
 
 这个自修复只适用于尚未产生副作用的规划／预览阶段。Google 写入超时、结果未知、ETag 冲突或已经发出的写请求绝不由 for-loop 自动重放，以免重复创建或覆盖事件。用户在待确认预览后补充 notes、时间、地点或标题时，系统修改同一份草稿并重新预览；“刚才是不是已经创建了”会明确区分“预览”与“Google 已保存”。
 
+待确认草稿与 Calendar operation ledger 均可跨服务重启恢复，但授权不可恢复。会话 SQLite 只保存草稿内容、批次进度及对应 operation ID；不保存用户说出口的确认、approval、短期查询候选、路线或位置。冷启动时先用 operation ledger 做只读 reconcile：能证明 Google 已完成就结束该项并推进批次，`sending`／`unknown` 无法证明时保持阻塞且绝不重放，expired／dismissed／failed／conflict 则去掉旧 operation 并在用户要求继续时重新读取 Google、生成新预览。即使用户冷启动后第一句话就是“确认创建／修改／取消”，该轮也只能得到新预览，必须下一轮再次确认。
+
 两类冲突：
 
 - 时间重叠：检查专用日历中目标时间段的其他事件。Google 本身允许重叠，助手负责提醒并要求明确确认。
