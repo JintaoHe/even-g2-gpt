@@ -181,6 +181,22 @@ test('praise after a completed calendar batch gets a warm acknowledgement, not a
   assert.equal(baseReplies, 1);
 });
 
+test('a retrospective calendar status question re-reads Google instead of receiving social acknowledgement', async t => {
+  const f = await fixture(t); let plannerCalls = 0, baseReplies = 0;
+  const base = {
+    async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'none', cognitiveMode: 'casual' }; },
+    async decide() { return 'respond' as const; },
+    async reply(_history: unknown, _signal: AbortSignal, delta: (text: string) => void) { baseReplies++; delta('错误的普通回答'); }
+  };
+  const planner = async (): Promise<CalendarRequest> => { plannerCalls++; return query; };
+  const conversation = new Conversation(new CalendarDialogue(base, f.service, planner), () => {});
+  conversation.history.push({ role: 'assistant', content: 'Google 已保存新日程。已请求Google发送邀请，请确认是否收到。' });
+  await conversation.submit('刚才那个日程创建好了吗？', true);
+  assert.equal(plannerCalls, 1); assert.equal(baseReplies, 0); assert.equal(f.reads(), 1);
+  assert.match(conversation.history.at(-1)!.content, /共 2 个事件/);
+  assert.doesNotMatch(conversation.history.at(-1)!.content, /谢谢你这么说/);
+});
+
 test('explicit closure immediately after calendar creation gets one warm close without another question', async t => {
   const f = await fixture(t); let plannerCalls = 0;
   const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'create' }; },

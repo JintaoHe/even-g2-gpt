@@ -21,6 +21,7 @@ function fake() {
       if (events.has(body.id)) throw new CalendarError('CALENDAR_HTTP_409', 409);
       const value = { ...body, etag: `"v${++version}"` }; events.set(body.id, value); return value;
     }
+    if (method === 'GET' && path.startsWith('/events?')) return { items: [...events.values()].map(value => structuredClone(value)) };
     const current = events.get(id);
     if (!current) throw new CalendarError('CALENDAR_HTTP_404', 404);
     if (method === 'GET') return structuredClone(current);
@@ -38,7 +39,7 @@ async function fixture(t: any, now?: () => number, recipient?: string) {
 }
 test('Google create needs zone confirmation; one stable ID, no mail/invite/default alarm; replay blocked', async t => {
   const f = await fixture(t); const preview = await f.service.preview('create', event);
-  assert.equal(f.calls.length, 0);
+  assert.equal(f.calls.filter(call => call.method !== 'GET').length, 0);
   assert.match(preview.preview, /芝加哥时间/); assert.doesNotMatch(preview.preview, /洛杉矶|纽约/);
   assert.equal(preview.phrase, '确认创建');
   await assert.rejects(f.service.confirm(preview.id, '确认发送'));
@@ -159,7 +160,19 @@ test('expiry and dismiss cannot write; connection confirmation cannot use anothe
   await second.handle({ type: 'calendar.confirm', id: a[0].id, phrase: a[0].phrase });
   assert.equal(b[0].type, 'calendar.error');
   first.invalidate(); await first.handle({ type: 'calendar.confirm', id: a[0].id, phrase: a[0].phrase });
-  assert.equal(f.calls.length, 0);
+  assert.equal(f.calls.filter(call => call.method !== 'GET').length, 0);
+});
+
+test('direct calendar protocol preview includes the same overlap warning as conversational preview', async t => {
+  const f = await fixture(t);
+  const existing = await f.service.preview('create', event);
+  await f.service.confirm(existing.id, existing.phrase);
+  const sent: any[] = [];
+  const control = new CalendarControl(f.service, value => sent.push(value));
+  await control.handle({ type: 'calendar.preview', kind: 'create', event: { ...event, title: '冲突测试' } });
+  assert.equal(sent[0].type, 'calendar.preview');
+  assert.match(sent[0].preview, /重叠/);
+  assert.equal(f.calls.filter(call => call.method !== 'GET').length, 1);
 });
 test('unknown network result persists; restart expires pending confirmations and does not replay', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'even-google-restart-')); let service: GoogleCalendarService | undefined;
@@ -242,13 +255,14 @@ test('authenticated browser protocol advertises calendar and requires a separate
     await once(socket, 'open'); socket.send(JSON.stringify({ type: 'hello', token }));
     assert.equal((await wait('ready')).capabilities.calendar, true);
     socket.send(JSON.stringify({ type: 'calendar.preview', kind: 'create', event }));
-    const preview = await wait('calendar.preview'); assert.equal(f.calls.length, 0);
+    const preview = await wait('calendar.preview'); assert.equal(f.calls.filter(call => call.method !== 'GET').length, 0);
     socket.send(JSON.stringify({ type: 'calendar.confirm', id: preview.id, phrase: preview.phrase }));
     assert.equal((await wait('calendar.result')).state, 'succeeded');
-    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls.filter(call => call.method !== 'GET').length, 1);
     socket.send(JSON.stringify({ type: 'calendar.confirm', id: preview.id, phrase: preview.phrase }));
     const recovered = await wait('calendar.result');
-    assert.equal(recovered.state, 'succeeded'); assert.equal(recovered.recovered, true); assert.equal(f.calls.length, 2);
+    assert.equal(recovered.state, 'succeeded'); assert.equal(recovered.recovered, true);
+    assert.equal(f.calls.filter(call => call.method !== 'GET').length, 1);
     socket.send(JSON.stringify({ type: 'calendar.preview', kind: 'cancel', eventId: preview.eventId }));
     const cancellation = await wait('calendar.preview');
     socket.send(JSON.stringify({ type: 'pause' }));

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -235,6 +235,27 @@ test('a natural missed-answer request replays committed SQLite content without a
     assert.equal(replies, 2);
     assert.equal(store.latestRecoverableTurn(ready.session_id)?.turn.retryOfTurnId, undefined);
   } finally { client.terminate(); await server.app.close(); await store.close(); }
+});
+
+test('common short missed-answer phrases all use durable replay without another model call', { timeout: 10_000 }, async () => {
+  for (const phrase of ['没看完，继续说', '继续说', '接着说', '刚才说到一半', '继续刚才的回答']) {
+    const root = await mkdtemp(join(tmpdir(), 'even-reconnect-natural-'));
+    const store = await ConversationStore.create(root); let replies = 0;
+    const server = await listen(store, { decide: async () => 'respond',
+      reply: async (_history, _signal, delta) => { replies++; delta('durable replay target'); } });
+    const client = new WebSocket(server.url);
+    try {
+      await once(client, 'open'); const readyPromise = waitFor(client, 'ready');
+      client.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
+      const ready = await readyPromise;
+      let done = waitFor(client, 'answer.done');
+      client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: '请解释这个概念' })); await done;
+      done = waitFor(client, 'answer.done');
+      client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: phrase })); await done;
+      assert.equal(replies, 1, phrase);
+      assert.equal(store.latestRecoverableTurn(ready.session_id)?.output?.content, 'durable replay target', phrase);
+    } finally { client.terminate(); await server.app.close(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test('a second live protocol v2 input client is rejected without stealing the first lease', { timeout: 10_000 }, async () => {

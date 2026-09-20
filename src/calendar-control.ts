@@ -28,7 +28,7 @@ export class CalendarControl {
       else if (msg.type === 'calendar.dismiss') { this.invalidate(); this.send({ type: 'calendar.dismissed' }); }
       else if (msg.type === 'calendar.preview') {
         this.invalidate(); const epoch = this.epoch;
-        const result = await this.service.preview(msg.kind, msg.event, msg.eventId, undefined, false, msg.scope);
+        const result = await this.service.preview(msg.kind, msg.event, msg.eventId, undefined, true, msg.scope);
         if (epoch !== this.epoch) { this.service.dismiss(result.id); return; }
         this.pending = result.id; this.send({ type: 'calendar.preview', ...result });
       } else {

@@ -53,6 +53,8 @@ test('hybrid routes intent without tools to mini and reply/search to nano; rollb
     await capable.model.reply([], signal, () => {});
     assert.match(bodies[5].instructions, /Google Calendar read\/create\/update\/cancel: enabled/);
     assert.match(bodies[5].instructions, /Markdown\/document drafting: enabled/);
+    assert.match(bodies[5].instructions, /do NOT stream the long-form body onto the glasses/);
+    assert.match(bodies[5].instructions, /需要我把完整内容整理成 Markdown 文件吗/);
     assert.match(bodies[5].instructions, /Email sending: enabled/);
     assert.match(bodies[5].instructions, /Current-location and route tools: enabled/);
     assert.doesNotMatch(bodies[5].instructions, /NO calendar/);

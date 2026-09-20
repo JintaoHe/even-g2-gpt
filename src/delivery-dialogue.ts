@@ -4,8 +4,10 @@ import type { MailSender } from './mail.js';
 import { JobStore } from './job-store.js';
 import { calendarDetails, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
 import { parseDeliveryRecoveryState, type DeliveryRecoveryState, type RecoveryPersistence } from './recovery-drafts.js';
+import { acceptsLongFormDocumentOffer, hasLongFormDocumentOffer } from './long-form-offer.js';
 
 type Approval = { id: string; prompt: string; expires: number; retryAttempt?: number };
+type DocumentOffer = { prompt: string; expires: number };
 type Plan = { plan: TurnPlan; approval?: Approval };
 export const explicitSend = (text: string) => /^(?:确认发送|确认发出|可以发送|发送吧|发吧|confirm send|confirm sending|send it|yes,? send it)[。！.!\s]*$/i.test(text.trim());
 export const explicitResend = (text: string) => /^(?:确认重发|确认重新发送|重发吧|confirm resend|resend it|yes,? resend it)[。！.!\s]*$/i.test(text.trim());
@@ -51,6 +53,7 @@ export function deliveryResult(result: string): string {
 export class DeliveryDialogue implements DialogueModel {
   private plans = new WeakMap<AbortSignal, Plan>();
   private approval?: Approval;
+  private documentOffer?: DocumentOffer;
   private draft?: Draft;
   private jobId?: string;
   constructor(private base: DialogueModel, private jobs: JobStore, private generate: DraftGenerator,
@@ -58,7 +61,7 @@ export class DeliveryDialogue implements DialogueModel {
     private notifyResult?: (id: string, result: string) => void,
     private artifactSource?: () => Message[],
     private recovery?: RecoveryPersistence<DeliveryRecoveryState>) {}
-  invalidate() { this.approval = undefined; }
+  invalidate() { this.approval = undefined; this.documentOffer = undefined; }
   private persistDraft() {
     if (!this.jobId) { this.recovery?.clear(); return; }
     this.recovery?.save({ version: 1, jobId: this.jobId });
@@ -86,10 +89,19 @@ export class DeliveryDialogue implements DialogueModel {
   }
   endSession() { this.invalidate(); this.draft = undefined; this.jobId = undefined; this.recovery?.clear(); }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan> {
-    const approval = this.approval; this.invalidate();
-    let plan = this.base.plan ? await this.base.plan(history, text, forced, signal)
-      : { decision: await this.base.decide(history, text, forced, signal) };
-    signal.throwIfAborted();
+    const approval = this.approval, documentOffer = this.documentOffer;
+    this.approval = undefined; this.documentOffer = undefined;
+    const prior = history.at(-1);
+    let plan: TurnPlan;
+    if (documentOffer && documentOffer.expires > this.now() && prior?.role === 'assistant'
+      && prior.content === documentOffer.prompt && acceptsLongFormDocumentOffer(text)) {
+      plan = { decision: 'respond', deliveryAction: 'document', calendarAction: 'none',
+        reasoningEffort: 'low', cognitiveMode: 'compose', assistantMode: 'compose' };
+    } else {
+      plan = this.base.plan ? await this.base.plan(history, text, forced, signal)
+        : { decision: await this.base.decide(history, text, forced, signal) };
+      signal.throwIfAborted();
+    }
     if (approval && (explicitSend(text) || explicitResend(text) || naturalMailApproval(text) || contextualMailApproval(text))) {
       plan = { ...plan, decision: 'respond', deliveryAction: 'confirm', calendarAction: 'none', reasoningEffort: 'low' };
     } else if ((!plan.deliveryAction || plan.deliveryAction === 'none' || plan.deliveryAction === 'confirm') && explicitDocumentRequest(text)) {
@@ -126,7 +138,13 @@ export class DeliveryDialogue implements DialogueModel {
     const context = this.plans.get(signal); this.plans.delete(signal);
     const action = context?.plan.deliveryAction ?? 'none';
     signal.throwIfAborted();
-    if (action === 'none') { await this.base.reply(history, signal, delta, update, effort, mode, workflows); return; }
+    if (action === 'none') {
+      let answer = '';
+      await this.base.reply(history, signal, text => { answer += text; delta(text); }, update, effort, mode, workflows);
+      signal.throwIfAborted();
+      if (hasLongFormDocumentOffer(answer)) this.documentOffer = { prompt: answer, expires: this.now() + 5 * 60000 };
+      return;
+    }
     if (action === 'not_received') { this.retryPreview(delta); return; }
     if (action === 'received') {
       if (!this.jobId || !this.jobs.mailState(this.jobId) || this.jobs.mailState(this.jobId) === 'sending') { delta('谢谢反馈。当前没有可关联的已结束发送记录；你也可以在网页文件列表标记对应邮件已收到。'); return; }

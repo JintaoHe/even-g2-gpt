@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Conversation, type DialogueModel } from '../src/conversation.js';
 import { DeliveryDialogue } from '../src/delivery-dialogue.js';
-import { createDraftGenerator, type Draft, type DraftGenerator } from '../src/delivery-draft.js';
+import { createDraftGenerator, protectedDocumentEntities, type Draft, type DraftGenerator } from '../src/delivery-draft.js';
 import { presentation } from '../src/document-presentation.js';
 import { JobStore } from '../src/job-store.js';
 import type { DeliveryAction } from '../src/delivery-intent.js';
@@ -14,12 +14,13 @@ import WebSocket from 'ws';
 import { createConversationServer } from '../src/conversation-server.js';
 import { paginate } from '../clients/even/src/pager.js';
 import type { DeliveryRecoveryState } from '../src/recovery-drafts.js';
+import { CHINESE_LONG_FORM_OFFER, acceptsLongFormDocumentOffer } from '../src/long-form-offer.js';
 
 const draft: Draft = { document: { markdown: '# 部署步骤\n\n1. 检查配置\n2. 运行测试\n', presentation: presentation('部署步骤', '两步部署清单，不是聊天记录。', 'summary') } };
-async function fixture(run: (f: { conversation: Conversation; store: JobStore; model: DeliveryDialogue; route: (a: DeliveryAction) => void; sent: Draft[]; advance: () => void }) => Promise<void>, generator: DraftGenerator = async () => structuredClone(draft), artifactSource?: () => import('../src/conversation.js').Message[]) {
+async function fixture(run: (f: { conversation: Conversation; store: JobStore; model: DeliveryDialogue; route: (a: DeliveryAction) => void; sent: Draft[]; advance: () => void }) => Promise<void>, generator: DraftGenerator = async () => structuredClone(draft), artifactSource?: () => import('../src/conversation.js').Message[], baseReply = '普通回答') {
   const root = await mkdtemp(join(tmpdir(), 'even-delivery-')), store = await JobStore.create(root);
   let action: DeliveryAction = 'document', now = Date.now(); const sent: Draft[] = [];
-  const base: DialogueModel = { plan: async () => ({ decision: 'respond', deliveryAction: action }), decide: async () => 'respond', reply: async (_h, _s, delta) => delta('普通回答') };
+  const base: DialogueModel = { plan: async () => ({ decision: 'respond', deliveryAction: action }), decide: async () => 'respond', reply: async (_h, _s, delta) => delta(baseReply) };
   const model = new DeliveryDialogue(base, store, generator, async (_id, bytes, metadata, calendar) => {
     sent.push({ document: { markdown: bytes.toString(), presentation: metadata! }, calendar }); return 'accepted';
   }, () => now, undefined, artifactSource);
@@ -121,6 +122,31 @@ test('contextual email assent cannot send or create an artifact without a formal
     assert.equal(store.list().length, 0);
     assert.equal(sent.length, 0);
   });
+});
+
+test('a bound long-form offer accepts natural assent, generates a document preview, and never sends email', async () => {
+  const offer = `向量数据库按语义相似度检索，并不替代 SQL 的精确事务查询。\n${CHINESE_LONG_FORM_OFFER}`;
+  for (const phrase of ['要', '好的', '嗯，想看', '要完整长文', '好，发给我']) {
+    await fixture(async ({ conversation, store, route, sent }) => {
+      route('none'); await conversation.submit('详细解释向量数据库', true);
+      assert.equal(conversation.history.at(-1)?.content, offer);
+      await conversation.submit(phrase, true);
+      assert.equal(store.list().length, 1, phrase); assert.equal(sent.length, 0, phrase);
+      assert.match(conversation.history.at(-1)!.content, /文件已生成[\s\S]*确认发送/);
+    }, async () => structuredClone(draft), undefined, offer);
+  }
+});
+
+test('long-form assent is one-turn, exact-message-bound and rejects negation or questions', async () => {
+  const offer = `先给你结论。\n${CHINESE_LONG_FORM_OFFER}`;
+  assert.equal(acceptsLongFormDocumentOffer('不要，先聊别的'), false);
+  assert.equal(acceptsLongFormDocumentOffer('可以吗？'), false);
+  await fixture(async ({ conversation, store, route }) => {
+    route('none'); await conversation.submit('详细说明', true);
+    conversation.history.push({ role: 'assistant', content: '这是一条不同的助手消息。' });
+    await conversation.submit('要', true);
+    assert.equal(store.list().length, 0);
+  }, async () => structuredClone(draft), undefined, offer);
 });
 test('a verbose document preview is bounded for the glasses without changing the saved file', async () => {
   const verbose: Draft = { document: { markdown: '# 完整正文\n\n' + '保留内容'.repeat(100), presentation: presentation(
@@ -237,9 +263,19 @@ test('draft API has no tools or mail access, preserves standalone content and fa
   const result = await generate([{ role: 'user', content: '导出刚才的步骤' }], 'document', undefined, new AbortController().signal);
   assert.equal(body.tools, undefined); assert.equal(body.store, false); assert.equal(body.text.format.strict, true);
   assert.ok('document' in result); assert.match(result.document.markdown, /https:\/\/example.com/); assert.doesNotMatch(result.document.markdown, /完整对话/);
+  assert.match(body.instructions, /project codenames, ticket IDs, person names and event titles verbatim/);
   status = 'incomplete'; await assert.rejects(generate([], 'document', undefined, new AbortController().signal));
   status = 'completed'; output = { ...output, calendar: { start: 'Friday' } };
   assert.ok('clarification' in await generate([], 'calendar', undefined, new AbortController().signal));
+});
+
+test('document entity hints preserve unusual event titles, project codenames, tickets and quoted names', () => {
+  const entities = protectedDocumentEntities([
+    { role: 'assistant', content: '1. repro check\n   时间：2026-10-02 19:00–19:30\n2. 普通事项' },
+    { role: 'user', content: '项目代号 Project Zephyr，ticket 是 DATA-417，请保留“Avery Vale”这个名字。' },
+  ]);
+  for (const entity of ['repro check', 'DATA-417', 'Avery Vale', 'Project Zephyr']) assert.ok(entities.includes(entity), entity);
+  assert.equal(entities.includes('Ripple Check'), false);
 });
 
 test('WebSocket conversation prepares a draft, requires a separate turn and sends through backend state', { timeout: 10000 }, async () => {
