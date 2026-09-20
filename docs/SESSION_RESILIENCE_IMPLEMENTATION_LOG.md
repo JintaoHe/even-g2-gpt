@@ -126,3 +126,34 @@ Phase 1.2 storage portion：**PASS**。三个 integration checkbox 保留未完�
 ### Gate
 
 Phase 1.3 storage foundation：**PASS**。SQLite 原语和现有 runtime 的 save-before-done 契约已验证；WebSocket runtime 尚未切换到 SQLite，也尚未发送 protocol v2 的 `answer.committed`。这些 integration 条目保持未完成，进入 Phase 2 后逐项关闭。
+
+## 2026-09-19 — Phase 2／3 resumable session protocol 与写操作恢复边界
+
+### 实现
+
+- 新增与 WebSocket 解耦的 `SessionRegistry`；连接关闭只 detach，logical session 在 15 分钟窗口内保留，明确退出／过期才结束。
+- `Conversation` 正式接入 SQLite：user ACK、streaming placeholder、节流 checkpoint、final transaction 和 `answer.committed` 均遵守 durable-before-visible 顺序。
+- protocol v2 支持 client/session ID、`last_seen_sequence`、增量 snapshot、单 active input lease、服务重启 lazy hydrate 和显式 `answer.retry`。
+- resume credential 使用 32-byte 随机 secret，SQLite 只保存 SHA-256 hash；绑定 client/session，短期到期，恢复时轮换并撤销全部 sibling credentials。
+- 长连接在 credential 到期前收到 `resume.credential` replacement，避免连接超过 16 分钟后失去断线恢复能力。
+- loopback 开发服务器支持“立即模拟会话过期”的 wire control；配置公网 host 时构造直接失败，不能误部署该控制。
+- Calendar／Email 在断线、暂停和连接替换时撤销执行授权但保留可恢复草稿；provider 请求已发出后不自动重放。
+- Calendar 批量取消恢复后重新读取权威事件、重新生成逐项预览，并保留“第 n/总数项”进度。
+- 明确的自然语言“刚才没看到／请再说一次”会查询 SQLite：committed 回答零模型调用原样补发，interrupted 回答创建带 `retry_of_turn_id` 的新 turn。
+- stale Email confirmation 会查询 durable mail state：未发送则生成新预览，accepted／unknown 则报告权威状态；Calendar unknown operation 只读核对 Google，证据吻合才晋升 succeeded。
+
+### 自动化结果
+
+1. Session/durable/reconnect/write-recovery target tests：`27 passed / 0 failed`；随后 TypeScript 通过。
+2. Calendar／Email adjacent regression（含新增 batch/reconcile cases）：`70 passed / 0 failed`。
+3. 额外 fault cases 覆盖：断线前待确认、provider 请求进行中断线、成功回执丢失、旧确认重放、long-lived credential refresh、credential sibling replay。
+4. `SessionRegistry` 进行 50 轮双客户端并发恢复争用；每轮恰好一个成功、另一个 fail closed。
+5. Shared working-tree full regression（包含未纳入本 PR 的 5 个 cost-control tests）：`309 passed / 0 failed / 1 Windows platform skip`，共 310 tests。
+6. Windows skip 仍是无权限创建数据库文件 symlink；目录 junction 拒绝测试通过，Linux gate 仍需重跑 file symlink case。
+7. Root TypeScript：通过。
+8. Production dependency audit：`0 vulnerabilities`；shared working-tree public audit 扫描 249 个 source/document files，未发现禁止路径或本地 credential value。
+9. 将未提交的 cost-control／文档改动临时隔离后，对 PR commit 精确重跑：`304 passed / 0 failed / 1 Windows platform skip`，共 305 tests；TypeScript、server-only build 和 244-file public audit 全部通过。随后已原样恢复隔离的本地改动。
+
+### Gate
+
+Phase 2 server foundation 与 Phase 3 write-safety foundation：**PASS**。客户端 credential 持久化、自动重连、恢复 UI 和 simulator“立即过期”按钮仍属于 Phase 4，不在本阶段冒充完成。宽泛的跨 topic recap 仍留给 Phase 5 ContextBuilder；普通重连不会自动调用模型或重放副作用。

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 export type Citation = { start: number; end: number; url: string; title: string };
 export type ReplyUpdate = { type: 'search.status'; status: string } | { type: 'calendar.status'; status: 'planning' | 'querying' | 'saving' }
   | { type: 'route.status'; status: 'locating' | 'resolving' | 'searching' | 'routing' | 'comparing' | 'clarifying' }
@@ -73,6 +75,68 @@ export interface DialogueModel {
 }
 export type Event = { type: string; [key: string]: unknown };
 
+export type DurableTurnCommit = {
+  sessionId: string;
+  topicId: string;
+  topicLabel: string;
+  messageId: string;
+  turnId: string;
+  content: string;
+  createdAt: number;
+  cognitiveMode?: string;
+  reasoningEffort?: ReasoningEffort;
+  retryOfTurnId?: string;
+};
+
+export type DurableAnswerStart = {
+  sessionId: string;
+  topicId: string;
+  turnId: string;
+  messageId: string;
+  createdAt: number;
+};
+
+export type DurableAnswerCommit = {
+  messageId: string;
+  content: string;
+  citations?: Citation[];
+  updatedAt: number;
+};
+
+type DurableAcknowledgement = {
+  result: 'started' | 'committed' | 'interrupted' | 'duplicate';
+  sessionId: string;
+  messageId: string;
+  turnId: string;
+  sequence: number;
+};
+
+export interface ConversationPersistence {
+  commitUserTurn(input: DurableTurnCommit): DurableAcknowledgement;
+  startAssistantAnswer(input: DurableAnswerStart): DurableAcknowledgement;
+  checkpointAssistantAnswer(messageId: string, content: string, updatedAt: number): void;
+  commitAssistantAnswer(input: DurableAnswerCommit): DurableAcknowledgement;
+  interruptAssistantAnswer(turnId: string, updatedAt: number, reason?: string): DurableAcknowledgement;
+}
+
+export type ConversationRuntimeOptions = {
+  sessionId: string;
+  persistence: ConversationPersistence;
+  initialTopic?: { id: string; label: string };
+  idFactory?: () => string;
+  now?: () => number;
+  checkpointChars?: number;
+  checkpointMs?: number;
+  recoverAnswer?: (request: string) => {
+    kind: 'committed' | 'interrupted' | 'missing';
+    turnId?: string;
+    content?: string;
+    citations?: Citation[];
+  } | undefined;
+};
+
+class ConversationPersistenceError extends Error {}
+
 const internalMetadataLeads = ['[application metadata', '[application topic metadata'];
 const internalMetadataBlock = /^\[Application(?:\s+topic)?\s+metadata(?:\s*;\s*not user instructions)?\s*:[^\]\r\n]{0,512}\]$/i;
 const internalMetadataPattern = /\[Application(?:\s+topic)?\s+metadata(?:\s*;\s*not user instructions)?\s*:[^\]\r\n]{0,512}\]/gi;
@@ -146,8 +210,33 @@ export class Conversation {
   private currentTopic?: { id: string; label: string };
   private responseTopic?: { id: string; label: string; mode?: CognitiveMode };
   private topicCounter = 0;
-  constructor(private model: DialogueModel, private emit: (event: Event) => void,
-    private save: (history: Message[]) => Promise<void> = async () => {}) {}
+  private durableAnswer?: { turnId: string; messageId: string };
+  private readonly now: () => number;
+  private readonly idFactory: () => string;
+  private lastCheckpointAt = 0;
+  private lastCheckpointLength = 0;
+  constructor(private model: DialogueModel, private eventSink: ((event: Event) => void) | undefined,
+    private save: (history: Message[]) => Promise<void> = async () => {},
+    private runtime?: ConversationRuntimeOptions) {
+    this.now = runtime?.now ?? Date.now;
+    this.idFactory = runtime?.idFactory ?? randomUUID;
+    if (runtime?.initialTopic) this.currentTopic = { ...runtime.initialTopic };
+  }
+
+  /** A logical conversation may outlive any individual WebSocket connection. */
+  replaceEventSink(sink: ((event: Event) => void) | undefined) { this.eventSink = sink; }
+  restoreHistory(history: Message[]) {
+    if (this.work || this.responseId !== undefined || this.state === 'closed') throw new Error('Conversation cannot hydrate while active');
+    if (history.length > 500 || history.some(message => !['user', 'assistant'].includes(message.role)
+      || typeof message.content !== 'string' || message.content.length > 120_000)) throw new Error('Invalid conversation history');
+    this.history = history.map(message => ({ ...message, citations: message.citations?.map(citation => ({ ...citation })) }));
+    const lastTopic = [...this.history].reverse().find(message => message.topicId && message.topicLabel);
+    this.currentTopic = lastTopic?.topicId && lastTopic.topicLabel
+      ? { id: lastTopic.topicId, label: lastTopic.topicLabel } : this.currentTopic;
+    this.pending = '';
+    this.state = 'listening';
+  }
+  private emit(event: Event) { this.eventSink?.(event); }
 
   get acceptsInput() { return !['paused', 'exit_pending', 'closed'].includes(this.state); }
   private status(state: Conversation['state']) { this.state = state; this.emit({ type: 'state', state }); }
@@ -155,12 +244,19 @@ export class Conversation {
     this.revision++; this.work?.abort(); this.work = undefined;
     if (this.responseId !== undefined) {
       const committing = this.committing; this.committing = false;
+      if (this.durableAnswer && !committing) {
+        try {
+          if (this.partial) this.runtime?.persistence.checkpointAssistantAnswer(
+            this.durableAnswer.messageId, stripInternalMetadata(this.partial), this.now());
+          this.runtime?.persistence.interruptAssistantAnswer(this.durableAnswer.turnId, this.now());
+        } catch { this.emit({ type: 'error', code: 'SAVE_FAILED' }); }
+      }
       this.emit({ type: 'answer.cancelled', id: this.responseId });
       if (this.partial && !committing) this.history.push({ role: 'assistant', content: this.partial + '\n[回答被用户打断，未完成]', citations: this.citations,
         topicId: this.responseTopic?.id, topicLabel: this.responseTopic?.label, cognitiveMode: this.responseTopic?.mode,
         assistantMode: this.responseTopic?.mode });
       this.responseId = undefined; this.partial = ''; this.citations = [];
-      this.responseTopic = undefined;
+      this.responseTopic = undefined; this.durableAnswer = undefined;
     }
   }
   interrupt() {
@@ -196,11 +292,12 @@ export class Conversation {
     if (plan.topicAction === 'resume' && plan.topicTarget && existing.has(plan.topicTarget)) {
       this.currentTopic = existing.get(plan.topicTarget);
     } else if (plan.topicAction === 'switch' || !this.currentTopic) {
-      this.currentTopic = { id: `topic-${++this.topicCounter}`, label: requestedLabel || plan.cognitiveMode || plan.assistantMode || 'conversation' };
+      this.currentTopic = { id: this.runtime ? this.idFactory() : `topic-${++this.topicCounter}`,
+        label: requestedLabel || plan.cognitiveMode || plan.assistantMode || 'conversation' };
     }
     return this.currentTopic!;
   }
-  async submit(text: string, forced = false) {
+  async submit(text: string, forced = false, identity?: { messageId?: string; retryOfTurnId?: string }) {
     if (!this.acceptsInput) return;
     const clean = text.trim();
     if (clean.length > 6000 || this.pending.length + clean.length > 12000) {
@@ -216,8 +313,12 @@ export class Conversation {
     try {
       const text = this.pending;
       const history = this.history.map(m => ({ ...m }));
-      const rawPlan = this.model.plan ? await this.model.plan(history, text, forced, controller.signal)
-        : { decision: await this.model.decide(history, text, forced, controller.signal) };
+      const recovery = this.runtime?.recoverAnswer?.(text);
+      const rawPlan = recovery?.kind === 'committed' || recovery?.kind === 'missing'
+        ? { decision: 'respond' as const, cognitiveMode: 'casual' as const, reasoningEffort: 'low' as const,
+          workflows: [] as WorkflowSelection[] }
+        : this.model.plan ? await this.model.plan(history, text, forced, controller.signal)
+          : { decision: await this.model.decide(history, text, forced, controller.signal) };
       const plan = normalizeTurnPlan(rawPlan);
       const { decision } = plan;
       if (!current()) return;
@@ -226,13 +327,59 @@ export class Conversation {
       }
       const topic = this.resolveTopic(plan);
       this.pending = '';
+      let turnId: string | undefined, userMessageId: string | undefined, userSequence: number | undefined;
+      if (this.runtime) {
+        try {
+          userMessageId = identity?.messageId ?? this.idFactory();
+          const acknowledgement = this.runtime.persistence.commitUserTurn({
+            sessionId: this.runtime.sessionId,
+            topicId: topic.id,
+            topicLabel: topic.label,
+            messageId: userMessageId,
+            turnId: this.idFactory(),
+            content: text,
+            createdAt: this.now(),
+            cognitiveMode: plan.cognitiveMode,
+            reasoningEffort: plan.reasoningEffort,
+            retryOfTurnId: identity?.retryOfTurnId ?? recovery?.turnId,
+          });
+          turnId = acknowledgement.turnId;
+          userSequence = acknowledgement.sequence;
+          this.emit({ type: 'message.ack', session_id: this.runtime.sessionId, message_id: userMessageId,
+            turn_id: turnId, sequence: userSequence, result: acknowledgement.result });
+          if (acknowledgement.result === 'duplicate') {
+            this.status('listening');
+            return;
+          }
+        } catch (error) { throw new ConversationPersistenceError(String(error)); }
+      }
       this.history.push({ role: 'user', content: text, topicId: topic.id, topicLabel: topic.label,
         cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode });
-      this.emit({ type: 'turn.committed', text, topicId: topic.id, topicLabel: topic.label });
+      this.emit({ type: 'turn.committed', text, topicId: topic.id, topicLabel: topic.label,
+        ...(this.runtime ? { session_id: this.runtime.sessionId, message_id: userMessageId,
+          turn_id: turnId, sequence: userSequence } : {}) });
       if (decision === 'exit') { await this.requestExit(); return; }
       this.responseId = revision; this.partial = ''; this.citations = [];
       this.responseTopic = { ...topic, mode: plan.cognitiveMode };
+      let assistantMessageId: string | undefined, assistantSequence: number | undefined;
+      if (this.runtime) {
+        try {
+          assistantMessageId = this.idFactory();
+          const acknowledgement = this.runtime.persistence.startAssistantAnswer({
+            sessionId: this.runtime.sessionId,
+            topicId: topic.id,
+            turnId: turnId!,
+            messageId: assistantMessageId,
+            createdAt: this.now(),
+          });
+          assistantSequence = acknowledgement.sequence;
+          this.durableAnswer = { turnId: turnId!, messageId: assistantMessageId };
+          this.lastCheckpointAt = this.now(); this.lastCheckpointLength = 0;
+        } catch (error) { throw new ConversationPersistenceError(String(error)); }
+      }
       this.status('answering'); this.emit({ type: 'answer.start', id: revision,
+        ...(this.runtime ? { session_id: this.runtime.sessionId, message_id: assistantMessageId,
+          turn_id: turnId, sequence: assistantSequence } : {}),
         reasoningEffort: decision === 'clarify_exit' ? undefined : plan.reasoningEffort,
         cognitiveMode: decision === 'clarify_exit' ? undefined : plan.cognitiveMode,
         assistantMode: decision === 'clarify_exit' ? undefined : plan.cognitiveMode,
@@ -241,10 +388,39 @@ export class Conversation {
       const visible = new InternalMetadataFilter();
       const append = (value: string) => {
         if (!current()) return;
-        this.partial += value; this.emit({ type: 'answer.delta', id: revision, text: value });
+        this.partial += value; this.emit({ type: 'answer.delta', id: revision, text: value,
+          ...(this.runtime && this.durableAnswer ? { session_id: this.runtime.sessionId,
+            message_id: this.durableAnswer.messageId, turn_id: this.durableAnswer.turnId,
+            sequence: assistantSequence } : {}) });
+        if (this.durableAnswer) {
+          const now = this.now();
+          const enoughText = this.partial.length - this.lastCheckpointLength >= (this.runtime?.checkpointChars ?? 512);
+          const enoughTime = now - this.lastCheckpointAt >= (this.runtime?.checkpointMs ?? 500);
+          if (enoughText || enoughTime) {
+            try {
+              this.runtime!.persistence.checkpointAssistantAnswer(
+                this.durableAnswer.messageId, stripInternalMetadata(this.partial), now);
+              this.lastCheckpointAt = now; this.lastCheckpointLength = this.partial.length;
+            } catch (error) { throw new ConversationPersistenceError(String(error)); }
+          }
+        }
       };
       const delta = (value: string) => { const safe = visible.push(value); if (safe) append(safe); };
-      if (decision === 'clarify_exit') delta('你是想结束这次对话，还是继续聊？');
+      if (recovery?.kind === 'committed') {
+        const content = stripInternalMetadata(recovery.content ?? '');
+        if (!content) throw new ConversationPersistenceError('Stored answer is empty');
+        this.partial = content;
+        this.citations = recovery.citations?.map(citation => ({ ...citation })) ?? [];
+        if (this.citations.length) this.emit({ type: 'answer.citations', id: revision, text: content,
+          citations: this.citations, ...(this.runtime && this.durableAnswer ? { session_id: this.runtime.sessionId,
+            message_id: this.durableAnswer.messageId, turn_id: this.durableAnswer.turnId,
+            sequence: assistantSequence } : {}) });
+        else this.emit({ type: 'answer.delta', id: revision, text: content,
+          ...(this.runtime && this.durableAnswer ? { session_id: this.runtime.sessionId,
+            message_id: this.durableAnswer.messageId, turn_id: this.durableAnswer.turnId,
+            sequence: assistantSequence } : {}) });
+      } else if (recovery?.kind === 'missing') delta('当前会话里没有可以恢复的上一轮回答。');
+      else if (decision === 'clarify_exit') delta('你是想结束这次对话，还是继续聊？');
       else await this.model.reply(this.history.map(message => ({ ...message })), controller.signal, delta, event => {
         if (!current()) return;
         if (event.type === 'answer.citations') {
@@ -269,20 +445,38 @@ export class Conversation {
       this.history.push({ role: 'assistant', content: this.partial, citations: this.citations,
         topicId: topic.id, topicLabel: topic.label, cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode });
       this.committing = true;
+      let durableCommit: DurableAcknowledgement | undefined;
+      if (this.durableAnswer) {
+        try {
+          durableCommit = this.runtime!.persistence.commitAssistantAnswer({
+            messageId: this.durableAnswer.messageId,
+            content: this.partial,
+            citations: this.citations,
+            updatedAt: this.now(),
+          });
+        } catch (error) { this.committing = false; throw new ConversationPersistenceError(String(error)); }
+      }
       const saved = await this.persist();
       this.committing = false;
       if (!current()) return;
       if (!saved) {
         this.responseId = undefined; this.partial = ''; this.citations = []; this.responseTopic = undefined;
+        this.durableAnswer = undefined;
         this.status('paused'); return;
       }
-      this.emit({ type: 'answer.done', id: revision });
+      if (durableCommit) this.emit({ type: 'answer.committed', id: revision,
+        session_id: durableCommit.sessionId, message_id: durableCommit.messageId,
+        turn_id: durableCommit.turnId, sequence: durableCommit.sequence, content: this.partial });
+      this.emit({ type: 'answer.done', id: revision,
+        ...(durableCommit ? { session_id: durableCommit.sessionId, message_id: durableCommit.messageId,
+          turn_id: durableCommit.turnId, sequence: durableCommit.sequence } : {}) });
       this.responseId = undefined; this.partial = '';
-      this.responseTopic = undefined;
+      this.responseTopic = undefined; this.durableAnswer = undefined;
       this.status('listening');
-    } catch {
+    } catch (error) {
       if (!current()) return;
-      this.cancel(); this.status('paused'); this.emit({ type: 'error', code: 'MODEL_FAILED' });
+      this.cancel(); this.status('paused'); this.emit({ type: 'error',
+        code: error instanceof ConversationPersistenceError ? 'SAVE_FAILED' : 'MODEL_FAILED' });
     }
   }
 }

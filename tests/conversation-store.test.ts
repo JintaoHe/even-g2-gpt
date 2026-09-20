@@ -77,6 +77,42 @@ test('session plus initial topic is atomic and foreign keys remain enabled', asy
   } finally { await store.close(); }
 });
 
+test('session lifecycle and topics are durable, monotonic and fail closed after a terminal state', async () => {
+  const root = await directory(), store = await ConversationStore.create(root);
+  const sessionId = randomUUID(), firstTopic = randomUUID(), secondTopic = randomUUID();
+  try {
+    store.createSession({
+      id: sessionId, ownerScope: 'single-user', createdAt: 100,
+      initialTopic: { id: firstTopic, label: 'General' },
+    });
+    store.ensureTopic({ sessionId, id: secondTopic, label: 'Trip plan', at: 110 });
+    store.ensureTopic({ sessionId, id: secondTopic, label: 'Trip plan', at: 111 });
+    assert.deepEqual(store.listTopics(sessionId), [
+      { id: firstTopic, sessionId, label: 'General', status: 'active', createdAt: 100, updatedAt: 100 },
+      { id: secondTopic, sessionId, label: 'Trip plan', status: 'active', createdAt: 110, updatedAt: 111 },
+    ]);
+
+    store.markSessionDetached(sessionId, 120);
+    assert.deepEqual(store.getSession(sessionId), {
+      id: sessionId, ownerScope: 'single-user', status: 'idle', createdAt: 100,
+      updatedAt: 120, lastActivityAt: 100, latestSequence: 0, summaryThroughSequence: 0,
+    });
+    store.markSessionAttached(sessionId, 130);
+    assert.equal(store.getSession(sessionId)?.status, 'active');
+    assert.equal(store.getSession(sessionId)?.updatedAt, 130);
+
+    store.endSession(sessionId, 140, 'user_exit');
+    assert.deepEqual(store.getSession(sessionId), {
+      id: sessionId, ownerScope: 'single-user', status: 'ended', createdAt: 100,
+      updatedAt: 140, lastActivityAt: 100, endedAt: 140, endReason: 'user_exit',
+      latestSequence: 0, summaryThroughSequence: 0,
+    });
+    assert.throws(() => store.markSessionAttached(sessionId, 150), /unavailable/i);
+    assert.throws(() => store.markSessionDetached(sessionId, 150), /unavailable/i);
+    assert.throws(() => store.endSession(sessionId, 150, 'again'), /unavailable/i);
+  } finally { await store.close(); }
+});
+
 test('conversation store rejects a symlinked data root', async t => {
   const target = await directory('even-conversation-target-');
   const parent = await directory('even-conversation-link-');

@@ -120,8 +120,8 @@ test('mail endpoint requires authentication, rejects recipient overrides and sen
     }
     const client = new WebSocket(url); await once(client, 'open');
     const ready = waitFor(client, 'ready'); client.send(JSON.stringify({ type: 'hello', token })); await ready;
-    const denied = waitFor(client, 'notice'); client.send(JSON.stringify({ type: 'jobs.email', id }));
-    assert.match((await denied).text, /确认已失效/); assert.equal(sends, 0);
+    const recoveredPreview = waitFor(client, 'mail.confirmation_required'); client.send(JSON.stringify({ type: 'jobs.email', id }));
+    assert.ok((await recoveredPreview).confirmation); assert.equal(sends, 0);
     const preview = waitFor(client, 'mail.confirmation_required'); client.send(JSON.stringify({ type: 'jobs.email.prepare', id }));
     let approval = await preview; assert.equal(sends, 0); assert.match(approval.preview, /Synthetic test/);
     assert.match(approval.preview, /美国芝加哥/); assert.match(approval.preview, /美国洛杉矶/); assert.match(approval.preview, /美国纽约/);
@@ -132,7 +132,7 @@ test('mail endpoint requires authentication, rejects recipient overrides and sen
     const jobs = (await result).jobs;
     assert.equal(jobs[0].mail_state, 'accepted'); assert.equal(sends, 1);
     const replay = waitFor(client, 'notice'); client.send(JSON.stringify({ type: 'jobs.email', id, confirmation: approval.confirmation }));
-    assert.match((await replay).text, /确认已失效/); assert.equal(sends, 1);
+    assert.match((await replay).text, /邮件服务器已接受|确认是否收到/); assert.equal(sends, 1);
     const retryPreview = waitFor(client, 'mail.confirmation_required'); client.send(JSON.stringify({ type: 'jobs.email.prepare', id, retry: true }));
     const retryApproval = await retryPreview; assert.match(retryApproval.preview, /重发同一份/); assert.equal(sends, 1);
     const retried = waitFor(client, 'jobs.list'); client.send(JSON.stringify({ type: 'jobs.email', id, confirmation: retryApproval.confirmation, calendar_confirmation: '确认按芝加哥时间重发' }));

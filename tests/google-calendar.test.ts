@@ -177,6 +177,30 @@ test('unknown network result persists; restart expires pending confirmations and
     assert.deepEqual(service.list().operations.map(op => op.state).sort(), ['expired', 'unknown']);
   } finally { await service?.close(); await rm(directory, { recursive: true, force: true }); }
 });
+test('read-only reconciliation proves an unknown create without replaying the write', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'even-google-reconcile-'));
+  const records = new Map<string, any>(); let writes = 0;
+  const transport: CalendarTransport = async (method, path, body: any) => {
+    const id = path.split('/')[2]?.split('?')[0];
+    if (method === 'POST') {
+      writes++;
+      const saved = { ...body, etag: '"1"' }; records.set(body.id, saved);
+      throw new CalendarError('CALENDAR_NETWORK_UNKNOWN');
+    }
+    if (method === 'GET' && records.has(id)) return structuredClone(records.get(id));
+    throw new CalendarError('NOT_FOUND', 404);
+  };
+  const service = await GoogleCalendarService.create(directory, 'dedicated', transport);
+  try {
+    const pending = await service.preview('create', event);
+    assert.equal((await service.confirm(pending.id, pending.phrase)).state, 'unknown');
+    const recovered = await service.reconcile(pending.id);
+    assert.equal(recovered.state, 'succeeded');
+    assert.equal(writes, 1);
+    assert.equal((await service.reconcile(pending.id)).state, 'succeeded');
+    assert.equal(writes, 1);
+  } finally { await service.close(); await rm(directory, { recursive: true, force: true }); }
+});
 test('transport refreshes server-side, caches token, fixes calendar and redacts auth failures', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'even-google-token-'));
   try {
@@ -223,7 +247,8 @@ test('authenticated browser protocol advertises calendar and requires a separate
     assert.equal((await wait('calendar.result')).state, 'succeeded');
     assert.equal(f.calls.length, 1);
     socket.send(JSON.stringify({ type: 'calendar.confirm', id: preview.id, phrase: preview.phrase }));
-    await wait('calendar.error'); assert.equal(f.calls.length, 1);
+    const recovered = await wait('calendar.result');
+    assert.equal(recovered.state, 'succeeded'); assert.equal(recovered.recovered, true); assert.equal(f.calls.length, 2);
     socket.send(JSON.stringify({ type: 'calendar.preview', kind: 'cancel', eventId: preview.eventId }));
     const cancellation = await wait('calendar.preview');
     socket.send(JSON.stringify({ type: 'pause' }));

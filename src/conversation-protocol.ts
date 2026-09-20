@@ -101,6 +101,17 @@ export type ReadyEventV2 = {
   snapshot: ConversationSnapshotV2;
 };
 
+/** A connected client periodically receives a replacement short-lived
+ * credential so a long-lived socket can still recover after a later drop.
+ * The client must persist this value in the same restricted storage used for
+ * the credential returned by `ready` and replace the previous value. */
+export type ResumeCredentialEventV2 = {
+  type: 'resume.credential';
+  session_id: string;
+  resume_credential: string;
+  resume_expires_at: number;
+};
+
 export type MessageAckEventV2 = {
   type: 'message.ack';
   session_id: string;
@@ -123,7 +134,7 @@ export type AnswerCommittedEventV2 = AnswerEventIdentityV2 & {
   content: string;
 };
 
-export type CoreServerEventV2 = ReadyEventV2 | MessageAckEventV2 | AnswerStartEventV2
+export type CoreServerEventV2 = ReadyEventV2 | ResumeCredentialEventV2 | MessageAckEventV2 | AnswerStartEventV2
   | AnswerDeltaEventV2 | AnswerCommittedEventV2;
 
 type PersistencePolicy = 'none' | 'session-state' | 'durable-before-ack';

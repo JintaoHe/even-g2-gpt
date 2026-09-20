@@ -208,6 +208,33 @@ export class GoogleCalendarService {
       operations: (this.db.prepare('SELECT data FROM operations ORDER BY rowid DESC LIMIT 30').all() as { data: string }[])
         .map(r => { const op = JSON.parse(r.data) as Operation; return { id: op.id, eventId: op.eventId, kind: op.kind, state: op.state, error: op.error }; }) };
   }
+  /** Read-only recovery for a provider result whose UI acknowledgement may
+   * have been lost. It never repeats a write. An unknown result is promoted to
+   * succeeded only when current Google state proves the exact operation. */
+  async reconcile(id: string) {
+    const op = this.operation(id);
+    if (!['succeeded', 'unknown', 'sending'].includes(op.state)) {
+      return { id: op.id, eventId: op.eventId, kind: op.kind, state: op.state, error: op.error };
+    }
+    if (op.state === 'sending') { op.state = 'unknown'; this.save(op); }
+    try {
+      const remote = await this.remote(op.eventId);
+      if (op.kind !== 'cancel' && JSON.stringify(previewEvent(remote)) === JSON.stringify(op.event)) {
+        op.state = 'succeeded'; op.error = undefined; this.save(op);
+      } else {
+        return { id: op.id, eventId: op.eventId, kind: op.kind, state: 'conflict',
+          error: 'CALENDAR_CHANGED_REVIEW_AGAIN' };
+      }
+    } catch (error) {
+      if (op.kind === 'cancel' && error instanceof CalendarError && error.status === 404) {
+        op.state = 'succeeded'; op.error = undefined; this.save(op);
+      } else {
+        return { id: op.id, eventId: op.eventId, kind: op.kind, state: 'unknown',
+          error: 'CALENDAR_RECONCILIATION_REQUIRED' };
+      }
+    }
+    return { id: op.id, eventId: op.eventId, kind: op.kind, state: op.state, error: op.error };
+  }
   private supported(remote: any) {
     // The private marker is written only by this backend on the dedicated
     // calendar. Attendee response changes or an additional guest must not turn
