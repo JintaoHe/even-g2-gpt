@@ -38,7 +38,7 @@ Glass Assistant is intended to behave like a personal assistant, not a data-repo
 | Dynamic time zones | Google Time Zone is primary. A bounded Luna fallback receives no coordinates and must return a valid IANA zone or ask one location question |
 | Documents and email | Generate a topic-scoped Markdown artifact, preview it, request confirmation, and send it to the configured fixed recipient with a descriptive subject and attachment name |
 | Optional CLI channel | Codex CLI remains available for operators who prefer subscription-backed execution, with timeout/cancellation feedback; the API channel is the default low-latency experience |
-| Persistence | Backend-owned conversations, jobs, documents and usage ledgers; credentials and exact coordinates are excluded from those records |
+| Persistence | Backend-owned conversations, jobs, documents and usage ledgers; raw credential secrets and exact coordinates are excluded (only scoped credential hashes/metadata are stored server-side) |
 
 Calendar and email are authoritative private-state workflows. They never fall back to a model guess: writes require backend validation, preview-bound confirmation, idempotency handling, and a receipt. Maps, Weather, Air Quality, and Pollen are read-only evidence and may use a clearly disclosed, quota-bounded public-research fallback.
 
@@ -137,6 +137,7 @@ For this personal deployment, the application now enforces a persistent `$80` mo
 - Commit source, synthetic fixtures, and documentation only—not `.env`, OAuth JSON, CLI authentication, recordings, private conversations, generated documents, or runtime databases.
 - Exact GPS coordinates live only in volatile session adapters. They refresh at most every 10 seconds, become unusable after two minutes, never enter Luna/search/history/logs/artifacts, and may survive a transport disconnect inside the same resumable session; explicit session exit or final expiry clears them.
 - Calendar and email credentials stay in the backend. The model cannot select arbitrary recipients, read arbitrary server files, or directly execute a shell.
+- The master `G2_CLIENT_TOKEN` remains memory-only. After bootstrap, the Even client stores a revocable, client-scoped device credential in native Even host storage; the backend stores only its hash. Device generations rotate on use and the old/new overlap is capped at five minutes.
 - A cognitive mode, previous confirmation, or model statement never grants write permission. Every side effect is revalidated against its current preview.
 - Unknown Calendar/email write results are checked rather than automatically replayed, preventing duplicate events or messages.
 - `.gitignore` is not encryption. Operators remain responsible for backend access controls, retention, encrypted backups, provider policies, and credential rotation.

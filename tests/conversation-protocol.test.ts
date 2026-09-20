@@ -89,6 +89,30 @@ test('session and storage controls are impossible unless an explicit local-test 
   }
 });
 
+test('device hello is a third exclusive auth mode and persisted ACK is exactly shaped', () => {
+  const clientId = randomUUID(), credentialId = randomUUID();
+  assert.deepEqual(parseCoreClientMessage({
+    type: 'hello', protocol_version: 2, client_id: clientId,
+    device_credential: secret, credential_storage: 'even_host_v1',
+  }), {
+    type: 'hello', protocol_version: 2, client_id: clientId,
+    device_credential: secret, credential_storage: 'even_host_v1',
+  });
+  assert.deepEqual(parseCoreClientMessage({ type: 'credential.persisted', credential_id: credentialId }),
+    { type: 'credential.persisted', credential_id: credentialId });
+  for (const input of [
+    { type: 'hello', protocol_version: 2, client_id: clientId, device_credential: secret },
+    { type: 'hello', protocol_version: 2, client_id: clientId, device_credential: secret,
+      credential_storage: 'browser' },
+    { type: 'hello', protocol_version: 2, client_id: clientId, token: secret,
+      device_credential: secret, credential_storage: 'even_host_v1' },
+    { type: 'hello', protocol_version: 2, client_id: clientId, device_credential: secret,
+      credential_storage: 'even_host_v1', last_seen_sequence: 0 },
+    { type: 'credential.persisted', credential_id: 'bad' },
+    { type: 'credential.persisted', credential_id: credentialId, secret },
+  ]) assert.throws(() => parseCoreClientMessage(input), ProtocolValidationError);
+});
+
 test('protocol publishes orthogonal states and an explicit persistence/idempotency policy', () => {
   assert.deepEqual(CONNECTION_STATES, ['disconnected', 'connecting', 'connected', 'recovering']);
   assert.deepEqual(AUDIO_STATES, ['off', 'starting', 'streaming', 'unavailable']);

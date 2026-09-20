@@ -123,6 +123,78 @@ test('a long-lived connection receives a fresh short-lived resume credential', {
   } finally { client.terminate(); await app.close(); await store.close(); }
 });
 
+test('persisted device credential starts a new session without the master token and rotates with ACK', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-device-credential-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
+  const app = createConversationServer({ token, model, conversationStore: store, transcriber: unusedTranscriber,
+    deviceCredentialTtlMs: 10_000, deviceCredentialPersistWindowMs: 1_000,
+    capabilities: { provider: 'api', delivery: 'api', webSearch: false, speech: false } });
+  app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
+  const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`, clientId = randomUUID();
+  const first = new WebSocket(url); await once(first, 'open');
+  const initialReady = waitFor(first, 'ready');
+  first.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token,
+    credential_storage: 'even_host_v1' }));
+  const initial = await initialReady;
+  assert.match(initial.device_credential, /^[0-9a-f-]{36}\./);
+  assert.match(initial.device_credential_id, /^[0-9a-f-]{36}$/);
+  const initialAck = waitFor(first, 'credential.acknowledged');
+  first.send(JSON.stringify({ type: 'credential.persisted', credential_id: initial.device_credential_id }));
+  assert.equal((await initialAck).credential_id, initial.device_credential_id);
+  first.close(); await once(first, 'close'); await new Promise(resolve => setImmediate(resolve));
+
+  const resumedSocket = new WebSocket(url); await once(resumedSocket, 'open');
+  const resumedReady = waitFor(resumedSocket, 'ready');
+  resumedSocket.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+    credential_storage: 'even_host_v1', resume_session_id: initial.session_id,
+    resume_credential: initial.resume_credential, last_seen_sequence: 0 }));
+  const resumed = await resumedReady;
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.session_id, initial.session_id);
+  assert.notEqual(resumed.device_credential, initial.device_credential, 'resume closes the first-write crash window');
+  const resumedAck = waitFor(resumedSocket, 'credential.acknowledged');
+  resumedSocket.send(JSON.stringify({ type: 'credential.persisted', credential_id: resumed.device_credential_id }));
+  await resumedAck;
+  resumedSocket.close(); await once(resumedSocket, 'close'); await new Promise(resolve => setImmediate(resolve));
+
+  const second = new WebSocket(url); await once(second, 'open');
+  const rotatedReady = waitFor(second, 'ready');
+  second.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+    credential_storage: 'even_host_v1', device_credential: resumed.device_credential }));
+  const rotated = await rotatedReady;
+  assert.equal(rotated.resumed, false);
+  assert.notEqual(rotated.session_id, initial.session_id);
+  assert.notEqual(rotated.device_credential, resumed.device_credential);
+  const rotatedAck = waitFor(second, 'credential.acknowledged');
+  second.send(JSON.stringify({ type: 'credential.persisted', credential_id: rotated.device_credential_id }));
+  await rotatedAck;
+  second.close(); await once(second, 'close'); await new Promise(resolve => setImmediate(resolve));
+
+  const replay = new WebSocket(url); await once(replay, 'open');
+  try {
+    const rejected = waitFor(replay, 'error');
+    replay.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+      credential_storage: 'even_host_v1', device_credential: initial.device_credential }));
+    assert.equal((await rejected).code, 'DEVICE_CREDENTIAL_INVALID');
+  } finally { replay.terminate(); await app.close(); await store.close(); }
+});
+
+test('clients that do not declare Even host storage are never issued a device credential', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-device-opt-in-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
+  const server = await listen(store, model);
+  const client = new WebSocket(server.url); await once(client, 'open');
+  try {
+    const ready = waitFor(client, 'ready');
+    client.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
+    const event = await ready;
+    assert.equal(event.device_credential, undefined);
+    assert.equal(event.device_credential_id, undefined);
+  } finally { client.terminate(); await server.app.close(); await store.close(); }
+});
+
 test('a natural missed-answer request replays committed SQLite content without another model call', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-natural-replay-'));
   const store = await ConversationStore.create(root);
@@ -349,7 +421,7 @@ test('loopback storage lab reports safe metadata and cleans only fixed retention
     };
     const inspected = await command('test.storage.inspect');
     assert.equal(inspected.action, 'inspect');
-    assert.equal(inspected.sqlite.schema_version, 3);
+    assert.equal(inspected.sqlite.schema_version, 4);
     assert.equal(inspected.retention.test_eligible_sessions, 0);
     assert.doesNotMatch(JSON.stringify(inspected), /content|transcript|database_path|session_id/i);
 

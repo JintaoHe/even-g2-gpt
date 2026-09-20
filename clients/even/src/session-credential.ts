@@ -5,6 +5,13 @@ export type ResumeSessionCredential = {
   expiresAt: number;
 };
 
+export type DeviceCredential = {
+  clientId: string;
+  id: string;
+  secret: string;
+  expiresAt: number;
+};
+
 export type EvenHostStorage = {
   getLocalStorage(key: string): Promise<string>;
   setLocalStorage(key: string, value: string): Promise<boolean>;
@@ -14,6 +21,7 @@ type LegacyStorage = Pick<Storage, 'getItem' | 'removeItem'>;
 
 const HOST_CLIENT_KEY = 'glass-assistant.client-id.v3';
 const HOST_RESUME_KEY = 'glass-assistant.resume-credential.v3';
+const HOST_DEVICE_KEY = 'glass-assistant.device-credential.v1';
 const LEGACY_CLIENT_KEY = 'glass-assistant.client-id.v2';
 const LEGACY_RESUME_KEY = 'glass-assistant.resume-credential.v2';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -41,6 +49,25 @@ function parseCredential(raw: string | null | undefined, now: number) {
   }
 }
 
+function validDeviceCredential(value: unknown, now: number): value is DeviceCredential {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return Object.keys(item).every(key => ['clientId', 'id', 'secret', 'expiresAt'].includes(key))
+    && validUuid(item.clientId) && validUuid(item.id)
+    && typeof item.secret === 'string' && item.secret.length >= 32 && item.secret.length <= 2048
+    && Number.isSafeInteger(item.expiresAt) && Number(item.expiresAt) > now;
+}
+
+function parseDeviceCredential(raw: string | null | undefined, now: number) {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return validDeviceCredential(parsed, now) ? { ...parsed } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 type HostRead = { available: boolean; value?: string };
 
 /**
@@ -56,6 +83,7 @@ export class SessionCredentialStore {
   private clientIdValue = '';
   private clientPersisted = false;
   private credentialValue?: ResumeSessionCredential;
+  private deviceCredentialValue?: DeviceCredential;
   private persistenceHealthyValue = true;
   private writeQueue: Promise<void> = Promise.resolve();
 
@@ -95,6 +123,15 @@ export class SessionCredentialStore {
     return this.credentialValue ? { ...this.credentialValue } : undefined;
   }
 
+  loadDevice() {
+    this.assertInitialized();
+    if (this.deviceCredentialValue && !validDeviceCredential(this.deviceCredentialValue, this.now())) {
+      void this.clearDevice();
+      return undefined;
+    }
+    return this.deviceCredentialValue ? { ...this.deviceCredentialValue } : undefined;
+  }
+
   save(value: ResumeSessionCredential) {
     this.assertInitialized();
     if (!validCredential(value, this.now()) || value.clientId !== this.clientIdValue) {
@@ -110,9 +147,24 @@ export class SessionCredentialStore {
     return this.enqueueWrite(() => this.write(HOST_RESUME_KEY, ''));
   }
 
+  saveDevice(value: DeviceCredential) {
+    this.assertInitialized();
+    if (!validDeviceCredential(value, this.now()) || value.clientId !== this.clientIdValue) {
+      throw new Error('Invalid device credential');
+    }
+    this.deviceCredentialValue = { ...value };
+    return this.enqueueWrite(() => this.persistDeviceCredential(value));
+  }
+
+  clearDevice() {
+    this.assertInitialized();
+    this.deviceCredentialValue = undefined;
+    return this.enqueueWrite(() => this.write(HOST_DEVICE_KEY, ''));
+  }
+
   private async initialize(legacy?: LegacyStorage) {
-    const [hostClientRead, hostResumeRead] = await Promise.all([
-      this.read(HOST_CLIENT_KEY), this.read(HOST_RESUME_KEY),
+    const [hostClientRead, hostResumeRead, hostDeviceRead] = await Promise.all([
+      this.read(HOST_CLIENT_KEY), this.read(HOST_RESUME_KEY), this.read(HOST_DEVICE_KEY),
     ]);
     const legacyClient = this.legacyGet(legacy, LEGACY_CLIENT_KEY);
     const validHostClient = validUuid(hostClientRead.value) ? hostClientRead.value : undefined;
@@ -155,6 +207,9 @@ export class SessionCredentialStore {
     }
 
     if (validHostClient && legacy) this.legacyRemove(legacy, LEGACY_CLIENT_KEY);
+    const hostDeviceCredential = parseDeviceCredential(hostDeviceRead.value, this.now());
+    if (hostDeviceCredential?.clientId === selectedClient) this.deviceCredentialValue = hostDeviceCredential;
+    else if (hostDeviceRead.value && hostDeviceRead.available) await this.write(HOST_DEVICE_KEY, '');
     this.initialized = true;
   }
 
@@ -164,6 +219,14 @@ export class SessionCredentialStore {
       if (!this.clientPersisted) return false;
     }
     return this.write(HOST_RESUME_KEY, JSON.stringify(value));
+  }
+
+  private async persistDeviceCredential(value: DeviceCredential) {
+    if (!this.clientPersisted) {
+      this.clientPersisted = await this.write(HOST_CLIENT_KEY, this.clientIdValue);
+      if (!this.clientPersisted) return false;
+    }
+    return this.write(HOST_DEVICE_KEY, JSON.stringify(value));
   }
 
   private enqueueWrite(operation: () => Promise<boolean>) {
@@ -212,6 +275,7 @@ export class SessionCredentialStore {
 export const sessionCredentialStorageKeys = {
   client: HOST_CLIENT_KEY,
   resume: HOST_RESUME_KEY,
+  device: HOST_DEVICE_KEY,
   legacyClient: LEGACY_CLIENT_KEY,
   legacyResume: LEGACY_RESUME_KEY,
 } as const;

@@ -78,12 +78,14 @@ export class SessionRegistry<Event = unknown> {
     this.now = options.now ?? Date.now;
   }
 
-  create(connectionId: string, sink: SessionEventSink<Event>, sessionId = randomUUID()): Promise<SessionBinding<Event>> {
+  create(connectionId: string, sink: SessionEventSink<Event>, sessionId = randomUUID(),
+    authorize?: () => void | Promise<void>): Promise<SessionBinding<Event>> {
     return this.serial(async () => {
       this.ensureOpen();
       this.validateIds(connectionId, sessionId);
       this.ensureLeaseAvailable(connectionId);
       if (this.entries.has(sessionId)) throw new SessionUnavailableError();
+      await authorize?.();
       const runtime = await this.options.create(sessionId);
       if (runtime.id !== sessionId) {
         await runtime.dispose('shutdown');

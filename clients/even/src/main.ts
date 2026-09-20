@@ -185,7 +185,9 @@ element('connect').onclick = async () => {
   if (!connection || !credentialStore) { status = 'Even SDK 与安全存储尚未就绪'; refresh(); return; }
   const tokenInput = element('token') as HTMLInputElement;
   const token = tokenInput.value.trim();
-  if (!credentialStore.load() && token.length < 32) { status = '请输入至少 32 字符的应用 token'; refresh(); return; }
+  if (!credentialStore.load() && !credentialStore.loadDevice() && token.length < 32) {
+    status = '请输入至少 32 字符的应用 token'; refresh(); return;
+  }
   if (exiting) {
     await stopAudio();
     if (!await restoreDisplay()) return;
@@ -345,7 +347,7 @@ void (async () => {
     refresh();
   });
   await restoreDisplay();
-  if (credentialStore.load()) connection.resumeIfAvailable();
+  if (credentialStore.load() || credentialStore.loadDevice()) connection.resumeIfAvailable();
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
 window.addEventListener('online', () => connection?.networkAvailable());
 window.addEventListener('pagehide', () => {
