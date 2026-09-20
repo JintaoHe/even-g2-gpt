@@ -20,6 +20,7 @@ async function fixture(startupResult = 0) {
     return elements.get(id);
   };
   const sockets: any[] = [], audio: boolean[] = [], writes: string[] = [];
+  const nativeStorage = new Map<string, string>();
   let creates = 0, exits = 0, tick!: () => Promise<void>, hub!: (event: any) => void, device!: (event: any) => void;
   class Socket {
     static OPEN = 1; static CLOSING = 2;
@@ -34,6 +35,8 @@ async function fixture(startupResult = 0) {
     shutDownPageContainer: async () => { exits++; return true; },
     textContainerUpgrade: async (value: any) => { writes.push(value.content); return true; },
     audioControl: async (enabled: boolean) => { audio.push(enabled); return true; },
+    getLocalStorage: async (key: string) => nativeStorage.get(key) ?? '',
+    setLocalStorage: async (key: string, value: string) => { nativeStorage.set(key, value); return true; },
     getAppLocation: async () => null,
     startAppLocationUpdates: async () => true,
     stopAppLocationUpdates: async () => true,

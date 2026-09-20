@@ -25,7 +25,7 @@ let connected = false, speech = false, audio = false, state = 'closed', channel 
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
 let hasReady = false;
 const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
-const credentialStore = new SessionCredentialStore(localStorage);
+let credentialStore: SessionCredentialStore;
 let connection: ConnectionController;
 function send(event: Record<string, unknown>) { connection?.send(event); }
 function refresh() { dirty = true; element('status').textContent = `${status} · 麦克风${audio ? '开启' : '关闭'}`; }
@@ -179,16 +179,9 @@ function handleServerEvent(event: any) {
     refresh();
 }
 
-connection = new ConnectionController({
-  url: () => conversationWebSocketUrl(location, packagedBackendOrigin),
-  socket: url => new WebSocket(url) as unknown as import('./connection-controller').SocketLike,
-  credentials: credentialStore,
-  onEvent: handleServerEvent,
-  onStatus: handleConnectionStatus,
-});
-
 element('connect').onclick = async () => {
   if (disposed) return;
+  if (!connection || !credentialStore) { status = 'Even SDK 与安全存储尚未就绪'; refresh(); return; }
   const tokenInput = element('token') as HTMLInputElement;
   const token = tokenInput.value.trim();
   if (!credentialStore.load() && token.length < 32) { status = '请输入至少 32 字符的应用 token'; refresh(); return; }
@@ -302,6 +295,14 @@ void (async () => {
   const candidate = await waitForEvenAppBridge();
   if (disposed) return;
   bridge = candidate;
+  credentialStore = await SessionCredentialStore.open(candidate, localStorage);
+  connection = new ConnectionController({
+    url: () => conversationWebSocketUrl(location, packagedBackendOrigin),
+    socket: url => new WebSocket(url) as unknown as import('./connection-controller').SocketLike,
+    credentials: credentialStore,
+    onEvent: handleServerEvent,
+    onStatus: handleConnectionStatus,
+  });
   audioController = new AudioController({
     bridge: candidate,
     onState: next => { audio = next === 'streaming'; status = next === 'starting' ? '正在开启麦克风'
@@ -345,8 +346,8 @@ void (async () => {
   await restoreDisplay();
   if (credentialStore.load()) connection.resumeIfAvailable();
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
-window.addEventListener('online', () => connection.networkAvailable());
-window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void audioController?.dispose(); locationController?.cancelAutomatic(); void locationController?.stop(); connection.dispose(); });
+window.addEventListener('online', () => connection?.networkAvailable());
+window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void audioController?.dispose(); locationController?.cancelAutomatic(); void locationController?.stop(); connection?.dispose(); });
 document.addEventListener('visibilitychange', () => { void audioController?.setVisible(!document.hidden); });
 if (import.meta.env.DEV) {
   void import('../dev/session-controls').then(({ installSessionControls }) => { developmentSessionControls = installSessionControls({
