@@ -164,17 +164,25 @@ test('a second live protocol v2 input client is rejected without stealing the fi
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
   const server = await listen(store, model);
-  const first = new WebSocket(server.url), second = new WebSocket(server.url);
-  await Promise.all([once(first, 'open'), once(second, 'open')]);
+  const first = new WebSocket(server.url);
+  let second: WebSocket | undefined;
+  await once(first, 'open');
   try {
     const firstReady = waitFor(first, 'ready');
     first.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
     await firstReady;
+
+    // Establish the contender only after the first client visibly owns the
+    // input lease. Opening both transports concurrently makes this an
+    // upgrade-order test instead of the active-session invariant we intend to
+    // verify, and produced a nondeterministic Linux CI failure.
+    second = new WebSocket(server.url);
+    await once(second, 'open');
     const error = waitFor(second, 'error');
     second.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
     assert.equal((await error).code, 'BUSY');
   } finally {
-    first.terminate(); second.terminate(); await server.app.close(); await store.close();
+    first.terminate(); second?.terminate(); await server.app.close(); await store.close();
   }
 });
 
