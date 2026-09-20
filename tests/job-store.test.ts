@@ -32,6 +32,23 @@ test('jobs persist completed artifacts and queued snapshots across reopen; dupli
     assert.throws(() => store.enqueue([]));
   } finally { await store.close(); }
 });
+test('selected exports may exceed 100 messages but remain bounded by immutable byte limits', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'even-jobs-long-selection-'));
+  const store = await JobStore.create(directory);
+  try {
+    const selected = Array.from({ length: 160 }, (_, index) => ({
+      role: index % 2 ? 'assistant' as const : 'user' as const,
+      content: `选定主题消息 ${index}`,
+    }));
+    const job = store.enqueue(selected);
+    await waitJob(store, job.id, 'completed');
+    const markdown = (await store.download(job.id)).toString();
+    assert.match(markdown, /选定主题消息 0/);
+    assert.match(markdown, /选定主题消息 159/);
+
+    assert.throws(() => store.enqueue([{ role: 'user', content: 'x'.repeat(2 * 1024 * 1024) }]), /too large/i);
+  } finally { await store.close(); }
+});
 test('shutdown interrupts running jobs; cancelled jobs are not published; interrupted jobs are not replayed', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'even-jobs-stop-'));
   const renderer = async (_h: unknown, signal: AbortSignal): Promise<string> => new Promise((_r, reject) => {

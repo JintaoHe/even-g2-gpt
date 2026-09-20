@@ -21,12 +21,13 @@ Set `EVEN_DATA_DIR=/var/lib/even-agent` on Linux (local default `.local`). Keep 
   jobs.sqlite-shm      SQLite coordination file when present
   conversations/      saved dialogue JSON
   search-usage.json    API-only search quota ledger
+  cost-ledger.json      OpenAI/Soniox/Google monthly cost and Google SKU alert ledger
   artifacts/          UUID.md completed output; UUID.part temporary output
 ```
 
 The job type is conversation-to-Markdown export with a title and short summary above the full original conversation (not Word/PDF generation). Use the webpage's “导出当前对话为 MD” button. It snapshots committed history; an answer still being generated is not included until committed. API mode adds one bounded summary request by default; set `EMAIL_AI_SUMMARY=false` for a labelled local excerpt with no extra request. CLI mode uses excerpts. Files are written by the application, not by giving Codex filesystem-write tools. See [email presentation and delivery](EMAIL_DELIVERY.md).
 
-When migrating an existing installation, copy the complete data directory while stopped, including search-usage.json; changing EVEN_DATA_DIR to an empty location does not automatically migrate prior history or quota usage.
+When migrating an existing installation, copy the complete data directory while stopped, including search-usage.json and cost-ledger.json; changing EVEN_DATA_DIR to an empty location does not automatically migrate prior history, quota usage, cost reservations, or alert state.
 
 - Queued/running exports continue after browser disconnect; reconnect to list jobs/download completed output.
 - Queued exports resume after service restart. Running exports become interrupted; they are not automatically replayed. Failed/interrupted tasks require a new explicit export.

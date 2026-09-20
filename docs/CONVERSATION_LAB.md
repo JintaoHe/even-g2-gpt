@@ -14,7 +14,7 @@
 - 插话会取消在途请求，隔离迟到的搜索状态与来源。已发生的 API/搜索费用不会因此撤销。
 - 默认每次回答最多 10 次、每个 30 分钟会话最多 50 次、每日 100 次、每个自然月 1200 次搜索调用，按 `CONVERSATION_TIMEZONE`（默认芝加哥）结算。剩余额度不足时只向 API 授权剩余次数。普通聊天不占搜索次数；达到任一上限仍可聊天，但不再提供联网工具。
 - 用量预扣并持久保存于 `.local/search-usage.json`，成功完成后按实际 `web_search_call` 数量退回未用额度。中断、故障或重启导致无法确认用量时保留预扣（可能多计，但不乐观放行）；文件损坏或不可写时停用搜索。不要删除或手动改动账本。会话额度随新认证会话重置，日／月账本不会因此重置。
-- 这是本项目单进程的工具次数保护，不是美元硬上限；普通聊天、意图判断、STT、文档生成和 Maps 另计。OpenAI 项目应在平台 **Limits → Spend** 另设 `$40/月` 并开启 **Enforce a hard limit**。官方说明硬限制达到后返回 429，但传播不是瞬时的，因此账单仍可能轻微超过设置值。Linux 部署要保留账本到持久卷；多实例需改用事务数据库，不能共享此文件并发运行。
+- 搜索次数账本与美元账本是两层保护。当前 `.local/cost-ledger.json` 对 OpenAI `$50`、Soniox `$20`、Google `$10` 及合计 `$80/月` 做请求前预留；OpenAI 项目仍应在平台 **Limits → Spend** 另设 `$50/月` 并开启硬限制。Linux 部署要保留两个账本到持久卷；多实例需改用事务数据库，不能共享这些文件并发运行。
 - 会给模型当前时间与用户时区，要求核实涨跌前提、标明行情日期/时间与交易时段、区分事实和推测。搜索不是专用实时行情保障，也不保证模型事实判断永远正确。
 - 查询内容会通过 OpenAI 搜索服务处理；指令要求查询时避免带入不相关的私人信息，但这不是独立的数据脱敏器。搜索工具本身只读；日历修改和文件发送由独立的确认流程处理，不接交易。
 
@@ -33,13 +33,12 @@ CONVERSATION_TIMEZONE=America/Chicago
 
 ### 搜索费用估算
 
-截至 2026-09-18 核对的标准价：Luna 输入 `$0.20/百万 token`、输出 `$1.20/百万 token`；web search 工具调用 `$10/1000 次`，搜索内容 token 仍按所用模型计费。以下 `$0.017/分钟` 的转录数字是旧 OpenAI STT 基线，**不代表当前 Soniox 价格，也不受 OpenAI project 的 `$40` 限制**；Soniox 必须在其控制台单独设置用量／账单保护。
+截至 2026-09-19 核对的标准价：Luna 输入 `$0.20/百万 token`、输出 `$1.20/百万 token`；web search 工具调用 `$10/1000 次`，搜索内容 token 仍按所用模型计费。Soniox `stt-rt-v5` 的公开估算约 `$0.12/音频小时`，实际账单以音频、context 与输出 token 为准；Soniox 必须在其控制台单独设置用量／账单保护。
 
 - 100 次搜索的工具费约 `$1`；1200 次月上限的工具费约 `$12`，均未含搜索内容及回答 token。
-- 每天使用麦克风 30 分钟、30 天，单转录约 `$15.30`；每天 1 小时约 `$30.60`。
-- 连续 24 小时一次的转录约 `$24.48`；若 30 天每天 24 小时，单转录理论值约 `$734.40`，尚未算对话／搜索。`$40` 项目硬限制会提前中断 API，而不会让这种极端使用继续一个月。
-- 仅按转录估算，`$40` 约覆盖 2353 分钟（约 39.2 小时）；实际可用时长更短，因为对话、意图、搜索和文档也计费。这不是账单保证。
-- API key 是访问凭证，不是预付搜索套餐。Google Maps 和 AWS 费用也不受 OpenAI `$40` 限制。
+- 按 `$0.12/小时` 的公开近似值，每天 30 分钟、30 天约 `$1.80`；每天 1 小时约 `$3.60`。
+- 30 天全天连续音频约 720 小时、约 `$86.40`，会先被应用层 Soniox `$20` 月上限挡住；`$20` 约对应 166.7 小时的纯音频近似值。context／输出 token 会使实际可用时长略短，这不是 provider 账单保证。
+- API key 是访问凭证，不是预付搜索套餐。当前应用层使用 OpenAI `$50`、Soniox `$20`、Google `$10` 的 `$80/月` 跨 provider 账本；AWS／Lightsail 基础设施另算。provider 后台预算仍必须单独保留，详见 `COST_CONTROLS.md`。
 
 来源：[OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna)、[Web search](https://developers.openai.com/api/docs/guides/tools-web-search)、[Spend limits](https://developers.openai.com/api/docs/guides/spend-limits)。
 
@@ -73,9 +72,12 @@ Set-Location 'C:\path\to\even-g2-gpt'
 - STT 默认 Soniox `stt-rt-v5`，使用 `en`/`zh` hints 与自动语言识别，但不做严格语言限制；OpenAI `gpt-live-transcribe` adapter 仅作为 `STT_PROVIDER=openai` 的回退。意图与回答由 `OPENAI_INTENT_MODEL` 和 `OPENAI_REPLY_MODEL` 分别配置；连接后页面显示对话模型与 STT provider。
 - nano 混合模式未达标，仍为实验。后续双 Luna 对照达到小样本质量基线，已成为当前默认。`npm run luna:eval` / `npm run baseline:eval` 为付费对照回归，先停止服务。实际省费幅度尚未验证。
 - OpenAI key 不下发客户端；Responses 请求设置 `store:false`。这不等于承诺服务商零保留，服务商数据政策仍适用。
-- 不落盘音频。已提交的用户文字、回答及部分被打断的回答保存在 `.local/conversations/<随机会话ID>.json`，已加入 gitignore；本机明文存储，未做应用层加密或跨设备同步。
-- 本地服务仅监听 127.0.0.1，限制 Origin/Host，客户端需要 token，单个已认证会话；不是公网部署方案。
-- 同一连接内把完整、受消息数上限约束的 session 历史作为 Luna 的短期记忆；topic 标记帮助它区分当前与较早讨论，因此可以回到“之前的 idea／第几点／刚才推荐的店”。生成 MD／Email 时后端仍只提供当前 topic，避免把旅行和 business 文档混在一起。重新连接开启新会话；磁盘记录尚未接入自动恢复或历史摘要，因此这不是跨 session 的永久 memory。
+- 不落盘音频。已提交的用户文字、回答及部分被打断的回答保存在 `${EVEN_DATA_DIR}/assistant-memory.sqlite`；数据库、WAL 与目录在支持 POSIX 权限的平台使用 owner-only 权限，并已加入 gitignore。当前仍是服务器明文存储，不是端到端加密或跨设备云同步。
+- WebSocket v2 使用短期、会话绑定且每次恢复后轮换的恢复凭证；主 `G2_CLIENT_TOKEN` 不写入 SDK `localStorage`。断线后 15 分钟内可恢复同一 logical session，第二个输入客户端默认拒绝。模拟器的“立刻模拟过期”只允许 loopback 测试服务器启用。
+- 本地服务只监听 `127.0.0.1`；Linux 公网入口必须由 TLS reverse proxy 提供，并校验 Host／Origin。客户端需要 token，单人部署只允许一个 active input lease。
+- 会话不再因达到 100 条消息而停止。Luna 每轮收到的是受 24,000 字符预算约束的上下文：固定 schema 的 session/topic 摘要、未完成事项、最近约 24 条原始消息和本轮输入。被中断／失败的回答带状态，不能当作已确认结论；Calendar、Email、成本和路线事实必须重新读工具。
+- 摘要只在 committed 消息达到阈值后异步生成，不阻塞当前回答；schema 无效只修复一次。任务范围以 `through_sequence` 冻结，重启遇到 provider 结果不确定时标为 `unknown`，不会自动重试收费。API 摘要使用同一 metered OpenAI fetch，不提供搜索或写工具；可用 `SESSION_SUMMARY_MODEL` 单独指定模型。
+- 生成 MD／Email 时后端冻结当前 topic 的不可变快照，避免把旅行和 business 文档混在一起；超过 100 条仍可导出，但继续受 2 MiB 单文件、总存储和邮件限制。后台 worker 不会再次读取变化中的会话。
 
 ## 当前限制与后续
 

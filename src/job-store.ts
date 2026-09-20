@@ -156,7 +156,9 @@ export class JobStore {
     return this.db.prepare('SELECT id,state,created,updated,error,bytes FROM jobs WHERE id=?').get(id) as Job | undefined;
   }
   enqueue(history: Message[], calendar?: unknown): Job {
-    if (!history.length || history.length > 100 || history.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid conversation snapshot');
+    if (!history.length || history.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) {
+      throw new Error('Invalid conversation snapshot');
+    }
     return this.enqueueInput(JSON.stringify(history), calendar);
   }
   enqueueDocument(document: Document, calendar?: unknown): Job {

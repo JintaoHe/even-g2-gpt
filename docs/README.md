@@ -11,6 +11,7 @@ The overview and this index are bilingual. Detailed guides below retain their ex
 ## Running the app and clients
 
 - [Conversation lab (Chinese)](CONVERSATION_LAB.md): browser startup, audio capture, follow-ups, search, and limitations.
+- [Session resilience implementation (Chinese)](SESSION_RESILIENCE_IMPLEMENTATION_PLAN.md): SQLite ownership, resume credentials, client/audio lifecycle, bounded summaries, and phased verification.
 - [Even SDK client](../clients/even/README.md): connection, pagination, transcription display, history, and exit recovery.
 - [Even Hub packaging and Private Testing (Chinese)](EVEN_HUB_PACKAGING.md): release identity, permissions, `.ehpk`, portal upload, and physical-device acceptance.
 - [Companion input, location, and safe distribution](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md): phone typing, GPS/route privacy, naming, and why a personal build cannot be a public shared-server binary.
@@ -21,6 +22,7 @@ The overview and this index are bilingual. Detailed guides below retain their ex
 
 - [Google Calendar (mixed Chinese/English)](google-calendar.md): OAuth, dedicated calendars, troubleshooting, credential recovery, confirmed writes, conflicts, and recurring meetings.
 - [Google Maps route setup](setup/GOOGLE_MAPS_ROUTES.md): volatile session phone location, 10-second SDK refresh, Places/Routes key restrictions, local/Linux gates, fallbacks, and coordinate privacy.
+- [Monthly provider cost controls](COST_CONTROLS.md): the $80 OpenAI/Soniox/Google ledger, Google free-SKU thresholds, fixed-recipient alerts, reset boundaries, and accuracy limits.
 - [Markdown and email](EMAIL_DELIVERY.md): dedicated Gmail, fixed recipient, generation/send confirmation, resend, and downloads.
 - [Calendar attachment design](CALENDAR_EMAIL_DESIGN.md): MD/ICS delivery and timezones; use the Calendar guide for real Google events.
 - [API / Codex CLI](CODEX_CLI_CHANNEL.md): channel selection, native search, authentication, and capability differences.

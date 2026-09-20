@@ -11,6 +11,7 @@
 ## 运行与客户端
 
 - [连续对话实验室](CONVERSATION_LAB.md)：网页启动、收音、追问、搜索与限制。
+- [会话可靠性实施计划](SESSION_RESILIENCE_IMPLEMENTATION_PLAN.md)：SQLite ownership、断线恢复凭证、客户端／音频 lifecycle、有界摘要及分阶段验收。
 - [Even SDK 前端](../clients/even/README.md)：连接、分页、用户转录、历史与退出恢复。
 - [Even Hub 打包与 Private Testing](EVEN_HUB_PACKAGING.md)：发布身份、权限、`.ehpk`、Portal 上传和真机验收。
 - [官方模拟器](../tools/even-simulator/README.md)：启动、独立依赖与已知平台问题。
@@ -20,6 +21,7 @@
 
 - [Google Calendar](google-calendar.md)：OAuth、专用日历、排错与凭据恢复、确认写入、冲突和重复会议。
 - [Google Maps 定位与路线](setup/GOOGLE_MAPS_ROUTES.md)：一次性手机定位、Places/Routes key 限制、本地／Linux gate、fallback 与坐标隐私。
+- [月度 provider 成本控制](COST_CONTROLS.md)：$80 OpenAI／Soniox／Google 账本、Google 免费 SKU 阈值邮件、月初重置边界及精度限制。
 - [Markdown 与邮件](EMAIL_DELIVERY.md)：专用 Gmail、固定收件人、生成／发送确认、重发与下载。
 - [日历附件设计](CALENDAR_EMAIL_DESIGN.md)：MD／ICS 交付与时区；真实 Google 事件以 Calendar 指南为准。
 - [API / Codex CLI](CODEX_CLI_CHANNEL.md)：通道选择、原生搜索、认证和能力差异。

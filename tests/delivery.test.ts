@@ -15,17 +15,32 @@ import { createConversationServer } from '../src/conversation-server.js';
 import { paginate } from '../clients/even/src/pager.js';
 
 const draft: Draft = { document: { markdown: '# 部署步骤\n\n1. 检查配置\n2. 运行测试\n', presentation: presentation('部署步骤', '两步部署清单，不是聊天记录。', 'summary') } };
-async function fixture(run: (f: { conversation: Conversation; store: JobStore; model: DeliveryDialogue; route: (a: DeliveryAction) => void; sent: Draft[]; advance: () => void }) => Promise<void>, generator: DraftGenerator = async () => structuredClone(draft)) {
+async function fixture(run: (f: { conversation: Conversation; store: JobStore; model: DeliveryDialogue; route: (a: DeliveryAction) => void; sent: Draft[]; advance: () => void }) => Promise<void>, generator: DraftGenerator = async () => structuredClone(draft), artifactSource?: () => import('../src/conversation.js').Message[]) {
   const root = await mkdtemp(join(tmpdir(), 'even-delivery-')), store = await JobStore.create(root);
   let action: DeliveryAction = 'document', now = Date.now(); const sent: Draft[] = [];
   const base: DialogueModel = { plan: async () => ({ decision: 'respond', deliveryAction: action }), decide: async () => 'respond', reply: async (_h, _s, delta) => delta('普通回答') };
   const model = new DeliveryDialogue(base, store, generator, async (_id, bytes, metadata, calendar) => {
     sent.push({ document: { markdown: bytes.toString(), presentation: metadata! }, calendar }); return 'accepted';
-  }, () => now);
+  }, () => now, undefined, artifactSource);
   const conversation = new Conversation(model, () => {});
   try { await run({ conversation, store, model, route: value => { action = value; }, sent, advance: () => { now += 6 * 60000; } }); }
   finally { conversation.close(); await store.close(); await rm(root, { recursive: true, force: true }); }
 }
+test('document generation freezes a selected topic from a session longer than 100 messages', async () => {
+  const longHistory = [
+    ...Array.from({ length: 130 }, (_, index) => ({ role: index % 2 ? 'assistant' as const : 'user' as const,
+      content: `business-${index}`, topicId: 'business', topicLabel: 'Business' })),
+    ...Array.from({ length: 40 }, (_, index) => ({ role: index % 2 ? 'assistant' as const : 'user' as const,
+      content: `trip-${index}`, topicId: 'trip', topicLabel: 'Trip' })),
+  ];
+  let selected: import('../src/conversation.js').Message[] = [];
+  await fixture(async ({ conversation, store }) => {
+    await conversation.submit('把这份 trip plan 生成 MD', true);
+    assert.equal(store.list()[0].state, 'completed');
+    assert.equal(selected.length, 40);
+    assert.ok(selected.every(message => message.topicId === 'trip'));
+  }, async history => { selected = structuredClone(history); return structuredClone(draft); }, () => longHistory);
+});
 test('requested standalone document saves before preview and sends only on a later explicit confirmation', async () => {
   await fixture(async ({ conversation, store, route, sent }) => {
     await conversation.submit('生成部署步骤并直接发给我', true);

@@ -5,12 +5,12 @@ import { readFile, mkdir, writeFile, rename } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
-import { Conversation, type DialogueModel, type Event, type Message } from './conversation.js';
+import { activeTopicHistory, Conversation, type DialogueModel, type Event, type Message } from './conversation.js';
 import { createDialogueProvider } from './dialogue-provider.js';
 import { createSttProvider, type StreamingTranscriber } from './stt-provider.js';
 import { TurnDetector } from './vad.js';
 import { JobStore } from './job-store.js';
-import { createMailSender, type MailSender } from './mail.js';
+import { createCostAlertSender, createMailSender, type MailSender } from './mail.js';
 import { createDocumentRenderer, mailPresentation } from './document-presentation.js';
 import { createDraftGenerator, type DraftGenerator } from './delivery-draft.js';
 import { DeliveryDialogue, deliveryResult, mailFallback } from './delivery-dialogue.js';
@@ -28,8 +28,12 @@ import { createTimezoneProvider, resolveLocationTimezone, type TimezoneFallback,
 import { createTimezoneFallback } from './timezone-fallback.js';
 import { createEnvironmentProvider, type EnvironmentProvider } from './environment.js';
 import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type PlanningEvidenceSelector } from './planning-evidence-dialogue.js';
+import { CostLedger } from './cost-ledger.js';
+import { createMeteredOpenAIFetch } from './metered-openai.js';
 import { ConversationStore, ResumeCredentialError } from './conversation-store.js';
 import { StoreConversationPersistence } from './conversation-persistence.js';
+import { ContextBuilder } from './context-builder.js';
+import { OpenAISessionSummaryGenerator, SessionSummaryService } from './session-summary.js';
 import { ActiveInputLeaseError, SessionRegistry, SessionUnavailableError,
   type ManagedSessionRuntime, type SessionDisposeReason, type SessionInterruptReason } from './session-registry.js';
 import { CONVERSATION_PROTOCOL_VERSION, parseCoreClientMessage } from './conversation-protocol.js';
@@ -48,6 +52,7 @@ export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
   conversationStore?: ConversationStore;
+  sessionSummary?: SessionSummaryService;
   resumeWindowMs?: number;
   /** Test override. Production refreshes at two-thirds of the resume window. */
   resumeCredentialRefreshMs?: number;
@@ -169,6 +174,7 @@ export function createConversationServer(options: {
     calendarDialogue?: CalendarDialogue;
     locationBroker: LocationRequestBroker;
     locationDialogue?: LocationDialogue;
+    artifactSource(): Message[];
     mailApproval?: MailApproval;
     setCaptureStop(stop: (() => void) | undefined): void;
   };
@@ -181,13 +187,28 @@ export function createConversationServer(options: {
   const store = options.conversationStore;
   const buildRuntime = async (id: string, hydrate = false): Promise<ServerSessionRuntime> => {
     let sink: ((event: Event) => void) | undefined, captureStop: (() => void) | undefined;
+    let conversation!: Conversation;
     let ended = false, started = false;
     const send = (event: Event) => sink?.(event);
     const initialTopic = hydrate ? store?.listTopics(id).at(-1) : { id: randomUUID(), label: 'General' };
     if (store && !hydrate) store.createSession({ id, ownerScope: options.ownerScope ?? 'single-user', createdAt: Date.now(),
       initialTopic: initialTopic && { id: initialTopic.id, label: initialTopic.label } });
+    const artifactSource = () => {
+      const fallback = conversation?.history ?? [];
+      const topicId = fallback.at(-1)?.topicId;
+      if (!store || !topicId) return activeTopicHistory(fallback);
+      const topic = store.listTopics(id).find(item => item.id === topicId);
+      return store.listTopicMessages(id, topicId).map(message => ({
+        role: message.role === 'system' ? 'assistant' as const : message.role,
+        content: message.content,
+        ...(message.citations ? { citations: message.citations as any } : {}),
+        ...(topic ? { topicId: topic.id, topicLabel: topic.label } : {}),
+        messageId: message.id, sequence: message.sequence, status: message.status,
+      }));
+    };
     const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
-      (jobId, result) => { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); }) : undefined;
+      (jobId, result) => { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); },
+      artifactSource) : undefined;
     const locationBroker = new LocationRequestBroker(send, randomUUID);
     const resolveCalendarTimezone = async (history: Message[], signal: AbortSignal) => {
       const cached = locationBroker.timezone();
@@ -213,7 +234,8 @@ export function createConversationServer(options: {
       captureStop?.(); delivery?.invalidate(); runtime.mailApproval = undefined;
       calendarControl?.invalidate(); calendarDialogue?.invalidate(); locationDialogue?.invalidate();
     };
-    const conversation = new Conversation(model, event => {
+    const baseContextBuilder = new ContextBuilder();
+    conversation = new Conversation(model, event => {
       if (event.type === 'state' && ['paused', 'exit_pending', 'closed'].includes(String(event.state))) invalidate();
       send(event);
     }, store ? undefined : history => options.save?.(id, history) ?? Promise.resolve(), store && initialTopic ? {
@@ -229,10 +251,16 @@ export function createConversationServer(options: {
           content: prior.output.content, citations: prior.output.citations as any };
         return { kind: 'interrupted', turnId: prior.turn.id };
       },
-    } : undefined);
+      onTurnCommitted: () => { options.sessionSummary?.consider(id); },
+    } : undefined, {
+      build: input => {
+        const summary = store?.latestSummary(id);
+        return baseContextBuilder.build({ ...input, ...(summary ? { summary } : {}) });
+      },
+    });
     if (hydrate && store) {
       const topics = new Map(store.listTopics(id).map(topic => [topic.id, topic]));
-      conversation.restoreHistory(store.listMessages(id, 0, 500).filter(message => ['committed', 'interrupted'].includes(message.status))
+      conversation.restoreHistory(store.listRecentMessages(id, 100).filter(message => ['committed', 'interrupted', 'failed'].includes(message.status))
         .map(message => {
           const topic = message.topicId ? topics.get(message.topicId) : undefined;
           const turn = message.turnId ? store.getTurn(message.turnId) : undefined;
@@ -243,6 +271,7 @@ export function createConversationServer(options: {
             ...(message.citations ? { citations: message.citations as any } : {}),
             ...(topic ? { topicId: topic.id, topicLabel: topic.label } : {}),
             ...(turn?.cognitiveMode ? { cognitiveMode: turn.cognitiveMode as any, assistantMode: turn.cognitiveMode as any } : {}),
+            messageId: message.id, sequence: message.sequence, status: message.status,
           };
         }));
     }
@@ -262,6 +291,7 @@ export function createConversationServer(options: {
       calendarDialogue,
       locationBroker,
       locationDialogue,
+      artifactSource,
       replaceEventSink(next) {
         sink = next;
         if (next) { start(); store?.markSessionAttached(id, Date.now()); }
@@ -549,7 +579,9 @@ export function createConversationServer(options: {
             if (!options.jobs) { send({ type: 'notice', text: '文件存储未启用。' }); break; }
             try {
               if (Object.keys(msg).some(key => !['type', 'calendar'].includes(key))) throw new Error('Invalid export request');
-              const job = options.jobs.enqueue(conversation.history.map(m => ({ ...m })), msg.calendar);
+              const selection = active.artifactSource().map(message => ({ ...message,
+                citations: message.citations?.map(citation => ({ ...citation })) }));
+              const job = options.jobs.enqueue(selection, msg.calendar);
               send({ type: 'job.created', job });
             } catch { send({ type: 'notice', text: '无法创建导出任务：请检查日程日期、起止时间与时区偏移（含夏令时）是否一致，并确认有对话内容且未超过任务上限。' }); }
             break;
@@ -621,6 +653,7 @@ export function createConversationServer(options: {
     for (const client of wss.clients) client.terminate();
     await new Promise<void>(resolve => wss.close(() => resolve()));
     await registry.shutdown();
+    await options.sessionSummary?.close();
     await new Promise<void>(resolve => http.close(() => resolve()));
     await Promise.allSettled(calendarTasks);
   } };
@@ -649,14 +682,21 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (!Number.isSafeInteger(resumeMinutes) || resumeMinutes < 1 || resumeMinutes > 15) {
     throw new Error('SESSION_RESUME_WINDOW_MINUTES must be an integer from 1 to 15');
   }
-  const hybrid = createDialogueProvider();
-  const stt = createSttProvider();
-  const routeProvider = createRouteProvider();
-  const timezoneProvider = createTimezoneProvider();
-  const environmentProvider = createEnvironmentProvider();
   const mail = createMailSender();
-  const jobs = await JobStore.create(dataDirectory, createDocumentRenderer());
+  const costs = await CostLedger.create(resolve(dataDirectory, 'cost-ledger.json'), process.env, createCostAlertSender());
+  const openaiFetch = createMeteredOpenAIFetch(costs);
+  const hybrid = createDialogueProvider(process.env, { fetcher: openaiFetch });
+  const stt = createSttProvider(process.env, costs);
+  const routeProvider = createRouteProvider(process.env, costs);
+  const timezoneProvider = createTimezoneProvider(process.env, costs);
+  const environmentProvider = createEnvironmentProvider(process.env, costs);
+  const jobs = await JobStore.create(dataDirectory, createDocumentRenderer(process.env, openaiFetch));
   const conversationStore = await ConversationStore.create(dataDirectory);
+  const sessionSummary = hybrid.provider === 'api' && key
+    ? new SessionSummaryService(conversationStore,
+      new OpenAISessionSummaryGenerator(key, process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply,
+        'https://api.openai.com/v1/responses', openaiFetch))
+    : undefined;
   let calendar: GoogleCalendarService | undefined;
   if (process.env.GOOGLE_CALENDAR_ENABLED === 'true') {
     try {
@@ -664,31 +704,32 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const google = await loadCalendarTransport(dataDirectory);
       calendar = await GoogleCalendarService.create(dataDirectory, google.calendarId, google.transport, Date.now, process.env.EMAIL_TO);
     } catch {
-      await Promise.all([jobs.close(), conversationStore.close()]);
+      await Promise.all([sessionSummary?.close(), jobs.close(), conversationStore.close()]);
       throw new Error('Google Calendar setup invalid; check private auth files and calendar binding.');
     }
   }
   const timezoneFallback = calendar && hybrid.provider === 'api' && key
-    ? createTimezoneFallback(key, hybrid.models.reply) : undefined;
+    ? createTimezoneFallback(key, hybrid.models.reply, 'https://api.openai.com/v1/responses', openaiFetch) : undefined;
   const planningEvidenceSelector = hybrid.provider === 'api' && key && environmentProvider
     ? createPlanningEvidenceSelector(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',
-      process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago') : undefined;
+      process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', openaiFetch) : undefined;
   const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
     conversationStore,
+    sessionSummary,
     resumeWindowMs: resumeMinutes * 60_000,
-    jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner() : undefined,
+    jobs, mail, calendar, calendarPlanner: calendar && hybrid.provider === 'api' ? createCalendarPlanner(process.env, openaiFetch) : undefined,
     calendarItineraryPlanner: calendar && hybrid.provider === 'api' && key
       ? createCalendarItineraryPlanner(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',
-        process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago') : undefined,
-    calendarAnswerer: calendar && hybrid.provider === 'api' ? createCalendarAnswerer() : undefined,
+        process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', openaiFetch) : undefined,
+    calendarAnswerer: calendar && hybrid.provider === 'api' ? createCalendarAnswerer(process.env, openaiFetch) : undefined,
     routeProvider,
     timezoneProvider,
     timezoneFallback,
     environmentProvider,
     planningEvidenceSelector,
-    draftGenerator: hybrid.provider === 'api' ? createDraftGenerator() : undefined,
+    draftGenerator: hybrid.provider === 'api' ? createDraftGenerator(process.env, openaiFetch) : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: stt.configured, speechProvider: stt.name, location: true,
       routes: !!routeProvider, environment: !!planningEvidenceSelector, conditionalTasks: false },
     ingress: publicHost ? { publicHosts: [publicHost], allowedOrigins: publicOrigin ? [publicOrigin] : undefined } : undefined,

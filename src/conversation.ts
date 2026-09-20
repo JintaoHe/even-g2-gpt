@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ContextBuilder, type ContextComposer } from './context-builder.js';
 
 export type Citation = { start: number; end: number; url: string; title: string };
 export type ReplyUpdate = { type: 'search.status'; status: string } | { type: 'calendar.status'; status: 'planning' | 'querying' | 'saving' }
@@ -9,7 +10,10 @@ export type ReplyUpdate = { type: 'search.status'; status: string } | { type: 'c
   | { type: 'answer.citations'; text: string; citations: Citation[] };
 export type TopicAction = 'continue' | 'switch' | 'resume';
 export type Message = { role: 'user' | 'assistant'; content: string; citations?: Citation[];
-  topicId?: string; topicLabel?: string; cognitiveMode?: CognitiveMode; assistantMode?: AssistantMode };
+  topicId?: string; topicLabel?: string; cognitiveMode?: CognitiveMode; assistantMode?: AssistantMode;
+  /** Durable metadata is optional so legacy/in-memory callers remain compatible. */
+  messageId?: string; sequence?: number; status?: 'committed' | 'streaming' | 'interrupted' | 'failed';
+  contextKind?: 'summary' };
 
 /** Select one topic only for artifacts that must not blend separate projects. Normal
  * conversation receives the whole bounded session so the assistant has short-term memory. */
@@ -127,6 +131,8 @@ export type ConversationRuntimeOptions = {
   now?: () => number;
   checkpointChars?: number;
   checkpointMs?: number;
+  /** Runs only after the complete assistant answer is durably committed. */
+  onTurnCommitted?: () => void;
   recoverAnswer?: (request: string) => {
     kind: 'committed' | 'interrupted' | 'missing';
     turnId?: string;
@@ -217,7 +223,8 @@ export class Conversation {
   private lastCheckpointLength = 0;
   constructor(private model: DialogueModel, private eventSink: ((event: Event) => void) | undefined,
     private save: (history: Message[]) => Promise<void> = async () => {},
-    private runtime?: ConversationRuntimeOptions) {
+    private runtime?: ConversationRuntimeOptions,
+    private contextBuilder: ContextComposer = new ContextBuilder()) {
     this.now = runtime?.now ?? Date.now;
     this.idFactory = runtime?.idFactory ?? randomUUID;
     if (runtime?.initialTopic) this.currentTopic = { ...runtime.initialTopic };
@@ -254,7 +261,7 @@ export class Conversation {
       this.emit({ type: 'answer.cancelled', id: this.responseId });
       if (this.partial && !committing) this.history.push({ role: 'assistant', content: this.partial + '\n[回答被用户打断，未完成]', citations: this.citations,
         topicId: this.responseTopic?.id, topicLabel: this.responseTopic?.label, cognitiveMode: this.responseTopic?.mode,
-        assistantMode: this.responseTopic?.mode });
+        assistantMode: this.responseTopic?.mode, messageId: this.durableAnswer?.messageId, status: 'interrupted' });
       this.responseId = undefined; this.partial = ''; this.citations = [];
       this.responseTopic = undefined; this.durableAnswer = undefined;
     }
@@ -306,13 +313,13 @@ export class Conversation {
     if (clean) this.pending = [this.pending, clean].filter(Boolean).join('\n');
     if (!this.pending) return;
     this.cancel();
-    if (this.history.length >= 100) { this.emit({ type: 'error', code: 'HISTORY_LIMIT' }); this.pause(); return; }
     const revision = this.revision, controller = this.work = new AbortController();
     const current = () => revision === this.revision && !controller.signal.aborted;
     this.status('thinking');
     try {
       const text = this.pending;
-      const history = this.history.map(m => ({ ...m }));
+      const history = this.contextBuilder.build({ messages: this.history,
+        currentTopicId: this.currentTopic?.id }).messages;
       const recovery = this.runtime?.recoverAnswer?.(text);
       const rawPlan = recovery?.kind === 'committed' || recovery?.kind === 'missing'
         ? { decision: 'respond' as const, cognitiveMode: 'casual' as const, reasoningEffort: 'low' as const,
@@ -354,7 +361,8 @@ export class Conversation {
         } catch (error) { throw new ConversationPersistenceError(String(error)); }
       }
       this.history.push({ role: 'user', content: text, topicId: topic.id, topicLabel: topic.label,
-        cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode });
+        cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode,
+        messageId: userMessageId, sequence: userSequence, status: 'committed' });
       this.emit({ type: 'turn.committed', text, topicId: topic.id, topicLabel: topic.label,
         ...(this.runtime ? { session_id: this.runtime.sessionId, message_id: userMessageId,
           turn_id: turnId, sequence: userSequence } : {}) });
@@ -421,7 +429,8 @@ export class Conversation {
             sequence: assistantSequence } : {}) });
       } else if (recovery?.kind === 'missing') delta('当前会话里没有可以恢复的上一轮回答。');
       else if (decision === 'clarify_exit') delta('你是想结束这次对话，还是继续聊？');
-      else await this.model.reply(this.history.map(message => ({ ...message })), controller.signal, delta, event => {
+      else await this.model.reply(this.contextBuilder.build({ messages: this.history,
+        currentTopicId: topic.id }).messages, controller.signal, delta, event => {
         if (!current()) return;
         if (event.type === 'answer.citations') {
           const sanitized = stripInternalMetadata(event.text);
@@ -443,7 +452,8 @@ export class Conversation {
       }
       this.partial = stripInternalMetadata(this.partial);
       this.history.push({ role: 'assistant', content: this.partial, citations: this.citations,
-        topicId: topic.id, topicLabel: topic.label, cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode });
+        topicId: topic.id, topicLabel: topic.label, cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode,
+        messageId: assistantMessageId, sequence: assistantSequence, status: 'committed' });
       this.committing = true;
       let durableCommit: DurableAcknowledgement | undefined;
       if (this.durableAnswer) {
@@ -466,7 +476,8 @@ export class Conversation {
       }
       if (durableCommit) this.emit({ type: 'answer.committed', id: revision,
         session_id: durableCommit.sessionId, message_id: durableCommit.messageId,
-        turn_id: durableCommit.turnId, sequence: durableCommit.sequence, content: this.partial });
+          turn_id: durableCommit.turnId, sequence: durableCommit.sequence, content: this.partial });
+      try { this.runtime?.onTurnCommitted?.(); } catch { /* Background maintenance cannot fail the user turn. */ }
       this.emit({ type: 'answer.done', id: revision,
         ...(durableCommit ? { session_id: durableCommit.sessionId, message_id: durableCommit.messageId,
           turn_id: durableCommit.turnId, sequence: durableCommit.sequence } : {}) });

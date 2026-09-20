@@ -19,7 +19,7 @@
 Glass Assistant 的目标是成为个人助手，而不是只会返回数据的机器人：
 
 - **自然交流：** Soniox `stt-rt-v5` 直接处理原生 16 kHz 中英文混说，带 800 ms 触发前缓冲，并支持插话取消。
-- **记住当前对话：** 有界的 session 短期上下文可以理解“前面第 2 点”“刚才那个 idea”“你推荐的那家”。它可以暂停行程话题、讨论 business idea，再回到行程，同时不会把两个主题的导出文档混在一起。
+- **记住当前对话：** SQLite 持久消息加上有界摘要／近期消息上下文，可以理解“前面第 2 点”“刚才那个 idea”“你推荐的那家”。断线后 15 分钟内可以恢复同一 logical session，同时不会把两个主题的导出文档混在一起。
 - **每轮动态思考：** 当前目标会选择九种认知模式之一：`casual`、`explain`、`research`、`brainstorm`、`decision_support`、`planning`、`deep_reasoning`、`compose` 或 `coaching`；工具 workflow 另行授权。
 - **既有能力也有温度：** 助手可以执行任务、一起分析，也可以只是陪用户聊几句。面对感谢、挫折或结束对话时，应先回应情绪，而不是机械地再抛出一张信息收集表。
 - **每次只问一个问题：** 真正缺少信息时，每轮只追问一个原子事实或决定，不在眼镜上一次列出长问卷。
@@ -30,7 +30,7 @@ Glass Assistant 的目标是成为个人助手，而不是只会返回数据的�
 | 能力 | 当前行为 |
 | --- | --- |
 | 语音对话 | Soniox 实时中英文 STT、自动判断一句话结束、流式回答、插话取消、会话退出意图；OpenAI STT 保留为明确的回滚方案 |
-| Session 智能 | 向模型提供完整但有界的 session 上下文，并隔离不同主题线程；每一轮重新判断模式和 workflow，不会把整个会话永久锁定成路线或 planning |
+| Session 智能 | SQLite logical session、轮换恢复凭证、有界摘要／近期消息及 topic 隔离；每一轮重新判断模式和 workflow |
 | 联网研究 | OpenAI API 搜索，按单次回答／session／日／月持久化计数；收到真实搜索事件后显示进度，不让用户无反馈等待 |
 | 地点与路线 | 仅 session 保存的手机位置、Places 候选与评分、考虑路况的 Routes Matrix、驾车／步行／骑行、模糊地点追问，以及临时场地的有界公开资料 fallback |
 | 户外信息 | 对有明确时间的户外计划并发获取天气、空气质量和花粉；缺少的数据保持 unknown，不会被当成“安全”或“0” |
@@ -41,6 +41,8 @@ Glass Assistant 的目标是成为个人助手，而不是只会返回数据的�
 | 持久化 | 后端保存对话、任务、文档和额度账本；凭证与精确坐标不进入这些记录 |
 
 Calendar 和 Email 是用户私有状态的权威 workflow，不能用模型猜测替代。写入必须经过后端校验、绑定预览的确认、幂等处理和结果回执。Maps、Weather、Air Quality 与 Pollen 属于只读证据，失败时可以使用明确披露且受额度限制的公开资料 fallback。
+
+本部署使用持久化的 `$80/月` 跨 provider 应用层账本：OpenAI `$50`、Soniox `$20`、Google `$10`；Lightsail 等基础设施另算。Google 免费 SKU 的用量阈值会发送到固定邮箱，不占用眼镜显示。详见[月度 provider 成本控制](docs/COST_CONTROLS.md)。
 
 ## 技术结构
 
@@ -130,7 +132,7 @@ npm start
 | Weather、Air Quality、Pollen | 户外规划所需的结构化信息 | [Maps 与环境 API](docs/setup/GOOGLE_MAPS_ROUTES.md) |
 | Codex CLI | 带 lifecycle、超时与取消控制的可选对话执行通道 | [CLI 通道](docs/CODEX_CLI_CHANNEL.md) |
 
-个人部署建议把 OpenAI project 硬上限设为每月 `$40`。应用内搜索计数只是纵深保护，不能代替 provider 的账单上限；Google 与 AWS 使用各自独立的费用控制。
+个人部署建议把 OpenAI project 硬上限设为每月 `$50`，并保留应用内 `$80/月` 跨 provider 账本。应用内计数只是纵深保护，不能代替 provider 的账单上限；AWS 基础设施使用独立费用控制。
 
 ## 安全与隐私边界
 
@@ -187,7 +189,7 @@ Calendar、Email、Maps、环境、STT 和真实模型脚本可能消耗额度�
 
 - 模拟器成功不能证明真机 BLE、手机权限、电池、温度、锁屏／后台生命周期、字体或 R1 手势一定正常。
 - 尚未实现 always-on 唤醒词或有保证的全天后台助手模式。
-- Session context 只是短期记忆；重新连接不会自动恢复上一次对话，也不是长期个人记忆。
+- 断线后 15 分钟内可以恢复同一 logical session。这是持久化的 session 记忆，不是跨 session 的个人档案／长期 memory；已结束或过期的会话不会被静默重开。
 - 重复事件目前只覆盖有限的按天／按周系列，不支持按月、多星期几、全天系列或“本次及以后”。
 - 尚未接入公交路线，也不能直接把目的地交给 Apple Maps／Google Maps 启动导航。
 

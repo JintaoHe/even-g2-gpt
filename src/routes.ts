@@ -1,5 +1,6 @@
 import type { RouteTravelMode } from './conversation.js';
 import type { EphemeralLocation } from './location.js';
+import type { CostLedger, GoogleSku } from './cost-ledger.js';
 
 export type RouteOrigin = { kind: 'coordinates'; location: EphemeralLocation } | { kind: 'address'; address: string };
 export type RouteRequestKind = 'destination' | 'nearby';
@@ -115,20 +116,28 @@ export function recommendCandidates(candidates: RouteCandidate[]) {
 export class GoogleRoutesProvider implements RouteProvider {
   constructor(private key: string, private fetcher: Fetch = fetch,
     private placesEndpoint = 'https://places.googleapis.com/v1/places:searchText',
-    private routesEndpoint = 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix') {
+    private routesEndpoint = 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
+    private costs?: CostLedger) {
     if (!key.trim() || key.length > 500) throw new Error('Invalid Google Maps key');
     for (const endpoint of [placesEndpoint, routesEndpoint]) if (new URL(endpoint).protocol !== 'https:'
       && !/^http:\/\/127\.0\.0\.1(?::\d+)?\//.test(endpoint)) throw new Error('Invalid Maps endpoint');
   }
 
-  private async post(stage: 'places' | 'routes', endpoint: string, body: object, fieldMask: string, signal: AbortSignal) {
+  private async post(stage: 'places' | 'routes', endpoint: string, body: object, fieldMask: string, signal: AbortSignal,
+    sku: GoogleSku, expectedUnits = 1) {
     let lastError: RouteError | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       signal.throwIfAborted();
+      const reservation = await this.costs?.reserveGoogle(sku, expectedUnits);
       try {
         const response = await this.fetcher(endpoint, { method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
           headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': this.key, 'X-Goog-FieldMask': fieldMask }, body: JSON.stringify(body) });
-        if (response.ok) return await response.json();
+        if (response.ok) {
+          const data = await response.json();
+          await reservation?.settle(stage === 'routes' && Array.isArray(data) ? Math.min(expectedUnits, data.length) : 1);
+          return data;
+        }
+        await reservation?.settle(0);
         let providerReason: string | undefined;
         try {
           const raw = await response.text();
@@ -168,7 +177,8 @@ export class GoogleRoutesProvider implements RouteProvider {
       }, radius } } } : {};
       const places = await this.post('places', this.placesEndpoint, { textQuery, pageSize: PLACE_SEARCH_CANDIDATES,
         ...(nearby ? { rankPreference: 'DISTANCE' } : {}), ...bias },
-      'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.types', signal) as any;
+      'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.types', signal,
+      'places-text-search-enterprise') as any;
       return (Array.isArray(places?.places) ? places.places : []).slice(0, PLACE_SEARCH_CANDIDATES)
         .map(sanitizeCandidate).filter((value: PlaceCandidate | undefined): value is PlaceCandidate => !!value);
     };
@@ -209,7 +219,8 @@ export class GoogleRoutesProvider implements RouteProvider {
       origins: [{ waypoint: originWaypoint }],
       destinations: candidates.map((candidate: PlaceCandidate) => ({ waypoint: { placeId: candidate.placeId } })),
       travelMode: modes[request.mode], ...(trafficAware ? { routingPreference: 'TRAFFIC_AWARE' } : {})
-    }, 'originIndex,destinationIndex,status,condition,distanceMeters,duration,staticDuration', signal) as any;
+    }, 'originIndex,destinationIndex,status,condition,distanceMeters,duration,staticDuration', signal,
+    trafficAware ? 'route-matrix-pro' : 'route-matrix-essentials', candidates.length) as any;
     const elements = Array.isArray(matrix) ? matrix : [];
     const routes: RouteCandidate[] = [];
     for (const element of elements) {
@@ -231,8 +242,8 @@ export class GoogleRoutesProvider implements RouteProvider {
   }
 }
 
-export function createRouteProvider(env: NodeJS.ProcessEnv = process.env): RouteProvider | undefined {
+export function createRouteProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger): RouteProvider | undefined {
   if (env.GOOGLE_MAPS_ENABLED !== 'true') return undefined;
   if (!env.GOOGLE_MAPS_API_KEY) throw new Error('GOOGLE_MAPS_ENABLED requires GOOGLE_MAPS_API_KEY');
-  return new GoogleRoutesProvider(env.GOOGLE_MAPS_API_KEY);
+  return new GoogleRoutesProvider(env.GOOGLE_MAPS_API_KEY, fetch, undefined, undefined, costs);
 }

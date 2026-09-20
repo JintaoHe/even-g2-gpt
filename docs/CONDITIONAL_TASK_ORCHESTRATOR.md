@@ -372,7 +372,7 @@ Implemented in the current local stage:
 Still later-gated:
 
 - persistent resumable task storage across process restarts;
-- production budget ledger and provider observability;
+- provider-side dashboard reconciliation and richer observability (the persistent application-level OpenAI/Soniox/Google cost ledger is implemented; see `COST_CONTROLS.md`);
 - Linux deployment/security review; and
 - physical phone/G2 permission and lifecycle acceptance.
 

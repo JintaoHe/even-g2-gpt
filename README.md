@@ -19,7 +19,7 @@ The latest source still needs a fresh Linux deployment and live acceptance befor
 Glass Assistant is intended to behave like a personal assistant, not a data-reporting bot:
 
 - **Talk naturally:** Soniox `stt-rt-v5` handles native 16 kHz Mandarin/English code-switching, with an 800 ms pre-trigger buffer and interruption support.
-- **Remember the current conversation:** bounded short-term session context resolves references such as “the second point,” “that idea,” or “the place you recommended.” It can pause a trip topic, discuss a business idea, and later return to the trip without mixing their exported documents.
+- **Remember the current conversation:** durable session messages plus a bounded summary/recent-message context resolve references such as “the second point,” “that idea,” or “the place you recommended.” A disconnected client can resume the same logical session within 15 minutes without mixing topic-scoped exports.
 - **Adapt every turn:** one of nine cognitive modes is selected for the current goal—`casual`, `explain`, `research`, `brainstorm`, `decision_support`, `planning`, `deep_reasoning`, `compose`, or `coaching`. Tool workflows are authorized separately.
 - **Be useful and warm:** the assistant can execute tasks, think with the user, or simply respond socially. Praise, frustration, and conversational closure should receive a human-friendly response rather than another intake form.
 - **Ask one thing at a time:** when information is genuinely missing, it asks for one atomic fact or decision per turn instead of presenting a long questionnaire on the glasses.
@@ -30,7 +30,7 @@ Glass Assistant is intended to behave like a personal assistant, not a data-repo
 | Capability | Current behavior |
 | --- | --- |
 | Voice conversation | Soniox real-time bilingual STT, automatic utterance completion, streamed answers, interruption cancellation, session exit intent, and OpenAI STT as an explicit rollback |
-| Session intelligence | Full bounded session context plus isolated topic threads; modes and workflows are re-evaluated on every turn rather than pinning the whole session to navigation or planning |
+| Session intelligence | SQLite-backed logical sessions, rotating resume credentials, bounded summaries/recent messages, and isolated topic threads; modes and workflows are re-evaluated every turn |
 | Web research | OpenAI API search with persistent per-answer/session/day/month quotas; actual search progress is shown instead of leaving the user waiting silently |
 | Places and routes | Session-only phone location, Places candidates and ratings, traffic-aware Routes Matrix comparisons, drive/walk/bicycle modes, ambiguity clarification, and a bounded public-research fallback for venue context |
 | Outdoor evidence | Weather, air quality, and pollen can be fetched concurrently for relevant time-bounded outdoor plans; unavailable evidence remains unknown instead of being treated as safe |
@@ -130,7 +130,7 @@ Enter the application token on the companion page. Only one authenticated owner 
 | Weather, Air Quality, Pollen | Structured evidence for outdoor planning | [Maps and environment setup](docs/setup/GOOGLE_MAPS_ROUTES.md) |
 | Codex CLI | Optional alternative dialogue execution with lifecycle and timeout controls | [CLI channel](docs/CODEX_CLI_CHANNEL.md) |
 
-For this personal deployment, the recommended OpenAI project hard limit is `$40` per month. Application search quotas are defense in depth, not a substitute for provider-side billing limits. Google and AWS use separate billing controls.
+For this personal deployment, the application now enforces a persistent `$80` monthly provider ledger: OpenAI `$50`, Soniox `$20`, and Google `$10`. Lightsail and other infrastructure remain separate. Application controls are defense in depth, not a substitute for provider-side billing limits. See [Monthly provider cost controls](docs/COST_CONTROLS.md).
 
 ## Security and privacy boundaries
 
@@ -187,7 +187,7 @@ Live Calendar, email, Maps, environment, STT, and real-model scripts may consume
 
 - Simulator success does not certify BLE behavior, phone permissions, battery, thermals, lock-screen/background lifecycle, fonts, or R1 gestures on physical hardware.
 - There is no always-on wake word or guaranteed all-day background assistant mode.
-- Session context is short-term memory only; reconnecting does not automatically restore a previous conversation or create durable personal memory.
+- A disconnected client can resume the same logical session for 15 minutes. This is durable session memory, not cross-session personal/profile memory; an ended or expired session is not silently reopened.
 - Recurrence currently covers bounded daily/weekly series, not monthly rules, multiple weekdays, all-day series, or “this and following” splits.
 - Transit routing and direct handoff into Apple Maps/Google Maps are not implemented.
 

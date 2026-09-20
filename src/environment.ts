@@ -1,3 +1,5 @@
+import type { CostLedger, GoogleSku } from './cost-ledger.js';
+
 export type GeoPoint = { latitude: number; longitude: number };
 export type EnvironmentRequest = { location: GeoPoint; start: string; end: string; timezone: string; language?: string };
 export type WeatherEvidence = { available: boolean; hourCount: number; conditions: string[];
@@ -66,7 +68,7 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
       weather: 'https://weather.googleapis.com/v1/forecast/hours:lookup',
       airQuality: 'https://airquality.googleapis.com/v1/forecast:lookup',
       pollen: 'https://pollen.googleapis.com/v1/forecast:lookup'
-    }) {
+    }, private costs?: CostLedger) {
     if (!key.trim() || key.length > 500) throw new Error('Invalid Google environment key');
     for (const endpoint of Object.values(endpoints)) if (!endpointAllowed(endpoint)) throw new Error('Invalid environment endpoint');
   }
@@ -76,10 +78,13 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
     // Google documents API-key query authentication for these endpoints. The
     // complete URL is never logged or included in thrown errors.
     url.searchParams.set('key', this.key);
+    const sku: GoogleSku = service === 'air_quality' ? 'air-quality' : service as GoogleSku;
+    const reservation = await this.costs?.reserveGoogle(sku, 1);
     let response: Response;
     try { response = await this.fetcher(url, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) }); }
     catch { signal.throwIfAborted(); throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service, undefined, true); }
     if (!response.ok) {
+      await reservation?.settle(0);
       let providerReason: string | undefined;
       try {
         const raw = await response.text();
@@ -92,6 +97,7 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
         response.status, [429, 500, 502, 503, 504].includes(response.status), providerReason);
     }
     const raw = await response.text();
+    await reservation?.settle(1);
     if (Buffer.byteLength(raw) > RESPONSE_LIMIT) throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service);
     try { return JSON.parse(raw); } catch { throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service); }
   }
@@ -171,9 +177,9 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
   }
 }
 
-export function createEnvironmentProvider(env: NodeJS.ProcessEnv = process.env): EnvironmentProvider | undefined {
+export function createEnvironmentProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger): EnvironmentProvider | undefined {
   if (env.GOOGLE_ENVIRONMENT_ENABLED !== 'true') return undefined;
   const key = env.GOOGLE_ENVIRONMENT_API_KEY?.trim() || env.GOOGLE_MAPS_API_KEY?.trim();
   if (!key) throw new Error('GOOGLE_ENVIRONMENT_ENABLED requires a restricted server-side Google API key');
-  return new GoogleEnvironmentProvider(key);
+  return new GoogleEnvironmentProvider(key, fetch, Date.now, undefined, costs);
 }

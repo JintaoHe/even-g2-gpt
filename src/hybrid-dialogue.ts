@@ -29,7 +29,7 @@ export class HybridDialogue implements DialogueModel {
 }
 
 export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = process.env,
-  overrides: { endpoint?: string; quota?: SearchBudget; search?: boolean } = {}) {
+  overrides: { endpoint?: string; quota?: SearchBudget; search?: boolean; fetcher?: typeof fetch } = {}) {
   const intentModel = env.OPENAI_INTENT_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
   // Retain explicit/legacy overrides; Luna is the evaluated default for both roles.
   const replyModel = env.OPENAI_REPLY_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
@@ -50,6 +50,7 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
     { ...(nano(intentModel) ? { reasoningEffort: 'low' as const, intentTokens: 2048 }
       : luna(intentModel) ? { reasoningEffort: 'medium' as const, intentTokens: 1024, adaptiveReasoning: luna(replyModel) } : {}),
       deliveryRouting: env.EVEN_DELIVERY_ROUTING === 'true', calendarRouting: env.GOOGLE_CALENDAR_ENABLED === 'true',
+      fetcher: overrides.fetcher,
       locationRouting: env.GOOGLE_MAPS_ENABLED === 'true',
       webRouting: overrides.search ?? env.OPENAI_WEB_SEARCH !== 'false' });
   const reply = new OpenAIDialogue(key, replyModel, overrides.endpoint,
@@ -58,6 +59,7 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
       ...(nano(replyModel) ? { reasoningEffort: 'low' as const, replyTokens: 3072 } : {}),
       ...(luna(replyModel) ? { reasoningEffort: 'low' as const, replyTokens: 4096, adaptiveReasoning: luna(intentModel) } : {}),
       sessionSearchCalls: sessionCap,
+      fetcher: overrides.fetcher,
       applicationCapabilities: {
         calendar: env.GOOGLE_CALENDAR_ENABLED === 'true',
         documents: env.EVEN_DELIVERY_ROUTING === 'true',
