@@ -23,7 +23,9 @@ for (const path of ['src/codex-instructions.md', 'src/codex-intent.schema.json',
 }
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 // Keep dependency metadata aligned with the lockfile; install with --omit=dev.
-manifest.scripts = { start: 'node src/conversation-server.js' };
+manifest.scripts = { start: 'node src/conversation-server.js',
+  'sessions:migrate': 'node src/legacy-session-import-cli.js',
+  'sessions:maintain': 'node src/conversation-maintenance-cli.js' };
 await writeFile(join(output, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
 async function list(directory) {
   const paths = [];

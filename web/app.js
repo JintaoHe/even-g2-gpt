@@ -15,6 +15,20 @@ const active = () => connected && ['listening', 'thinking', 'answering'].include
 function send(value) { return session?.send(value) ?? false; }
 const calendarEvent = calendarPanel($('googleCalendar'), send);
 function notice(text) { $('notice').textContent = text; }
+function storageReport(e) {
+  const bytes = value => Number.isFinite(value) ? `${(value / 1024 / 1024).toFixed(2)} MB` : '未知';
+  const actions = { inspect: 'SQLite 状态', seed_expired: '已写入三年前测试记录',
+    cleanup_preview: '三年清理预览', cleanup_apply: '三年测试记录清理结果' };
+  const lines = [actions[e.action] ?? 'SQLite 测试结果'];
+  if (e.sqlite) lines.push(`Schema v${e.sqlite.schema_version} · ${e.sqlite.journal_mode} · 外键${e.sqlite.foreign_keys ? '开启' : '关闭'}`);
+  if (e.storage) lines.push(`会话 ${e.storage.sessions} · 消息 ${e.storage.messages} · 数据库 ${bytes(e.storage.database_bytes)}`,
+    `可用磁盘 ${bytes(e.storage.available_disk_bytes)} · 警告 ${e.storage.warnings?.length ? e.storage.warnings.join('、') : '无'}`);
+  if (e.current_session) lines.push(`当前会话 ${e.current_session.status} · 最新序号 ${e.current_session.latest_sequence}`);
+  if (e.retention) lines.push(`测试范围：可清理 ${e.retention.test_eligible_sessions} 个会话／${e.retention.test_eligible_messages} 条消息`,
+    `本次删除 ${e.retention.deleted_sessions} 个会话／${e.retention.deleted_messages} 条消息`);
+  lines.push('安全边界：未读取或显示对话正文。');
+  $('storageReport').textContent = lines.join('\n');
+}
 function controls() {
   for (const id of ['voice', 'resume']) $(id).disabled = !connected || ['closed', 'exit_pending'].includes(state);
   if (!speechAvailable) $('voice').disabled = true;
@@ -131,6 +145,7 @@ function handleServerEvent(e) {
       if (e.capabilities?.provider === 'codex-cli') notice(`Codex CLI：整条回答返回，${e.capabilities.webSearch ? '原生联网搜索已开启（使用 Codex 账号额度）' : '联网搜索已关闭'}。${speechAvailable ? `语音转录走 ${stt} API。` : '未配置 STT API key，仅支持文字输入。'}`);
     }
     if (e.type === 'jobs.list') renderJobs(e.jobs);
+    if (e.type === 'test.storage.report') storageReport(e);
     if (e.type === 'mail.confirmation_required') {
       if (e.calendar_confirmation) {
         const phrase = window.prompt(`${e.preview}\n\n请核对日期和主时区。要发送，请输入：${e.calendar_confirmation}`);
@@ -259,9 +274,17 @@ window.addEventListener('pagehide', () => { stopMic(); session.dispose(); });
 
 if (isLoopbackHost(location.hostname)) {
   $('devControls').hidden = false;
+  $('resumeSession').onclick = () => { if (!session.simulateResume()) notice('需要先连接，才能模拟 session resume。'); };
   $('dropSocket').onclick = () => { if (!session.simulateDrop()) notice('当前没有可断开的连接。'); };
   $('retryConnection').onclick = () => { if (!session.networkAvailable()) notice('当前已连接，或没有可恢复的会话。'); };
   $('repeatSubmit').onclick = () => { if (!session.repeatLastSubmission()) notice('还没有可重复提交的文字消息。'); };
   $('expireSession').onclick = () => { if (!session.simulateExpiry()) notice('需要先用 token 连接本地测试服务器。'); };
+  $('inspectStorage').onclick = () => { if (!session.storageTest('test.storage.inspect')) notice('需要先连接本地测试服务器。'); };
+  $('seedExpiredRecord').onclick = () => { if (!session.storageTest('test.storage.seed_expired')) notice('需要先连接本地测试服务器。'); };
+  $('previewRetention').onclick = () => { if (!session.storageTest('test.storage.cleanup_preview')) notice('需要先连接本地测试服务器。'); };
+  $('applyRetention').onclick = () => {
+    if (window.confirm('只清理 simulator 生成的三年前测试记录；真实会话不会删除。继续吗？')
+      && !session.storageTest('test.storage.cleanup_apply')) notice('需要先连接本地测试服务器。');
+  };
 }
 session.resumeIfAvailable();

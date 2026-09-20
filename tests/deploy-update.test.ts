@@ -11,6 +11,7 @@ const healthService = await readFile(new URL('../deploy/even-agent-healthcheck.s
 const healthTimer = await readFile(new URL('../deploy/even-agent-healthcheck.timer', import.meta.url), 'utf8');
 const backupScript = await readFile(new URL('../deploy/even-agent-backup.sh', import.meta.url), 'utf8');
 const restoreScript = await readFile(new URL('../deploy/even-agent-restore-check.sh', import.meta.url), 'utf8');
+const buildScript = await readFile(new URL('../scripts/build-server.mjs', import.meta.url), 'utf8');
 const backupService = await readFile(new URL('../deploy/even-agent-backup.service', import.meta.url), 'utf8');
 const backupTimer = await readFile(new URL('../deploy/even-agent-backup.timer', import.meta.url), 'utf8');
 const caddy = await readFile(new URL('../deploy/Caddyfile', import.meta.url), 'utf8');
@@ -51,6 +52,7 @@ test('production health monitoring exposes only a minimal public check and keeps
   assert.match(healthScript, /--retry 5 --retry-delay 1 --retry-all-errors/);
   assert.match(healthScript, /--resolve "\$\{PUBLIC_HOST\}:443:127\.0\.0\.1"/);
   assert.match(healthScript, /http:\/\/127\.0\.0\.1:3001\/internal\/health\/calendar/);
+  assert.match(healthScript, /http:\/\/127\.0\.0\.1:3001\/internal\/health\/storage/);
   assert.match(healthService, /DynamicUser=true/);
   assert.match(healthService, /CapabilityBoundingSet=\s*$/m);
   assert.match(healthService, /ProtectSystem=strict/);
@@ -68,10 +70,19 @@ test('daily backups are private, verified before pruning, and never overwrite pr
   assert.match(restoreScript, /sha256sum --check --status/);
   assert.match(restoreScript, /tar -tvzf "\$\{resolved\}" \| grep -Eq '\^\[lh\]'/);
   assert.match(restoreScript, /\/usr\/local\/bin\/node "\$\{VERIFY_SCRIPT\}" "\$\{CHECK_ROOT\}"/);
+  assert.match(backupScript, /systemctl stop "\$\{SERVICE_NAME\}"[\s\S]*tar --create/);
+  assert.match(restoreScript, /verify-backup\.mjs/);
   assert.match(restoreScript, /readonly KEEP_BACKUPS=7/);
   assert.doesNotMatch(restoreScript, /\/var\/lib\/even-agent[^'\n]*rm/);
   assert.match(backupService, /ReadWritePaths=\/var\/backups\/even-agent \/run\/lock/);
   assert.match(backupService, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
   assert.match(backupTimer, /OnCalendar=\*-\*-\* 09:00:00 UTC/);
   assert.match(backupTimer, /Persistent=true/);
+});
+
+test('server-only release includes the offline legacy migration command', () => {
+  assert.match(buildScript, /legacy-session-import-cli/);
+  assert.match(buildScript, /sessions:migrate/);
+  assert.match(buildScript, /conversation-maintenance-cli/);
+  assert.match(buildScript, /sessions:maintain/);
 });

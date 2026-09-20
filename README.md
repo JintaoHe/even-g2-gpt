@@ -159,7 +159,7 @@ docs/                  Setup, product, security, and acceptance references
 
 `npm run build:server` creates a separate `dist/server-*` backend release. Deploy that verified server artifact—not the entire development checkout. The release excludes the browser lab, SDK source, simulator, tests, credentials, and local runtime data.
 
-Start with [Linux deployment](docs/setup/LINUX_DEPLOYMENT.md), [operations](docs/LINUX_OPERATIONS.md), [automatic updates and rollback](docs/setup/AUTOMATIC_UPDATES.md), and [monitoring/backup recovery](docs/setup/MONITORING_BACKUP_RECOVERY.md).
+Start with [Linux deployment](docs/setup/LINUX_DEPLOYMENT.md), [operations](docs/LINUX_OPERATIONS.md), [automatic updates and rollback](docs/setup/AUTOMATIC_UPDATES.md), [session migration/retention](docs/setup/SESSION_MIGRATION_RETENTION.md), and [monitoring/backup recovery](docs/setup/MONITORING_BACKUP_RECOVERY.md).
 
 ## Verification
 

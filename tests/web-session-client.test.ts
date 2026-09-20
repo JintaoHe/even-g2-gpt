@@ -25,7 +25,11 @@ test('browser reference client uses v2 resume, stable message ids and duplicate-
   client.send({ type: 'text.submit', text: 'hello' }); const submitted = sockets[0].sent.at(-1);
   assert.match(submitted.message_id, /^[0-9a-f-]{36}$/); client.repeatLastSubmission();
   assert.deepEqual(sockets[0].sent.at(-1), submitted);
-  sockets[0].close(); timers[0](); sockets[1].open(); assert.equal(sockets[1].sent[0].resume_credential, 'r'.repeat(32));
+  assert.equal(client.storageTest('test.storage.inspect'), true);
+  assert.match(sockets[0].sent.at(-1).command_id, /^[0-9a-f-]{36}$/);
+  assert.equal(client.simulateResume(), true);
+  assert.equal(timers.length, 1);
+  timers[0](); sockets[1].open(); assert.equal(sockets[1].sent[0].resume_credential, 'r'.repeat(32));
 });
 
 test('browser dev controls and reconnect delay are tightly bounded', () => {

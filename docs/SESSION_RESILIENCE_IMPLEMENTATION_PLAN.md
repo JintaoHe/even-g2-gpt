@@ -525,11 +525,11 @@ npm run audit:public
 
 #### 6.1 导入现有 JSON session
 
-- [ ] 只读取合法 UUID 文件名、普通文件和预期 schema。
-- [ ] 导入采用 transaction，并在 `schema_migrations` 或独立 import ledger 中记录来源 hash。
-- [ ] 重复运行不产生重复 session／message。
-- [ ] 非法、截断或超限 JSON 被隔离并记录安全错误，不阻止其他文件导入。
-- [ ] 成功导入后保留原 JSON，不自动删除；等待一次完整备份和人工确认。
+- [x] 只读取合法 UUID 文件名、普通文件和预期 schema。
+- [x] 导入采用 transaction，并在 `schema_migrations` 或独立 import ledger 中记录来源 hash。
+- [x] 重复运行不产生重复 session／message。
+- [x] 非法、截断或超限 JSON 被隔离并记录安全错误，不阻止其他文件导入。
+- [x] 成功导入后保留原 JSON，不自动删除；等待一次完整备份和人工确认。
 
 新增测试：`tests/legacy-session-import.test.ts`。
 
@@ -539,12 +539,12 @@ npm run audit:public
 
 #### 6.2 扩展备份验证
 
-- [ ] 确认 backup 停服务后包含 `assistant-memory.sqlite` 及必要 WAL 状态。
-- [ ] `verify-backup.mjs` 对新数据库执行 `integrity_check` 和 `foreign_key_check`。
-- [ ] 验证 session/message/turn 引用关系。
-- [ ] 验证最新 session、最新 committed message 和 summary sequence 可以读取。
-- [ ] restore drill 验证服务能从恢复目录重新启动并恢复 session。
-- [ ] 备份输出不打印 transcript 内容。
+- [x] 确认 backup 停服务后包含 `assistant-memory.sqlite` 及必要 WAL 状态。
+- [x] `verify-backup.mjs` 对新数据库执行 `integrity_check` 和 `foreign_key_check`。
+- [x] 验证 session/message/turn 引用关系。
+- [x] 验证最新 session、最新 committed message 和 summary sequence 可以读取。
+- [x] restore drill 验证服务能从恢复目录重新启动并恢复 session。
+- [x] 备份输出不打印 transcript 内容。
 
 新增测试：扩展 `tests/deploy-update.test.ts`，并增加隔离临时目录中的 backup verifier test。
 
@@ -552,14 +552,14 @@ npm run audit:public
 
 #### 6.3 数据保留和清理
 
-- [ ] 实现可配置 retention；默认 `1095` 代表三年保留期，`0` 只用于明确关闭自动清理。
-- [ ] retention 大于 `0` 时，只清理已经结束／过期且超过期限的 session；默认清理三年前的数据。
-- [ ] 使用 foreign key cascade 或显式 transaction，不能留下 orphan rows。
-- [ ] active session、运行中的 job 和未确定 provider receipt 不得清理。
-- [ ] 清理前后记录数量指标，不记录正文。
-- [ ] 提供 dry-run 模式。
-- [ ] 增加 SQLite 文件大小、message 数和剩余磁盘空间的健康指标／warning；达到 warning 只通知，不在 `0` 模式下擅自删除。
-- [ ] 文档说明 SQLite 历史主要占用磁盘，不会把整个数据库常驻 RAM；ContextBuilder 也不得把三年历史全部加载到内存。
+- [x] 实现可配置 retention；默认 `1095` 代表三年保留期，`0` 只用于明确关闭自动清理。
+- [x] retention 大于 `0` 时，只清理已经结束／过期且超过期限的 session；默认清理三年前的数据。
+- [x] 使用 foreign key cascade 或显式 transaction，不能留下 orphan rows。
+- [x] active session、运行中的 job 和未确定 provider receipt 不得清理。
+- [x] 清理前后记录数量指标，不记录正文。
+- [x] 提供 dry-run 模式。
+- [x] 增加 SQLite 文件大小、message 数和剩余磁盘空间的健康指标／warning；达到 warning 只通知，不在 `0` 模式下擅自删除。
+- [x] 文档说明 SQLite 历史主要占用磁盘，不会把整个数据库常驻 RAM；ContextBuilder 也不得把三年历史全部加载到内存。
 
 新增测试：`tests/conversation-retention.test.ts`。
 
@@ -571,26 +571,28 @@ npm run audit:public
 
 #### 7.1 本地自动化回归
 
-- [ ] server unit/integration tests 全绿。
-- [ ] TypeScript typecheck 全绿。
-- [ ] Even client tests/build 全绿。
-- [ ] server production build 全绿。
-- [ ] public secret/privacy audit 全绿。
-- [ ] 测试不得默认调用 OpenAI、Soniox、Google、SMTP 或真实 Calendar。
+- [x] server unit/integration tests 全绿。
+- [x] TypeScript typecheck 全绿。
+- [x] Even client tests/build 全绿。
+- [x] server production build 全绿。
+- [x] public secret/privacy audit 全绿。
+- [x] 测试不得默认调用 OpenAI、Soniox、Google、SMTP 或真实 Calendar。
 
 #### 7.2 本地 fault-injection 验收
 
-- [ ] 提交 user message 前断网。
-- [ ] user ACK 后断网。
-- [ ] Luna streaming 中断网。
-- [ ] final commit 后、客户端收到前断网。
-- [ ] 连续刷新页面 10 次。
-- [ ] simulator 使用开发按钮验证立即过期；重连后必须产生新 session，旧 session 仍保留在 SQLite 中但不再恢复。
-- [ ] server 在 listening、thinking、answering 三种状态分别重启。
-- [ ] 重复发送同一 `message_id` 10 次。
-- [ ] 120+ message 长对话。
-- [ ] 第二个 client 连接争用。
-- [ ] Calendar／Email 预览后断网、确认后断网和 provider ACK 丢失。
+- [x] 提交 user message 前断网。
+- [x] user ACK 后断网。
+- [x] Luna streaming 中断网。
+- [x] final commit 后、客户端收到前断网。
+- [x] 连续刷新页面 10 次。
+- [x] simulator 使用开发按钮验证立即过期；重连后必须产生新 session，旧 session 仍保留在 SQLite 中但不再恢复。
+- [x] simulator 提供一键断线恢复、SQLite metadata 查看、固定三年前测试记录写入、三年清理预览和测试范围清理；不接受任意 SQL／正文／时间参数。
+- [x] SQLite 清理按钮固定到 `local-retention-test` owner scope；真实本地历史即使超过三年也不会被 simulator 测试按钮删除。
+- [x] server 在 listening、thinking、answering 三种状态分别重启。
+- [x] 重复发送同一 `message_id` 10 次。
+- [x] 120+ message 长对话。
+- [x] 第二个 client 连接争用。
+- [x] Calendar／Email 预览后断网、确认后断网和 provider ACK 丢失。
 
 通过门槛：无重复消息、无重复邮件、无重复 Calendar 写入、无未经确认的副作用。
 
@@ -601,6 +603,7 @@ npm run audit:public
 - [ ] 用户确认回答中断提示简洁，不显示内部 metadata／error dump。
 - [ ] 用户确认麦克风失败不导致对话丢失。
 - [ ] 用户确认 Calendar／Email 恢复后仍要求正确预览／确认。
+- [ ] 用户用开发面板确认 session resume 保留原 session，并依次验证 SQLite 状态 → 写入测试记录 → 清理预览 → 清理测试记录。
 
 停止条件：用户尚未验收时，不创建部署 PR，不部署 Linux，不构建新的 `.ehpk`。
 

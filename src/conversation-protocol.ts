@@ -67,10 +67,12 @@ export type TextSubmitMessageV2 = {
 export type CommandType = 'turn.submit' | 'pause' | 'resume' | 'interrupt' | 'answer.retry' | 'exit.request';
 export type CommandMessageV2 = { type: CommandType; command_id: string };
 export type ExitConfirmMessageV2 = { type: 'exit.confirm'; command_id: string; confirm: boolean };
-export type TestSessionExpireMessageV2 = { type: 'test.session.expire'; command_id: string };
+export type LocalTestControlType = 'test.session.expire' | 'test.storage.inspect' | 'test.storage.seed_expired'
+  | 'test.storage.cleanup_preview' | 'test.storage.cleanup_apply';
+export type LocalTestControlMessageV2 = { type: LocalTestControlType; command_id: string };
 
 export type CoreClientMessageV2 = HelloMessageV2 | TextSubmitMessageV2 | CommandMessageV2
-  | ExitConfirmMessageV2 | TestSessionExpireMessageV2;
+  | ExitConfirmMessageV2 | LocalTestControlMessageV2;
 
 export type SnapshotMessageV2 = {
   id: string;
@@ -163,6 +165,18 @@ export const CLIENT_MESSAGE_POLICY = {
   'test.session.expire': {
     persistence: 'none', idempotency: 'command_id', replay: 'development-only', production: false,
   },
+  'test.storage.inspect': {
+    persistence: 'none', idempotency: 'command_id', replay: 'development-only', production: false,
+  },
+  'test.storage.seed_expired': {
+    persistence: 'none', idempotency: 'command_id', replay: 'development-only', production: false,
+  },
+  'test.storage.cleanup_preview': {
+    persistence: 'none', idempotency: 'command_id', replay: 'development-only', production: false,
+  },
+  'test.storage.cleanup_apply': {
+    persistence: 'none', idempotency: 'command_id', replay: 'development-only', production: false,
+  },
 } as const satisfies Record<CoreClientMessageV2['type'], ClientMessagePolicy>;
 
 export class ProtocolValidationError extends Error {
@@ -170,11 +184,15 @@ export class ProtocolValidationError extends Error {
   constructor() { super('Invalid conversation protocol message'); this.name = 'ProtocolValidationError'; }
 }
 
-type ParseOptions = { allowSessionExpiryTestControl?: boolean };
+type ParseOptions = { allowLocalTestControls?: boolean };
 type JsonRecord = Record<string, unknown>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COMMAND_TYPES = new Set<CommandType>(['turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry', 'exit.request']);
+const LOCAL_TEST_CONTROL_TYPES = new Set<LocalTestControlType>([
+  'test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
+  'test.storage.cleanup_preview', 'test.storage.cleanup_apply',
+]);
 
 function invalid(): never { throw new ProtocolValidationError(); }
 function record(value: unknown): JsonRecord {
@@ -242,10 +260,10 @@ export function parseCoreClientMessage(input: unknown, options: ParseOptions = {
     return { type: 'exit.confirm', command_id: uuid(value.command_id), confirm: value.confirm };
   }
 
-  if (value.type === 'test.session.expire') {
+  if (LOCAL_TEST_CONTROL_TYPES.has(value.type as LocalTestControlType)) {
     exactKeys(value, ['type', 'command_id']);
-    if (!options.allowSessionExpiryTestControl) invalid();
-    return { type: 'test.session.expire', command_id: uuid(value.command_id) };
+    if (!options.allowLocalTestControls) invalid();
+    return { type: value.type as LocalTestControlType, command_id: uuid(value.command_id) };
   }
 
   invalid();
