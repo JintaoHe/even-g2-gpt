@@ -36,7 +36,27 @@ async function files(directory) {
 }
 
 const manifest = JSON.parse(await readFile(new URL('../app.json', import.meta.url), 'utf8'));
+const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 if (manifest.entrypoint !== 'index.html') throw new Error('Unexpected manifest entrypoint');
+if (manifest.name !== 'Glass Assistant' || manifest.package_id !== 'com.eveng2assistant.glassassistant') {
+  throw new Error('Unexpected release identity');
+}
+if (manifest.version !== packageJson.version) throw new Error('Manifest and package versions differ');
+if (manifest.min_sdk_version !== packageJson.dependencies?.['@evenrealities/even_hub_sdk']) {
+  throw new Error('Manifest and installed SDK versions differ');
+}
+const permissionNames = manifest.permissions?.map(permission => permission.name).sort();
+if (JSON.stringify(permissionNames) !== JSON.stringify(['g2-microphone', 'location', 'network'])) {
+  throw new Error('Unexpected release permissions');
+}
+const network = manifest.permissions.find(permission => permission.name === 'network');
+const expectedWhitelist = [
+  'https://calendar.eveng2assistant.com',
+  'wss://calendar.eveng2assistant.com'
+];
+if (JSON.stringify(network?.whitelist) !== JSON.stringify(expectedWhitelist)) {
+  throw new Error('Unexpected production network whitelist');
+}
 const builtFiles = await files(distPath);
 if (!builtFiles.length) throw new Error('Client build is empty');
 if (!(await stat(new URL('../dist/index.html', import.meta.url))).isFile()) throw new Error('Client entrypoint is missing');

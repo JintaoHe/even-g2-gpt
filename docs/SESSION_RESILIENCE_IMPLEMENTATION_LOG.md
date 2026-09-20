@@ -390,3 +390,27 @@ PR #39 已于 2026-09-20 squash merge 到 `main`，commit `20d0d4a`。
 ### Gate
 
 Durable Draft and Side-effect Recovery 的本地自动化、production builds、公开仓库扫描与最终 diff review：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建 `.ehpk`；Physical Acceptance 仍须等待独立 PR 和真机 gate。
+
+PR #40 已于 2026-09-20 squash merge 到 `main`，commit `b6ee88b`。
+
+## 2026-09-20 — Recovery hardening Rev 6 · Physical Acceptance readiness working tree
+
+### 实现
+
+- 新增 `docs/validation/v1.3-real-g2.md`，把安装／cold bootstrap、十次重复 cold start、15 分钟恢复边界、前后台／锁屏／memory pressure、换网／half-open、audio wedge、Calendar／Email 防重复、显示／定位共存和 30m／1h／2h soak 拆成独立、可判定的真机用例。
+- 所有真机项默认 `NOT RUN`；永久白屏、意外要求 master token、重复副作用、暂停后迟到 transcript 或未授权 input takeover 均为 STOP/FAIL。未观察到 vendor audio wedge 只能写 `NOT OBSERVED`，不能伪装成 PASS。
+- 新增离线 `npm run acceptance:preflight`，按固定顺序运行 root tests/typecheck、Even client tests/build、server-only build、public worktree audit 与 `git diff --check`。脚本明确不调用真实 provider、不部署、不打包、不上传。
+- production client verifier 与独立测试固定 `Glass Assistant` identity、manifest/package/SDK 版本一致性、仅 `network`／`g2-microphone`／`location` 三项权限，以及精确 HTTPS/WSS whitelist；新增权限、wildcard 或 endpoint 漂移会 fail closed。
+
+### 自动化结果
+
+1. Root full regression：371 个 tests（`369 passed / 0 failed / 2 Windows platform skips`）。
+2. Root TypeScript：通过。
+3. Even client：`67 passed / 0 failed`；新增 release manifest regression 通过。
+4. Even production build：2 个预期文件；release verifier 未发现 debug fixture、source map、private key 或明显 credential，identity／permissions／whitelist gate 通过。
+5. Server-only build：通过；不包含 browser lab、SDK、simulator、tests、credentials 或 local data。
+6. Public audit：281 个 working-tree source/document files，未发现禁止路径或 credential pattern；`git diff --check` 通过。
+
+### Gate
+
+Physical Acceptance 的**自动化准备阶段 PASS**，真实设备阶段仍为 **NOT RUN**。没有部署 Linux、没有调用 OpenAI／Soniox／Google／SMTP、没有生成或上传 `.ehpk`，也没有把 simulator／browser 证据写成真机通过。下一步必须使用真实 iPhone、G2、R1 和 Private Testing build 执行验收表；如果 Even host 在 WebContent process termination 后保持永久白屏，该项必须失败并阻止 release。

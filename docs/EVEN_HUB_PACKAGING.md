@@ -77,7 +77,7 @@ Private Testing 能验证真实包、manifest、权限和启动流程，但不�
 
 ## 6. 第一轮真机检查
 
-按顺序记录到 `docs/validation/v1.3-real-g2.md`：
+按顺序记录到 [`docs/validation/v1.3-real-g2.md`](validation/v1.3-real-g2.md)。该文件默认全部为 `NOT RUN`，只有真实 iPhone、G2 和 R1 证据才能改为 PASS：
 
 - 首屏不是黑屏；未配置时明确提示去手机伴随页连接。
 - 输入 token 后通过 WSS 认证；错误 token 不泄漏细节。
