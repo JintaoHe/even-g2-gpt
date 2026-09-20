@@ -40,12 +40,12 @@ import { ActiveInputLeaseError, SessionRegistry, SessionUnavailableError,
   type ManagedSessionRuntime, type SessionDisposeReason, type SessionInterruptReason } from './session-registry.js';
 import { CONVERSATION_PROTOCOL_VERSION, parseCoreClientMessage } from './conversation-protocol.js';
 
-function requestsAnswerRecovery(value: string) {
+export function requestsAnswerRecovery(value: string) {
   const text = value.trim().replace(/[\r\n\t]+/g, ' ');
   if (!text || text.length > 300
     || /(?:不要|不用|别|无需|假如|假设|如果|举例|例子|他说|她说|对方说|原话|quoted?|example|if\b|suppose|he said|she said|do not|don't)/i.test(text)) return false;
-  const chinese = /(?:刚才|刚刚|上一轮|上一个|前面).{0,28}(?:没(?:有)?看到|没(?:有)?看完|没(?:有)?听到|没听清|没显示|中断|断了|说到一半|再说|继续说|接着说|重说|重新回答|重复|回顾|复述)|(?:再说|继续|继续说|接着说|重说|重新回答|重复|回顾|复述).{0,24}(?:刚才|刚刚|上一轮|上一个|答案|回答)|^(?:没看完[，,、\s]*)?(?:继续说|接着说)|^说到一半[了。！.!]*$/i;
-  const english = /(?:didn't|did not|couldn't|could not).{0,24}(?:see|hear|catch|get).{0,24}(?:last|previous|answer|response)|(?:repeat|replay|say|answer).{0,24}(?:again|last|previous)/i;
+  const chinese = /(?:刚才|刚刚|上一轮|上一个|前面).{0,28}(?:没(?:有)?看到|没(?:有)?看完|没(?:有)?听到|没看清|没跟上|没了|不见了|没听清|没显示|中断|断了|说到一半|再说|继续说|接着说|重说|重新回答|重复|回顾|复述)|(?:再说|继续|继续说|接着说|重说|重新回答|重复|回顾|复述).{0,24}(?:刚才|刚刚|上一轮|上一个|答案|回答)|^(?:请|麻烦)?(?:再说|再讲|重说)(?:一遍|一次)[。！.!]*$|^(?:请|麻烦)?重复(?:一下)?(?:刚才|刚刚|上一轮|上一个)?(?:的)?(?:答案|回答|内容)?[。！.!]*$|^(?:等一下[，,、\s]*)?(?:我)?(?:没跟上|没看清|没听清|没看到|没看完)[了。！.!]*$|^(?:没看完[，,、\s]*)?(?:继续说|接着说)[。！.!]*$|^说到一半[了。！.!]*$|(?:屏幕|画面).{0,20}(?:闪|黑|没显示).{0,30}(?:刚才|刚刚|那段|内容|回答).{0,20}(?:没了|不见|没显示|看不到)/i;
+  const english = /(?:didn't|did not|couldn't|could not).{0,24}(?:see|hear|catch|get).{0,24}(?:last|previous|answer|response)|(?:repeat|replay|say|answer).{0,24}(?:again|last|previous)|\b(?:i\s+)?missed.{0,24}(?:last|previous|answer|response|part)\b/i;
   return chinese.test(text) || english.test(text);
 }
 
@@ -779,6 +779,7 @@ export function createConversationServer(options: {
             if (typeof msg.confirm !== 'boolean') throw new Error('Confirmation');
             conversation.confirmExit(msg.confirm);
             if (msg.confirm) { await registry.end(active.id); client.close(1000, 'Conversation ended'); }
+            else send({ type: 'notice', code: 'EXIT_CANCELLED', text: '退出已取消，麦克风仍暂停；点击一次继续。' });
             break;
           case 'test.session.expire':
             if (!options.localTestControls?.write || !localTestConnection) throw new Error('Test control disabled');

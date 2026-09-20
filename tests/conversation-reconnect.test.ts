@@ -237,8 +237,10 @@ test('a natural missed-answer request replays committed SQLite content without a
   } finally { client.terminate(); await server.app.close(); await store.close(); }
 });
 
-test('common short missed-answer phrases all use durable replay without another model call', { timeout: 10_000 }, async () => {
-  for (const phrase of ['没看完，继续说', '继续说', '接着说', '刚才说到一半', '继续刚才的回答']) {
+test('reported missed-answer phrases all use durable replay without another model call', { timeout: 10_000 }, async () => {
+  for (const phrase of ['刚才那条我没看完，继续说', '没看完，继续说', '说到一半', '你刚才说到一半就断了',
+    '重复一下刚才的回答', 'Say that again', '再说一遍', '刚刚那个没看清', '等一下，我没跟上',
+    '屏幕闪了一下，刚才那段没了', 'I missed the last part']) {
     const root = await mkdtemp(join(tmpdir(), 'even-reconnect-natural-'));
     const store = await ConversationStore.create(root); let replies = 0;
     const server = await listen(store, { decide: async () => 'respond',
@@ -254,6 +256,26 @@ test('common short missed-answer phrases all use durable replay without another 
       client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: phrase })); await done;
       assert.equal(replies, 1, phrase);
       assert.equal(store.latestRecoverableTurn(ready.session_id)?.output?.content, 'durable replay target', phrase);
+    } finally { client.terminate(); await server.app.close(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('new questions, negation, quotations and hypotheticals never replay an old answer', { timeout: 10_000 }, async () => {
+  for (const phrase of ['继续说说这个方案的风险', '不用重复了', '他说再说一遍这句话是什么意思', '如果我没看完可以怎么办']) {
+    const root = await mkdtemp(join(tmpdir(), 'even-reconnect-not-recovery-'));
+    const store = await ConversationStore.create(root); let replies = 0;
+    const server = await listen(store, { decide: async () => 'respond',
+      reply: async (_history, _signal, delta) => { replies++; delta(`new answer ${replies}`); } });
+    const client = new WebSocket(server.url);
+    try {
+      await once(client, 'open'); const readyPromise = waitFor(client, 'ready');
+      client.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(), token }));
+      await readyPromise;
+      let done = waitFor(client, 'answer.done');
+      client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: '请解释这个概念' })); await done;
+      done = waitFor(client, 'answer.done');
+      client.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: phrase })); await done;
+      assert.equal(replies, 2, phrase);
     } finally { client.terminate(); await server.app.close(); await store.close(); await rm(root, { recursive: true, force: true }); }
   }
 });
