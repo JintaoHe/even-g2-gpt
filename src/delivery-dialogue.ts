@@ -1,5 +1,5 @@
 import { activeTopicHistory, type AssistantMode, type DialogueModel, type Message, type TurnPlan, type ReplyUpdate, type ReasoningEffort, type WorkflowSelection } from './conversation.js';
-import type { Draft, DraftGenerator } from './delivery-draft.js';
+import { draftFailureDetails, type Draft, type DraftGenerator } from './delivery-draft.js';
 import type { MailSender } from './mail.js';
 import { JobStore } from './job-store.js';
 import { calendarDetails, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
@@ -7,8 +7,8 @@ import { parseDeliveryRecoveryState, type DeliveryRecoveryState, type RecoveryPe
 import { acceptsLongFormDocumentOffer, hasLongFormDocumentOffer } from './long-form-offer.js';
 
 type Approval = { id: string; prompt: string; expires: number; retryAttempt?: number };
-type DocumentOffer = { prompt: string; expires: number };
-type Plan = { plan: TurnPlan; approval?: Approval };
+type DocumentOffer = { prompt: string; expires: number; retry: boolean };
+type Plan = { plan: TurnPlan; approval?: Approval; documentRetry?: boolean };
 export const explicitSend = (text: string) => /^(?:确认发送|确认发出|可以发送|发送吧|发吧|confirm send|confirm sending|send it|yes,? send it)[。！.!\s]*$/i.test(text.trim());
 export const explicitResend = (text: string) => /^(?:确认重发|确认重新发送|重发吧|confirm resend|resend it|yes,? resend it)[。！.!\s]*$/i.test(text.trim());
 // Additional semantic approval still requires the model's confirm classification AND the
@@ -92,9 +92,10 @@ export class DeliveryDialogue implements DialogueModel {
     const approval = this.approval, documentOffer = this.documentOffer;
     this.approval = undefined; this.documentOffer = undefined;
     const prior = history.at(-1);
-    let plan: TurnPlan;
+    let plan: TurnPlan, documentRetry = false;
     if (documentOffer && documentOffer.expires > this.now() && prior?.role === 'assistant'
       && prior.content === documentOffer.prompt && acceptsLongFormDocumentOffer(text)) {
+      documentRetry = documentOffer.retry;
       plan = { decision: 'respond', deliveryAction: 'document', calendarAction: 'none',
         reasoningEffort: 'low', cognitiveMode: 'compose', assistantMode: 'compose' };
     } else {
@@ -107,7 +108,7 @@ export class DeliveryDialogue implements DialogueModel {
     } else if ((!plan.deliveryAction || plan.deliveryAction === 'none' || plan.deliveryAction === 'confirm') && explicitDocumentRequest(text)) {
       plan = { ...plan, decision: 'respond', deliveryAction: 'document', calendarAction: 'none' };
     }
-    this.plans.set(signal, { plan, approval });
+    this.plans.set(signal, { plan, approval, documentRetry });
     return plan;
   }
   async decide(history: Message[], text: string, forced: boolean, signal: AbortSignal) { return (await this.plan(history, text, forced, signal)).decision; }
@@ -142,7 +143,7 @@ export class DeliveryDialogue implements DialogueModel {
       let answer = '';
       await this.base.reply(history, signal, text => { answer += text; delta(text); }, update, effort, mode, workflows);
       signal.throwIfAborted();
-      if (hasLongFormDocumentOffer(answer)) this.documentOffer = { prompt: answer, expires: this.now() + 5 * 60000 };
+      if (hasLongFormDocumentOffer(answer)) this.documentOffer = { prompt: answer, expires: this.now() + 5 * 60000, retry: false };
       return;
     }
     if (action === 'not_received') { this.retryPreview(delta); return; }
@@ -184,6 +185,7 @@ export class DeliveryDialogue implements DialogueModel {
     if (action === 'review') {
       this.preview(delta, this.draft ? this.draft.document.markdown + '\n\n' : ''); return;
     }
+    const previousDraft = this.draft;
     if (this.jobId) this.jobs.supersede(this.jobId);
     this.invalidate(); this.draft = undefined; this.jobId = undefined; this.recovery?.clear();
     update?.({ type: 'artifact.status', status: 'generating' });
@@ -195,7 +197,7 @@ export class DeliveryDialogue implements DialogueModel {
       const source = this.artifactSource?.() ?? history;
       const selection = activeTopicHistory(source).map(message => ({ ...message,
         citations: message.citations?.map(citation => ({ ...citation })) }));
-      const generated = await this.generate(selection, action, action === 'revise' ? this.draft : undefined, signal);
+      const generated = await this.generate(selection, action, action === 'revise' ? previousDraft : undefined, signal);
       signal.throwIfAborted();
       if ('clarification' in generated) { delta(generated.clarification + '\n尚未发送邮件。'); return; }
       const job = this.jobs.enqueueDocument(generated.document, generated.calendar); newJob = job.id;
@@ -209,11 +211,18 @@ export class DeliveryDialogue implements DialogueModel {
       if (this.jobs.get(job.id)?.state !== 'completed') throw Error('DRAFT_SAVE_FAILED');
       this.draft = generated; this.jobId = job.id; this.persistDraft();
       this.preview(delta);
-    } catch {
+    } catch (error) {
       if (newJob) { this.jobs.cancel(newJob); this.jobs.supersede(newJob); }
       this.draft = undefined; this.jobId = undefined; this.recovery?.clear();
       signal.throwIfAborted();
-      delta('文件未能完整生成或保存，没有发送邮件。请重新提出生成请求；不会用聊天记录代替你要求的文档。');
+      const failure = draftFailureDetails(error);
+      console.warn(JSON.stringify({ event: 'delivery_draft_failed', ...failure }));
+      if (!context?.documentRetry && !['DRAFT_UNAVAILABLE', 'DRAFT_INPUT_LIMIT'].includes(failure.code)) {
+        const prompt = '文件没有完整生成，也没有保存或发送。需要我重试生成 Markdown 文件吗？';
+        this.documentOffer = { prompt, expires: this.now() + 5 * 60000, retry: true }; delta(prompt);
+      } else {
+        delta('文件仍未能完整生成或保存，没有发送邮件。请稍后重新提出生成请求；不会用聊天记录代替你要求的文档。');
+      }
     }
   }
 }

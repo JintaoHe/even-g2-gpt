@@ -12,6 +12,6 @@ export function acceptsLongFormDocumentOffer(value: string) {
   if (!text || text.length > 80
     || /(?:不要|不用|不想|取消|算了|别|稍后|以后|改|换|删|not\b|don't|do not|cancel|later|instead)/i.test(text)
     || /[?？]/.test(text)) return false;
-  return /^(?:要|要完整长文|想看|嗯[，,、\s]*(?:要|想看)|好(?:的)?|可以|没问题|行|好[，,、\s]*(?:发给我|整理(?:成)?(?:完整)?(?:长文|文档|MD|Markdown)?))$/i.test(text)
+  return /^(?:要|要完整长文|想看|嗯[，,、\s]*(?:要|想看)|好(?:的|啊)?|可以|没问题|行|好[，,、\s]*(?:发给我|整理(?:成)?(?:完整)?(?:长文|文档|MD|Markdown)?))$/i.test(text)
     || /^(?:yes|yeah|yep|sure|okay|ok)(?:[，,\s]+(?:please|send it to me|make the document))?$/i.test(text);
 }
