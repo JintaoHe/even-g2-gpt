@@ -39,6 +39,8 @@ import { OpenAISessionSummaryGenerator, SessionSummaryService } from './session-
 import { ActiveInputLeaseError, SessionRegistry, SessionUnavailableError,
   type ManagedSessionRuntime, type SessionDisposeReason, type SessionInterruptReason } from './session-registry.js';
 import { CONVERSATION_PROTOCOL_VERSION, parseCoreClientMessage } from './conversation-protocol.js';
+import { RuntimeMetrics } from './runtime-metrics.js';
+import type { CostSnapshot } from './cost-ledger.js';
 
 export function requestsAnswerRecovery(value: string) {
   const text = value.trim().replace(/[\r\n\t]+/g, ' ');
@@ -47,6 +49,12 @@ export function requestsAnswerRecovery(value: string) {
   const chinese = /(?:刚才|刚刚|上一轮|上一个|前面).{0,28}(?:没(?:有)?看到|没(?:有)?看完|没(?:有)?听到|没看清|没跟上|没了|不见了|没听清|没显示|中断|断了|说到一半|再说|继续说|接着说|重说|重新回答|重复|回顾|复述)|(?:再说|继续|继续说|接着说|重说|重新回答|重复|回顾|复述).{0,24}(?:刚才|刚刚|上一轮|上一个|答案|回答)|^(?:请|麻烦)?(?:再说|再讲|重说)(?:一遍|一次)[。！.!]*$|^(?:请|麻烦)?重复(?:一下)?(?:刚才|刚刚|上一轮|上一个)?(?:的)?(?:答案|回答|内容)?[。！.!]*$|^(?:等一下[，,、\s]*)?(?:我)?(?:没跟上|没看清|没听清|没看到|没看完)[了。！.!]*$|^(?:没看完[，,、\s]*)?(?:继续说|接着说)[。！.!]*$|^说到一半[了。！.!]*$|(?:屏幕|画面).{0,20}(?:闪|黑|没显示).{0,30}(?:刚才|刚刚|那段|内容|回答).{0,20}(?:没了|不见|没显示|看不到)/i;
   const english = /(?:didn't|did not|couldn't|could not).{0,24}(?:see|hear|catch|get).{0,24}(?:last|previous|answer|response)|(?:repeat|replay|say|answer).{0,24}(?:again|last|previous)|\b(?:i\s+)?missed.{0,24}(?:last|previous|answer|response|part)\b/i;
   return chinese.test(text) || english.test(text);
+}
+
+export function unhandledRejectionMetadata(reason: unknown) {
+  const allowed = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'AbortError', 'AggregateError']);
+  const name = reason instanceof Error && allowed.has(reason.name) ? reason.name : 'Unknown';
+  return { event: 'fatal_unhandled_rejection', code: 'UNHANDLED_REJECTION', reason_type: name };
 }
 
 type Transcriber = StreamingTranscriber;
@@ -83,6 +91,8 @@ export function createConversationServer(options: {
   timezoneFallback?: TimezoneFallback;
   environmentProvider?: EnvironmentProvider;
   planningEvidenceSelector?: PlanningEvidenceSelector;
+  runtimeMetrics?: RuntimeMetrics;
+  costSnapshot?: () => Promise<CostSnapshot>;
   ingress?: { publicHosts?: string[]; allowedOrigins?: string[] };
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
@@ -108,6 +118,7 @@ export function createConversationServer(options: {
     || (localHost.test(host) && origin === `http://${host}`)
     || allowedOrigins.has(origin);
   const calendarTasks = new Set<Promise<void>>();
+  const runtimeMetrics = options.runtimeMetrics ?? new RuntimeMetrics();
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript'], '/mic.js': ['mic.js', 'text/javascript'],
     '/citations.js': ['citations.js', 'text/javascript'], '/progress.js': ['progress.js', 'text/javascript'], '/calendar.js': ['calendar.js', 'text/javascript']
@@ -156,6 +167,23 @@ export function createConversationServer(options: {
       } catch {
         res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end('{"status":"unavailable","storage":"error"}');
+      }
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/internal/health/runtime') {
+      if (!localHost.test(host)) { res.writeHead(404); res.end(); return; }
+      try {
+        const report = await runtimeMetrics.snapshot({
+          connections: { authenticated: authenticatedSockets.size, unauthenticated: unauthenticatedSockets.size,
+            total: wss.clients.size },
+          ...(options.costSnapshot ? { costs: options.costSnapshot } : {}),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff' });
+        res.end(JSON.stringify(report));
+      } catch {
+        res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('{"status":"unavailable","runtime":"error"}');
       }
       return;
     }
@@ -239,7 +267,10 @@ export function createConversationServer(options: {
     let captureStop: { connectionId: string; stop: () => void } | undefined;
     let conversation!: Conversation;
     let ended = false, started = false;
-    const send = (event: Event) => sink?.(event);
+    const send = (event: Event) => {
+      runtimeMetrics.observeConversationEvent(id, event);
+      sink?.(event);
+    };
     const initialTopic = hydrate ? store?.listTopics(id).at(-1) : { id: randomUUID(), label: 'General' };
     if (store && !hydrate) store.createSession({ id, ownerScope: options.ownerScope ?? 'single-user', createdAt: Date.now(),
       initialTopic: initialTopic && { id: initialTopic.id, label: initialTopic.label } });
@@ -446,7 +477,10 @@ export function createConversationServer(options: {
       if (closed || !session || detector.active || !session.conversation.acceptsInput || slots.some(s => s.text === undefined)) return;
       const text = slots.map(s => s.text).filter(Boolean).join('\n'); slots = [];
       const submitForced = forced; forced = false;
-      if (text || submitForced) void session.conversation.submit(text, submitForced);
+      if (text || submitForced) {
+        runtimeMetrics.beginTurn(session.id);
+        void session.conversation.submit(text, submitForced);
+      }
       else send({ type: 'notice', text: '没有识别到文字；如误打断，可点“继续上一答”。' });
     };
     const detector = new TurnDetector(() => {
@@ -744,7 +778,7 @@ export function createConversationServer(options: {
           case 'text.submit':
             if (typeof msg.text !== 'string' || !msg.text.trim() || msg.text.length > 6000) throw new Error('Text');
             if (protocolV2 && !/^[0-9a-f-]{36}$/i.test(String(msg.message_id ?? ''))) throw new Error('Message id');
-            if (conversation.acceptsInput) { active.mailApproval = undefined; clearCapture();
+            if (conversation.acceptsInput) { active.mailApproval = undefined; clearCapture(); runtimeMetrics.beginTurn(active.id);
               void conversation.submit(msg.text, true, protocolV2 ? { messageId: msg.message_id } : undefined); } break;
           case 'turn.submit':
             if (!conversation.acceptsInput) break;
@@ -873,12 +907,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const startup = readConversationStartupConfig(process.env);
   const mail = createMailSender();
   const costs = await CostLedger.create(resolve(dataDirectory, 'cost-ledger.json'), process.env, createCostAlertSender());
-  const openaiFetch = createMeteredOpenAIFetch(costs);
+  const runtimeMetrics = new RuntimeMetrics();
+  const openaiFetch = createMeteredOpenAIFetch(costs, process.env, fetch, runtimeMetrics.observeProvider);
   const hybrid = createDialogueProvider(process.env, { fetcher: openaiFetch });
-  const stt = createSttProvider(process.env, costs);
-  const routeProvider = createRouteProvider(process.env, costs);
-  const timezoneProvider = createTimezoneProvider(process.env, costs);
-  const environmentProvider = createEnvironmentProvider(process.env, costs);
+  const stt = createSttProvider(process.env, costs, runtimeMetrics.observeProvider);
+  const routeProvider = createRouteProvider(process.env, costs, runtimeMetrics.observeProvider);
+  const timezoneProvider = createTimezoneProvider(process.env, costs, runtimeMetrics.observeProvider);
+  const environmentProvider = createEnvironmentProvider(process.env, costs, runtimeMetrics.observeProvider);
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer(process.env, openaiFetch));
   const conversationStore = await ConversationStore.create(dataDirectory);
   const maintenanceConfig = startup.maintenance;
@@ -934,6 +969,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     timezoneFallback,
     environmentProvider,
     planningEvidenceSelector,
+    runtimeMetrics,
+    costSnapshot: () => costs.snapshot(),
     draftGenerator: hybrid.provider === 'api' ? createDraftGenerator(process.env, openaiFetch) : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: stt.configured, speechProvider: stt.name, location: true,
       routes: !!routeProvider, environment: !!planningEvidenceSelector, conditionalTasks: false },
@@ -960,6 +997,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       } finally { clearTimeout(deadline); }
     })().catch(() => { process.exitCode = 1; });
   }
+  let fatalRejection = false;
+  const stopFromUnhandledRejection = (reason: unknown) => {
+    if (fatalRejection) return;
+    fatalRejection = true;
+    console.error(JSON.stringify(unhandledRejectionMetadata(reason)));
+    process.exitCode = 1;
+    void shutdown().finally(() => process.exit(1));
+  };
+  process.once('unhandledRejection', stopFromUnhandledRejection);
   const stopFromSignal = () => { void shutdown().finally(() => process.exit(process.exitCode ?? 0)); };
   process.once('SIGINT', stopFromSignal);
   process.once('SIGTERM', stopFromSignal);

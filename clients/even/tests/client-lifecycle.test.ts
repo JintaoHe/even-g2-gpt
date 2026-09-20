@@ -132,6 +132,16 @@ test('cold start reconciles side effects and renders uncertain server state on g
   assert.doesNotMatch(f.writes.at(-1)!, /secret-job|secret-op/);
 });
 
+test('search quota exhaustion is explicit on glasses without exposing ledger details', async () => {
+  const f = await fixture(); const ws = await f.connect();
+  ws.onmessage({ data: JSON.stringify({ type: 'answer.start', id: 7 }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'search.status', id: 7, status: 'quota_exhausted',
+    ledger_path: 'private/search-usage.json' }) });
+  await f.flush(); await f.tick();
+  assert.match(f.writes.at(-1)!, /联网额度已用完，仍可聊天/);
+  assert.doesNotMatch(f.writes.at(-1)!, /search-usage|ledger/);
+});
+
 for (const systemEvent of [false, true]) test(`exit then reconnect redraws with system exit event=${systemEvent}`, async () => {
   const f = await fixture();
   let ws = await f.connect();

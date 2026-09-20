@@ -74,3 +74,18 @@ test('metered OpenAI fetch settles Responses usage and search calls without stor
   const raw = await readFile(file, 'utf8');
   assert.doesNotMatch(raw, /private words|gpt-5\.6-luna|web_search/);
 });
+
+test('metered OpenAI fetch emits metadata-only provider outcomes', async () => {
+  const ledger = await CostLedger.create(await path(), env());
+  const observations: unknown[][] = [];
+  const metered = createMeteredOpenAIFetch(ledger, env(),
+    async () => new Response('{"private":"provider prose"}', { status: 503 }),
+    (...args) => { observations.push(args); });
+  const response = await metered('https://api.openai.com/v1/responses', { method: 'POST', body: '{}' });
+  assert.equal(response.status, 503);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0][0], 'openai');
+  assert.equal(observations[0][1], 'failure');
+  assert.equal(typeof observations[0][2], 'number');
+  assert.doesNotMatch(JSON.stringify(observations), /provider prose/);
+});

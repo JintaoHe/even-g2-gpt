@@ -2,6 +2,7 @@
 Description=Build, verify, and atomically deploy Even Agent protected main
 After=network-online.target
 Wants=network-online.target
+OnFailure=even-agent-health-failure@%n.service
 
 [Service]
 Type=oneshot

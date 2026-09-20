@@ -9,7 +9,7 @@ import { Conversation, type DialogueModel, type Event, type Message } from '../s
 import { ContextBuilder, contextCharacterCount } from '../src/context-builder.js';
 import { sse, parseDecision, OpenAIDialogue } from '../src/dialogue-model.js';
 import { TurnDetector } from '../src/vad.js';
-import { createConversationServer, fileSaver } from '../src/conversation-server.js';
+import { createConversationServer, fileSaver, unhandledRejectionMetadata } from '../src/conversation-server.js';
 import { LiveTranscriber } from '../src/live-transcriber.js';
 import { SonioxTranscriber } from '../src/soniox-transcriber.js';
 import { createSttProvider } from '../src/stt-provider.js';
@@ -345,6 +345,17 @@ test('file persistence serializes snapshots and rejects arbitrary paths', async 
   } finally { await rm(directory, { recursive: true }); }
 });
 
+test('fatal rejection logging exposes only fixed metadata, never error prose or stack', () => {
+  const error = new Error('OPENAI_API_KEY=private provider response');
+  error.stack = 'private stack and transcript';
+  assert.deepEqual(unhandledRejectionMetadata(error), {
+    event: 'fatal_unhandled_rejection', code: 'UNHANDLED_REJECTION', reason_type: 'Error'
+  });
+  assert.deepEqual(unhandledRejectionMetadata('private rejection text'), {
+    event: 'fatal_unhandled_rejection', code: 'UNHANDLED_REJECTION', reason_type: 'Unknown'
+  });
+});
+
 test('local WebSocket authenticates, runs dialogue, pauses and rejects cross-origin', { timeout: 10000 }, async () => {
   const token = 't'.repeat(64), app = createConversationServer({ token, model: immediate, transcriber: () => { throw new Error('not used'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
@@ -398,6 +409,12 @@ test('production ingress accepts only the configured public host and origin', { 
     const storage = await storageHealth.json() as any;
     assert.equal(storage.status, 'ok'); assert.equal(storage.sessions, 0); assert.equal(storage.messages, 0);
     assert.equal(typeof storage.database_bytes, 'number'); assert.equal(typeof storage.available_disk_bytes, 'number');
+    const runtimeHealth = await fetch(url.replace('ws://', 'http://').replace('/ws/conversation', '/internal/health/runtime'));
+    assert.equal(runtimeHealth.status, 200);
+    const runtime = await runtimeHealth.json() as any;
+    assert.equal(runtime.status, 'ok'); assert.equal(typeof runtime.process.rss_bytes, 'number');
+    assert.deepEqual(runtime.connections, { authenticated: 0, unauthenticated: 0, total: 0 });
+    assert.equal(runtime.turns.first_visible.count, 0);
     const address = app.http.address() as { port: number };
     const blockedInternal = await new Promise<number>((resolve, reject) => {
       const req = request({ hostname: '127.0.0.1', port: address.port, path: '/internal/health/calendar',
@@ -411,6 +428,12 @@ test('production ingress accepts only the configured public host and origin', { 
       req.on('error', reject); req.end();
     });
     assert.equal(blockedStorage, 404);
+    const blockedRuntime = await new Promise<number>((resolve, reject) => {
+      const req = request({ hostname: '127.0.0.1', port: address.port, path: '/internal/health/runtime',
+        headers: { host: 'calendar.eveng2assistant.com' } }, response => { response.resume(); resolve(response.statusCode ?? 0); });
+      req.on('error', reject); req.end();
+    });
+    assert.equal(blockedRuntime, 404);
     const trusted = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'calendar.eveng2assistant.com' } });
     await once(trusted, 'open'); trusted.close(); await once(trusted, 'close');
     const wrongOrigin = new WebSocket(url, { origin: 'https://evil.example', headers: { host: 'calendar.eveng2assistant.com' } });

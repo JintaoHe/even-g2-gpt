@@ -1,6 +1,7 @@
 import { LiveTranscriber } from './live-transcriber.js';
 import { SonioxTranscriber } from './soniox-transcriber.js';
 import type { CostLedger, CostProvider, CostReservation } from './cost-ledger.js';
+import type { ProviderMetricObserver } from './runtime-metrics.js';
 
 export interface StreamingTranscriber {
   result: Promise<string>;
@@ -22,7 +23,9 @@ class MeteredTranscriber implements StreamingTranscriber {
   private ticket?: CostReservation;
 
   constructor(costs: CostLedger, provider: CostProvider, maximumUsd: number,
-    private estimateCost: (bytes: number, text: string) => number, create: () => StreamingTranscriber) {
+    private estimateCost: (bytes: number, text: string) => number, create: () => StreamingTranscriber,
+    private observe?: ProviderMetricObserver) {
+    const startedAt = Date.now();
     this.result = (async () => {
       this.ticket = await costs.reserve(provider, maximumUsd);
       if (this.cancelled) { await this.ticket.settle(0); throw new Error('Cancelled'); }
@@ -33,9 +36,11 @@ class MeteredTranscriber implements StreamingTranscriber {
       try {
         const text = await this.inner.result;
         await this.ticket.settle(this.estimate(text));
+        this.observe?.(provider, 'success', Date.now() - startedAt);
         return text;
       } catch (error) {
         await this.ticket.settle(this.estimate(''));
+        this.observe?.(provider, this.cancelled || (error as Error)?.name === 'AbortError' ? 'cancelled' : 'failure', Date.now() - startedAt);
         throw error;
       }
     })();
@@ -53,7 +58,7 @@ class MeteredTranscriber implements StreamingTranscriber {
   cancel() { if (this.cancelled) return; this.cancelled = true; this.queued = []; this.inner?.cancel(); }
 }
 
-export function createSttProvider(env: Environment = process.env, costs?: CostLedger) {
+export function createSttProvider(env: Environment = process.env, costs?: CostLedger, observe?: ProviderMetricObserver) {
   const requested = env.STT_PROVIDER?.trim().toLowerCase();
   if (requested && requested !== 'soniox' && requested !== 'openai') {
     throw new Error('STT_PROVIDER must be soniox or openai');
@@ -79,10 +84,10 @@ export function createSttProvider(env: Environment = process.env, costs?: CostLe
           const audio = (seconds / 3600 * 30_000) * 2 / 1_000_000;
           const output = (text.length * 0.3) * 4 / 1_000_000;
           return audio + output + 0.0002; // Small allowance for context-term input.
-        }, () => new SonioxTranscriber(key, model, delta))
+        }, () => new SonioxTranscriber(key, model, delta), observe)
           : new SonioxTranscriber(key, model, delta)
         : costs ? new MeteredTranscriber(costs, 'openai', 0.02,
-          bytes => bytes / 32_000 / 60 * openaiPerMinute, () => new LiveTranscriber(key, model, delta))
+          bytes => bytes / 32_000 / 60 * openaiPerMinute, () => new LiveTranscriber(key, model, delta), observe)
           : new LiveTranscriber(key, model, delta);
     }
   };

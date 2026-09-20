@@ -3,7 +3,7 @@
 这一目录保存 Even G2 Agent 的可重复部署手册。指南按实际操作顺序编写，即使第一次维护 Linux 服务器，也应当可以逐项核对完成。
 
 1. [Linux 后端部署](LINUX_DEPLOYMENT.md)：创建服务器、收紧网络、安装运行时、部署后端、配置 systemd/Caddy，并完成上线验收。
-2. [生产监控、日志与恢复](MONITORING_BACKUP_RECOVERY.md)：健康探测、journald 留存、每日一致性备份和非破坏性恢复演练。
+2. [生产监控、日志与恢复](MONITORING_BACKUP_RECOVERY.md)：健康探测、journald 留存、12／24 小时 soak、每日一致性备份和非破坏性恢复演练。
 3. [Google Calendar API 发布与长期授权](GOOGLE_API_PRODUCTION.md)：启用 Calendar API、配置 OAuth、从 Testing 发布到 Production、重新授权及排错。
 4. [Google Maps 定位与路线](GOOGLE_MAPS_ROUTES.md)：一次性定位、Places/Routes key 限制、本地验收、Linux gate 与坐标隐私边界。
 5. [Tailscale 私有管理通道](TAILSCALE_SETUP.md)：安装 Tailscale、加入私人 tailnet，并通过私网 SSH/WinSCP 管理服务器。

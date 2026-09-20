@@ -19,6 +19,7 @@
     "build:server": "node scripts/build-server.mjs",
     "sessions:migrate": "tsx scripts/import-legacy-sessions.ts",
     "sessions:maintain": "tsx src/conversation-maintenance-cli.ts",
+    "soak:monitor": "tsx src/soak-monitor.ts",
     "conversation": "tsx src/conversation-server.ts",
     "conversation:eval": "tsx tests/live-conversation.ts",
     "search:eval": "tsx tests/live-search.ts",

@@ -1,4 +1,5 @@
 import type { CostLedger, CostReservation } from './cost-ledger.js';
+import type { ProviderMetricObserver } from './runtime-metrics.js';
 
 type Pricing = { inputPerMillion: number; cachedInputPerMillion: number; cacheWritePerMillion: number; outputPerMillion: number; webSearchPerCall: number };
 type Usage = {
@@ -77,16 +78,21 @@ async function settleFromResponse(ticket: CostReservation, response: Response, p
 }
 
 export function createMeteredOpenAIFetch(ledger: CostLedger, env: NodeJS.ProcessEnv = process.env,
-  baseFetch: typeof fetch = fetch): typeof fetch {
+  baseFetch: typeof fetch = fetch, observe?: ProviderMetricObserver): typeof fetch {
   const pricing = openAIPricing(env);
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!url.startsWith('https://api.openai.com/')) return baseFetch(input, init);
     const bodyText = typeof init?.body === 'string' ? init.body : '';
     const ticket = await ledger.reserve('openai', requestMaximum(bodyText, pricing));
+    const startedAt = Date.now();
     let response: Response;
     try { response = await baseFetch(input, init); }
-    catch (error) { throw error; } // Unknown provider outcome: keep the conservative reservation.
+    catch (error) {
+      observe?.('openai', (error as Error)?.name === 'AbortError' ? 'cancelled' : 'failure', Date.now() - startedAt);
+      throw error; // Unknown provider outcome: keep the conservative reservation.
+    }
+    observe?.('openai', response.ok ? 'success' : 'failure', Date.now() - startedAt);
     void settleFromResponse(ticket, response.clone(), pricing).catch(() => {});
     return response;
   }) as typeof fetch;

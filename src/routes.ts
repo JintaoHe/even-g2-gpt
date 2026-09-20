@@ -1,6 +1,7 @@
 import type { RouteTravelMode } from './conversation.js';
 import type { EphemeralLocation } from './location.js';
 import type { CostLedger, GoogleSku } from './cost-ledger.js';
+import type { ProviderMetricObserver } from './runtime-metrics.js';
 
 export type RouteOrigin = { kind: 'coordinates'; location: EphemeralLocation } | { kind: 'address'; address: string };
 export type RouteRequestKind = 'destination' | 'nearby';
@@ -117,7 +118,7 @@ export class GoogleRoutesProvider implements RouteProvider {
   constructor(private key: string, private fetcher: Fetch = fetch,
     private placesEndpoint = 'https://places.googleapis.com/v1/places:searchText',
     private routesEndpoint = 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
-    private costs?: CostLedger) {
+    private costs?: CostLedger, private observe?: ProviderMetricObserver) {
     if (!key.trim() || key.length > 500) throw new Error('Invalid Google Maps key');
     for (const endpoint of [placesEndpoint, routesEndpoint]) if (new URL(endpoint).protocol !== 'https:'
       && !/^http:\/\/127\.0\.0\.1(?::\d+)?\//.test(endpoint)) throw new Error('Invalid Maps endpoint');
@@ -129,14 +130,17 @@ export class GoogleRoutesProvider implements RouteProvider {
     for (let attempt = 0; attempt < 3; attempt++) {
       signal.throwIfAborted();
       const reservation = await this.costs?.reserveGoogle(sku, expectedUnits);
+      const startedAt = Date.now(); let observed = false;
       try {
         const response = await this.fetcher(endpoint, { method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
           headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': this.key, 'X-Goog-FieldMask': fieldMask }, body: JSON.stringify(body) });
         if (response.ok) {
           const data = await response.json();
           await reservation?.settle(stage === 'routes' && Array.isArray(data) ? Math.min(expectedUnits, data.length) : 1);
+          observed = true; this.observe?.('google', 'success', Date.now() - startedAt);
           return data;
         }
+        observed = true; this.observe?.('google', 'failure', Date.now() - startedAt);
         await reservation?.settle(0);
         let providerReason: string | undefined;
         try {
@@ -153,6 +157,8 @@ export class GoogleRoutesProvider implements RouteProvider {
         if (!retryable) throw error;
         lastError = error;
       } catch (error) {
+        if (!observed) this.observe?.('google', signal.aborted || (error as Error)?.name === 'AbortError'
+          ? 'cancelled' : 'failure', Date.now() - startedAt);
         signal.throwIfAborted();
         if (error instanceof RouteError) {
           if (!error.retryable) throw error;
@@ -242,8 +248,9 @@ export class GoogleRoutesProvider implements RouteProvider {
   }
 }
 
-export function createRouteProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger): RouteProvider | undefined {
+export function createRouteProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger,
+  observe?: ProviderMetricObserver): RouteProvider | undefined {
   if (env.GOOGLE_MAPS_ENABLED !== 'true') return undefined;
   if (!env.GOOGLE_MAPS_API_KEY) throw new Error('GOOGLE_MAPS_ENABLED requires GOOGLE_MAPS_API_KEY');
-  return new GoogleRoutesProvider(env.GOOGLE_MAPS_API_KEY, fetch, undefined, undefined, costs);
+  return new GoogleRoutesProvider(env.GOOGLE_MAPS_API_KEY, fetch, undefined, undefined, costs, observe);
 }

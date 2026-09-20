@@ -2,6 +2,7 @@
 Description=Even Agent personal conversation service
 After=network-online.target
 Wants=network-online.target
+OnFailure=even-agent-health-failure@%n.service
 StartLimitIntervalSec=60
 StartLimitBurst=3
 

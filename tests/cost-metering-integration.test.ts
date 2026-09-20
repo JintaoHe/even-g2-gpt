@@ -63,3 +63,22 @@ test('known unsuccessful Google response releases its reservation', async () => 
   await assert.rejects(timezone.resolve(fix, new AbortController().signal));
   assert.equal((await costs.snapshot()).googleUnits['time-zone'], 0);
 });
+
+test('Google adapters report bounded outcome metadata without provider payloads', async () => {
+  const file = join(await mkdtemp(join(tmpdir(), 'even-google-observer-')), 'ledger.json');
+  const costs = await CostLedger.create(file, env);
+  const observations: unknown[][] = [];
+  const observe = (...args: any[]) => { observations.push(args); };
+  const timezone = new GoogleTimezoneProvider('key',
+    async () => new Response(JSON.stringify({ status: 'OK', timeZoneId: 'America/Chicago', private: 'do not log' }), { status: 200 }),
+    'http://127.0.0.1:3013/timezone', Date.now, costs, observe);
+  assert.equal(await timezone.resolve(fix, new AbortController().signal), 'America/Chicago');
+  const environment = new GoogleEnvironmentProvider('key',
+    async () => new Response('{broken private payload', { status: 200 }), Date.now,
+    { weather: 'http://127.0.0.1:3012/weather', airQuality: 'http://127.0.0.1:3012/air', pollen: 'http://127.0.0.1:3012/pollen' },
+    costs, observe);
+  await assert.rejects(environment.weather({ location: fix, start: new Date(Date.now() + 60_000).toISOString(),
+    end: new Date(Date.now() + 3_600_000).toISOString(), timezone: 'America/Chicago' }, new AbortController().signal));
+  assert.deepEqual(observations.map(value => value.slice(0, 2)), [['google', 'success'], ['google', 'failure']]);
+  assert.doesNotMatch(JSON.stringify(observations), /do not log|broken private payload/);
+});

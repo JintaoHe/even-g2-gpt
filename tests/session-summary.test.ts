@@ -141,3 +141,17 @@ test('OpenAI summary generation uses the supplied metered fetch and exposes no t
   assert.match(idempotency, /^session-summary-/);
   assert.deepEqual(result, validSummary(8));
 });
+
+test('production threshold keeps 58 messages raw and schedules exactly at 60', async () => {
+  const { store, sessionId, append } = await fixture(29);
+  const service = new SessionSummaryService(store, { model: 'summary-test', generate: async request => validSummary(request.throughSequence) });
+  try {
+    assert.equal(service.consider(sessionId), undefined);
+    assert.equal(store.latestSummary(sessionId), undefined);
+    append(30);
+    const job = service.consider(sessionId);
+    assert.ok(job); assert.equal(job?.throughSequence, 36, 'default policy keeps the latest 24 of 60 messages raw');
+    await service.waitForIdle();
+    assert.equal(store.latestSummary(sessionId)?.throughSequence, 36);
+  } finally { await service.close(); await store.close(); }
+});

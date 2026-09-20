@@ -8,11 +8,12 @@
 | --- | --- | --- |
 | GitHub Actions | 每小时访问公开的 `/healthz` | 不持有应用令牌，不访问对话、邮件或日历 |
 | 服务器 health timer | 检查本机 Node、Caddy TLS 和 Calendar 只读 API | 不调用 OpenAI，不发送邮件，不写日历 |
+| 手动 soak monitor | 连续记录资源、连接、聚合延迟、provider 结果与成本变化 | 不读取正文、不制造会话、不调用 provider |
 | journald | 持久化、压缩并限制系统日志占用 | 不把日志上传到第三方 |
 | backup timer | 短暂停止应用，归档整个私有数据目录并校验恢复副本 | 不上传备份，不覆盖生产数据 |
 | Lightsail snapshot | 主机级灾难恢复 | 不代替应用数据一致性检查 |
 
-公开 `/healthz` 只返回 `{"status":"ok"}`。Calendar 探测和 metadata-only storage health 分别只存在于回环地址 `/internal/health/calendar` 与 `/internal/health/storage`，Caddy 不代理这些路径。storage health 不包含正文、session ID 或凭证。health timer 会对短暂 storage 读取失败进行最多五次有界重试；响应格式无效或出现容量 warning 时仍会失败并触发告警，而不是把 warning 当作健康。
+公开 `/healthz` 只返回 `{"status":"ok"}`。Calendar、storage 与 runtime 聚合指标分别只存在于回环地址 `/internal/health/calendar`、`/internal/health/storage` 与 `/internal/health/runtime`，Caddy 不代理这些路径。它们不包含正文、session ID、地址、坐标、凭证或 provider 错误正文。health timer 会对短暂 storage 读取失败进行最多五次有界重试；响应格式无效或出现容量 warning 时仍会失败并触发告警，而不是把 warning 当作健康。
 
 ## 安装监控文件
 
@@ -38,6 +39,37 @@ sudo journalctl -u even-agent-healthcheck.service -n 50 --no-pager
 ```
 
 仓库中的 `Production health` GitHub Actions workflow 从服务器外部检查 HTTPS。GitHub 是否发送邮件取决于仓库所有者的 Actions 通知设置；它不能替代服务器告警或 AWS 账号告警。
+
+## 12／24 小时真实 soak
+
+soak monitor 是手动的一次性任务，不会随部署自动启动。它每 60 秒从回环接口采样一次：RSS、heap、累计 CPU、全部 SQLite／WAL／SHM 字节数、连接数、turn 的 first-visible／complete p50/p95、OpenAI／Soniox／Google 的成功率与耗时，以及成本账本变化。报告只含聚合数值，写入 `/var/lib/even-agent/soak`，目录为 `0700`、文件为 `0600`。
+
+它只观察真实使用，不发送合成问题、不调用模型、不发送邮件、不读写 Calendar，也不需要或读取 `/etc/even-agent.env`。因此 provider 指标为零表示测试期间没有相应真实流量，不代表 provider 已通过压力测试。测试期间应按 [soak 与剩余 live-test 清单](../validation/LINUX_SOAK_AND_LIVE_TESTS.md) 使用本地 simulator 或真机完成代表性对话。
+
+先安装并检查 unit：
+
+```bash
+sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent-soak@.service /etc/systemd/system/even-agent-soak@.service
+sudo systemd-analyze verify /etc/systemd/system/even-agent-soak@.service /etc/systemd/system/even-agent-health-failure@.service
+sudo systemctl daemon-reload
+```
+
+首次先跑 12 小时；稳定后再跑 24 小时。实例名只允许监控器支持的 1–24 整数，正式验收使用 12 或 24：
+
+```bash
+sudo systemctl start even-agent-soak@12.service
+sudo systemctl status even-agent-soak@12.service --no-pager
+sudo journalctl -u even-agent-soak@12.service -f
+```
+
+完成后查看汇总；不要把 JSONL、summary 或 journal 未审查地上传到公开仓库：
+
+```bash
+sudo find /var/lib/even-agent/soak -maxdepth 1 -type f -printf '%f %s bytes\n'
+sudo python3 -m json.tool /var/lib/even-agent/soak/<soak-summary-file>.json
+```
+
+初始验收要求：没有意外 process restart；没有 storage warning；采样失败不是持续状态；socket 能在客户端离线后回落；RSS/SQLite 增长能由真实会话与文件数量解释；provider failure 不被隐藏；成本增量与实际使用相符。p50/p95 先作为基线记录，等真实 G2 后再给出硬件端 release threshold。systemd 失败只写脱敏告警；未处理 Promise rejection 会先关闭资源，再以非零状态退出并由 `Restart=on-failure` 拉起，而不是吞掉异常继续运行。
 
 ## 日志留存
 

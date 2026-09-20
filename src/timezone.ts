@@ -1,6 +1,7 @@
 import type { EphemeralLocation } from './location.js';
 import type { Message } from './conversation.js';
 import type { CostLedger } from './cost-ledger.js';
+import type { ProviderMetricObserver } from './runtime-metrics.js';
 
 type Fetch = typeof fetch;
 
@@ -63,7 +64,7 @@ const pause = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, r
 export class GoogleTimezoneProvider implements TimezoneProvider {
   constructor(private key: string, private fetcher: Fetch = fetch,
     private endpoint = 'https://maps.googleapis.com/maps/api/timezone/json', private now = Date.now,
-    private costs?: CostLedger) {
+    private costs?: CostLedger, private observe?: ProviderMetricObserver) {
     if (!key.trim() || key.length > 500) throw new Error('Invalid Google Maps key');
     const url = new URL(endpoint);
     if (url.protocol !== 'https:' && !/^http:\/\/127\.0\.0\.1(?::\d+)?\//.test(url.href)) throw new Error('Invalid Time Zone endpoint');
@@ -78,10 +79,12 @@ export class GoogleTimezoneProvider implements TimezoneProvider {
       url.searchParams.set('timestamp', String(Math.floor(this.now() / 1000)));
       url.searchParams.set('key', this.key);
       const reservation = await this.costs?.reserveGoogle('time-zone', 1);
+      const startedAt = Date.now(); let observed = false;
       try {
         const response = await this.fetcher(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) });
         const retryable = [429, 500, 502, 503, 504].includes(response.status);
         if (!response.ok) {
+          observed = true; this.observe?.('google', 'failure', Date.now() - startedAt);
           await reservation?.settle(0);
           await response.body?.cancel();
           if (!retryable) throw new TimezoneError('TIMEZONE_UNAVAILABLE');
@@ -92,11 +95,14 @@ export class GoogleTimezoneProvider implements TimezoneProvider {
           const result = JSON.parse(raw) as { status?: unknown; timeZoneId?: unknown };
           await reservation?.settle(result.status === 'OK' ? 1 : 0);
           const zone = result.status === 'OK' ? canonicalTimezone(result.timeZoneId) : undefined;
-          if (zone) return zone;
+          if (zone) { observed = true; this.observe?.('google', 'success', Date.now() - startedAt); return zone; }
+          observed = true; this.observe?.('google', 'failure', Date.now() - startedAt);
           if (!['UNKNOWN_ERROR', 'OVER_QUERY_LIMIT'].includes(String(result.status))) throw new TimezoneError('TIMEZONE_UNAVAILABLE');
           last = new TimezoneError('TIMEZONE_UNAVAILABLE');
         }
       } catch (error) {
+        if (!observed) this.observe?.('google', signal.aborted || (error as Error)?.name === 'AbortError'
+          ? 'cancelled' : 'failure', Date.now() - startedAt);
         signal.throwIfAborted();
         if (error instanceof TimezoneError && !last) throw error;
         last = error instanceof TimezoneError ? error : new TimezoneError('TIMEZONE_UNAVAILABLE');
@@ -107,8 +113,9 @@ export class GoogleTimezoneProvider implements TimezoneProvider {
   }
 }
 
-export function createTimezoneProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger): TimezoneProvider | undefined {
+export function createTimezoneProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger,
+  observe?: ProviderMetricObserver): TimezoneProvider | undefined {
   if (env.GOOGLE_MAPS_ENABLED !== 'true') return undefined;
   if (!env.GOOGLE_MAPS_API_KEY) throw new Error('GOOGLE_MAPS_ENABLED requires GOOGLE_MAPS_API_KEY');
-  return new GoogleTimezoneProvider(env.GOOGLE_MAPS_API_KEY, fetch, undefined, Date.now, costs);
+  return new GoogleTimezoneProvider(env.GOOGLE_MAPS_API_KEY, fetch, undefined, Date.now, costs, observe);
 }

@@ -1,4 +1,5 @@
 import type { CostLedger, GoogleSku } from './cost-ledger.js';
+import type { ProviderMetricObserver } from './runtime-metrics.js';
 
 export type GeoPoint = { latitude: number; longitude: number };
 export type EnvironmentRequest = { location: GeoPoint; start: string; end: string; timezone: string; language?: string };
@@ -68,7 +69,7 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
       weather: 'https://weather.googleapis.com/v1/forecast/hours:lookup',
       airQuality: 'https://airquality.googleapis.com/v1/forecast:lookup',
       pollen: 'https://pollen.googleapis.com/v1/forecast:lookup'
-    }, private costs?: CostLedger) {
+    }, private costs?: CostLedger, private observe?: ProviderMetricObserver) {
     if (!key.trim() || key.length > 500) throw new Error('Invalid Google environment key');
     for (const endpoint of Object.values(endpoints)) if (!endpointAllowed(endpoint)) throw new Error('Invalid environment endpoint');
   }
@@ -80,10 +81,15 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
     url.searchParams.set('key', this.key);
     const sku: GoogleSku = service === 'air_quality' ? 'air-quality' : service as GoogleSku;
     const reservation = await this.costs?.reserveGoogle(sku, 1);
+    const startedAt = Date.now();
     let response: Response;
     try { response = await this.fetcher(url, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) }); }
-    catch { signal.throwIfAborted(); throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service, undefined, true); }
+    catch (error) {
+      this.observe?.('google', signal.aborted || (error as Error)?.name === 'AbortError' ? 'cancelled' : 'failure', Date.now() - startedAt);
+      signal.throwIfAborted(); throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service, undefined, true);
+    }
     if (!response.ok) {
+      this.observe?.('google', 'failure', Date.now() - startedAt);
       await reservation?.settle(0);
       let providerReason: string | undefined;
       try {
@@ -98,8 +104,12 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
     }
     const raw = await response.text();
     await reservation?.settle(1);
-    if (Buffer.byteLength(raw) > RESPONSE_LIMIT) throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service);
-    try { return JSON.parse(raw); } catch { throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service); }
+    if (Buffer.byteLength(raw) > RESPONSE_LIMIT) {
+      this.observe?.('google', 'failure', Date.now() - startedAt); throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service);
+    }
+    try {
+      const parsed = JSON.parse(raw); this.observe?.('google', 'success', Date.now() - startedAt); return parsed;
+    } catch { this.observe?.('google', 'failure', Date.now() - startedAt); throw new EnvironmentError('ENVIRONMENT_UNAVAILABLE', service); }
   }
 
   async weather(request: EnvironmentRequest, signal: AbortSignal): Promise<WeatherEvidence> {
@@ -177,9 +187,10 @@ export class GoogleEnvironmentProvider implements EnvironmentProvider {
   }
 }
 
-export function createEnvironmentProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger): EnvironmentProvider | undefined {
+export function createEnvironmentProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger,
+  observe?: ProviderMetricObserver): EnvironmentProvider | undefined {
   if (env.GOOGLE_ENVIRONMENT_ENABLED !== 'true') return undefined;
   const key = env.GOOGLE_ENVIRONMENT_API_KEY?.trim() || env.GOOGLE_MAPS_API_KEY?.trim();
   if (!key) throw new Error('GOOGLE_ENVIRONMENT_ENABLED requires a restricted server-side Google API key');
-  return new GoogleEnvironmentProvider(key, fetch, Date.now, undefined, costs);
+  return new GoogleEnvironmentProvider(key, fetch, Date.now, undefined, costs, observe);
 }
