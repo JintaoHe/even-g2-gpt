@@ -1,4 +1,4 @@
-export type ClientAudioState = 'off' | 'starting' | 'streaming' | 'unavailable';
+export type ClientAudioState = 'off' | 'starting' | 'streaming' | 'unavailable' | 'requires_reopen';
 
 type AudioBridge = { audioControl(enabled: boolean): Promise<boolean> };
 type AudioControllerOptions = {
@@ -6,6 +6,7 @@ type AudioControllerOptions = {
   retryDelay?: (attempt: number) => Promise<void>;
   onState?: (state: ClientAudioState, desired: boolean) => void;
   onUnavailable?: () => void;
+  onRequiresReopen?: () => void;
   attempts?: number;
 };
 
@@ -16,6 +17,7 @@ export class AudioController {
   private readonly retryDelay: (attempt: number) => Promise<void>;
   private readonly onState?: (state: ClientAudioState, desired: boolean) => void;
   private readonly onUnavailable?: () => void;
+  private readonly onRequiresReopen?: () => void;
   private readonly attempts: number;
   private queue: Promise<void> = Promise.resolve();
   private epoch = 0;
@@ -25,12 +27,14 @@ export class AudioController {
   private disposed = false;
   private desiredValue = false;
   private stateValue: ClientAudioState = 'off';
+  private reopenRequired = false;
 
   constructor(options: AudioControllerOptions) {
     this.bridge = options.bridge;
     this.retryDelay = options.retryDelay ?? (attempt => new Promise(resolve => setTimeout(resolve, 200 * attempt)));
     this.onState = options.onState;
     this.onUnavailable = options.onUnavailable;
+    this.onRequiresReopen = options.onRequiresReopen;
     this.attempts = Math.min(3, Math.max(1, options.attempts ?? 3));
   }
 
@@ -40,6 +44,12 @@ export class AudioController {
 
   setDesired(desired: boolean) {
     if (this.disposed) return Promise.resolve();
+    if (desired && this.reopenRequired) {
+      this.desiredValue = false;
+      this.publish('requires_reopen');
+      this.onRequiresReopen?.();
+      return Promise.resolve();
+    }
     this.desiredValue = desired;
     this.epoch++;
     return this.enqueue(() => this.reconcile(this.epoch));
@@ -85,6 +95,11 @@ export class AudioController {
   }
 
   private async reconcile(epoch: number) {
+    if (this.reopenRequired) {
+      this.desiredValue = false;
+      this.publish('requires_reopen');
+      return;
+    }
     if (!this.available()) {
       if (this.stateValue !== 'off') await this.bridge.audioControl(false).catch(() => false);
       this.publish('off');
@@ -93,14 +108,25 @@ export class AudioController {
     if (this.stateValue === 'streaming') return;
     this.publish('starting');
     for (let attempt = 1; attempt <= this.attempts; attempt++) {
-      let opened = false;
-      try { opened = await this.bridge.audioControl(true); } catch { opened = false; }
+      let opened: boolean | undefined;
+      try { opened = await this.bridge.audioControl(true); } catch { opened = undefined; }
       if (epoch !== this.epoch || !this.available()) {
         if (opened) await this.bridge.audioControl(false).catch(() => false);
         this.publish('off');
         return;
       }
       if (opened) { this.publish('streaming'); return; }
+      if (opened === false) {
+        // Even Hub issue #35 reports a fast `false` as a process-lifetime
+        // audio wedge. Retrying cannot heal it and retaining desired=true can
+        // silently reopen stale capture paths, so fail terminally and require
+        // a deliberate plugin reopen.
+        this.desiredValue = false;
+        this.reopenRequired = true;
+        this.publish('requires_reopen');
+        this.onRequiresReopen?.();
+        return;
+      }
       if (attempt < this.attempts) {
         await this.retryDelay(attempt);
         if (epoch !== this.epoch || !this.available()) { this.publish('off'); return; }
@@ -117,6 +143,7 @@ export class AudioController {
     this.epoch++;
     await this.enqueue(async () => {
       await this.bridge.audioControl(false).catch(() => false);
+      this.reopenRequired = false;
       this.publish('off');
     });
   }

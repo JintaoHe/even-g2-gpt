@@ -64,6 +64,38 @@ test('second live input client is rejected without stealing the active session',
   assert.deepEqual(created.calls, ['attach']);
 });
 
+test('a validated same-client resume replaces the live lease and a late old close cannot detach it', async () => {
+  const sessionId = randomUUID(), first = randomUUID(), second = randomUUID(), clientId = randomUUID();
+  const created = runtime(sessionId), events: TestEvent[] = [];
+  const registry = new SessionRegistry<TestEvent>({ resumeWindowMs: 900_000, create: async () => created });
+  await registry.create(first, () => {}, sessionId, undefined, clientId);
+  let authorized = 0;
+  const resumed = await registry.resume(sessionId, second, event => events.push(event),
+    () => { authorized++; }, { clientId, allowTakeover: true });
+  assert.equal(authorized, 1);
+  assert.equal(resumed.replacedConnectionId, first);
+  assert.equal(registry.connectionFor(sessionId), second);
+  created.emit('new owner');
+  assert.deepEqual(events, [{ text: 'new owner' }]);
+
+  assert.equal(await registry.detach(first), undefined);
+  assert.equal(registry.connectionFor(sessionId), second);
+  assert.deepEqual(created.calls, ['attach', 'detach', 'detach-runtime:connection_detached', 'attach']);
+});
+
+test('takeover authorization failure leaves the existing lease and sink untouched', async () => {
+  const sessionId = randomUUID(), first = randomUUID(), second = randomUUID(), clientId = randomUUID();
+  const created = runtime(sessionId), events: TestEvent[] = [];
+  const registry = new SessionRegistry<TestEvent>({ resumeWindowMs: 900_000, create: async () => created });
+  await registry.create(first, event => events.push(event), sessionId, undefined, clientId);
+  await assert.rejects(() => registry.resume(sessionId, second, () => {}, () => { throw new Error('invalid credential'); },
+    { clientId, allowTakeover: true }), /invalid credential/);
+  created.emit('still first');
+  assert.equal(registry.connectionFor(sessionId), first);
+  assert.deepEqual(events, [{ text: 'still first' }]);
+  assert.deepEqual(created.calls, ['attach']);
+});
+
 test('detached session expires at the injected-clock boundary and cannot resume', async () => {
   let now = 10_000;
   const sessionId = randomUUID(), first = randomUUID(), second = randomUUID();

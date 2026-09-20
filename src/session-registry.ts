@@ -41,6 +41,7 @@ export class SessionUnavailableError extends Error {
 type Entry<Event> = {
   runtime: ManagedSessionRuntime<Event>;
   connectionId?: string;
+  clientId?: string;
   detachedAt?: number;
 };
 
@@ -49,6 +50,12 @@ export type SessionBinding<Event> = {
   connectionId: string;
   runtime: ManagedSessionRuntime<Event>;
   resumed: boolean;
+  replacedConnectionId?: string;
+};
+
+export type ResumeLeaseOptions = {
+  clientId: string;
+  allowTakeover?: boolean;
 };
 
 export type SessionRegistryOptions<Event> = {
@@ -79,7 +86,7 @@ export class SessionRegistry<Event = unknown> {
   }
 
   create(connectionId: string, sink: SessionEventSink<Event>, sessionId = randomUUID(),
-    authorize?: () => void | Promise<void>): Promise<SessionBinding<Event>> {
+    authorize?: () => void | Promise<void>, clientId?: string): Promise<SessionBinding<Event>> {
     return this.serial(async () => {
       this.ensureOpen();
       this.validateIds(connectionId, sessionId);
@@ -93,17 +100,16 @@ export class SessionRegistry<Event = unknown> {
       }
       const entry: Entry<Event> = { runtime };
       this.entries.set(sessionId, entry);
-      this.attach(entry, sessionId, connectionId, sink);
+      this.attach(entry, sessionId, connectionId, sink, clientId);
       return { sessionId, connectionId, runtime, resumed: false };
     });
   }
 
   resume(sessionId: string, connectionId: string, sink: SessionEventSink<Event>,
-    authorize?: () => void | Promise<void>): Promise<SessionBinding<Event>> {
+    authorize?: () => void | Promise<void>, lease: ResumeLeaseOptions | undefined = undefined): Promise<SessionBinding<Event>> {
     return this.serial(async () => {
       this.ensureOpen();
       this.validateIds(connectionId, sessionId);
-      this.ensureLeaseAvailable(connectionId);
       let entry = this.entries.get(sessionId);
       if (!entry) {
         const hydrated = await this.options.hydrate?.(sessionId);
@@ -117,14 +123,32 @@ export class SessionRegistry<Event = unknown> {
         }
         this.entries.set(sessionId, entry);
       }
-      if (entry.connectionId && entry.connectionId !== connectionId) throw new ActiveInputLeaseError();
-      if (entry.detachedAt === undefined || this.isExpired(entry)) {
-        if (entry.detachedAt !== undefined) await this.expireEntry(sessionId, entry);
-        throw new SessionUnavailableError();
+      const replacedConnectionId = entry.connectionId && entry.connectionId !== connectionId
+        ? entry.connectionId : undefined;
+      if (replacedConnectionId) {
+        if (!lease?.allowTakeover || !lease.clientId || entry.clientId !== lease.clientId
+          || this.activeInputConnection !== replacedConnectionId) throw new ActiveInputLeaseError();
+        // Validate the scoped credential before changing the active lease. The
+        // caller's authorization callback also binds the proof to clientId and
+        // sessionId, so merely claiming the same public client ID is useless.
+        await authorize?.();
+        this.connections.delete(replacedConnectionId);
+        if (this.activeInputConnection === replacedConnectionId) this.activeInputConnection = undefined;
+        entry.connectionId = undefined;
+        entry.detachedAt = this.now();
+        entry.runtime.replaceEventSink(undefined);
+        await entry.runtime.detach('connection_detached');
+      } else {
+        this.ensureLeaseAvailable(connectionId);
+        if (entry.detachedAt === undefined || this.isExpired(entry)) {
+          if (entry.detachedAt !== undefined) await this.expireEntry(sessionId, entry);
+          throw new SessionUnavailableError();
+        }
+        await authorize?.();
       }
-      await authorize?.();
-      this.attach(entry, sessionId, connectionId, sink);
-      return { sessionId, connectionId, runtime: entry.runtime, resumed: true };
+      this.attach(entry, sessionId, connectionId, sink, lease?.clientId ?? entry.clientId);
+      return { sessionId, connectionId, runtime: entry.runtime, resumed: true,
+        ...(replacedConnectionId ? { replacedConnectionId } : {}) };
     });
   }
 
@@ -201,8 +225,9 @@ export class SessionRegistry<Event = unknown> {
     });
   }
 
-  private attach(entry: Entry<Event>, sessionId: string, connectionId: string, sink: SessionEventSink<Event>) {
+  private attach(entry: Entry<Event>, sessionId: string, connectionId: string, sink: SessionEventSink<Event>, clientId?: string) {
     entry.connectionId = connectionId;
+    if (clientId) entry.clientId = clientId;
     entry.detachedAt = undefined;
     this.connections.set(connectionId, sessionId);
     this.activeInputConnection = connectionId;

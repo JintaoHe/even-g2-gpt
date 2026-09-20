@@ -22,6 +22,7 @@ async function fixture(startupResult = 0) {
   const sockets: any[] = [], audio: boolean[] = [], writes: string[] = [];
   const nativeStorage = new Map<string, string>();
   let creates = 0, exits = 0, tick!: () => Promise<void>, hub!: (event: any) => void, device!: (event: any) => void;
+  let pagehideListener: (() => void) | undefined;
   class Socket {
     static OPEN = 1; static CLOSING = 2;
     readyState = 0; sent: any[] = [];
@@ -29,6 +30,7 @@ async function fixture(startupResult = 0) {
     constructor() { sockets.push(this); }
     send(data: string) { this.sent.push(JSON.parse(data)); }
     close() { this.readyState = 3; this.onclose?.(); }
+    drop() { this.readyState = 3; this.onclose?.(); }
   }
   const bridge = {
     createStartUpPageContainer: async () => { creates++; return startupResult; },
@@ -45,7 +47,8 @@ async function fixture(startupResult = 0) {
     onEvenHubEvent: (handler: typeof hub) => { hub = handler; }
   };
   class Property { constructor(value: object) { Object.assign(this, value); } }
-  const events = { FOREGROUND_EXIT_EVENT: 1, SYSTEM_EXIT_EVENT: 2, ABNORMAL_EXIT_EVENT: 3, DOUBLE_CLICK_EVENT: 4 };
+  const events = { FOREGROUND_EXIT_EVENT: 1, FOREGROUND_ENTER_EVENT: 2,
+    SYSTEM_EXIT_EVENT: 3, ABNORMAL_EXIT_EVENT: 4, DOUBLE_CLICK_EVENT: 5 };
   const deviceTypes = { None: 'none', Connecting: 'connecting', Connected: 'connected', Disconnected: 'disconnected', ConnectionFailed: 'connectionFailed' };
   const sdk = { waitForEvenAppBridge: async () => bridge, CreateStartUpPageContainer: Property,
     TextContainerProperty: Property, TextContainerUpgrade: Property, OsEventTypeList: events, DeviceConnectType: deviceTypes };
@@ -66,12 +69,15 @@ async function fixture(startupResult = 0) {
       : name === './audio-controller' ? { AudioController }
       : name === './connection-controller' ? { ConnectionController }
       : name === './session-credential' ? { SessionCredentialStore } : sdk,
-    document: testDocument, window: { addEventListener() {} },
+    document: testDocument, window: { addEventListener(type: string, handler: () => void) {
+      if (type === 'pagehide') pagehideListener = handler;
+    } },
     localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => { storage.set(key, value); }, removeItem: (key: string) => { storage.delete(key); } },
     crypto: { randomUUID: () => '11111111-1111-4111-8111-111111111111' },
     __EVEN_BACKEND_ORIGIN__: '', __EVEN_CONNECTION_LABEL__: '本地后端 · 127.0.0.1:3001 · WS',
     location: { protocol: 'http:', host: 'localhost' }, WebSocket: Socket,
-    setInterval: (callback: typeof tick) => { tick = callback; return 1; }, clearInterval() {}, console: { info() {} }
+    setInterval: (callback: typeof tick) => { tick = callback; return 1; }, clearInterval() {},
+    setTimeout, clearTimeout, console: { info() {} }
   });
   const flush = () => new Promise<void>(resolve => setImmediate(resolve));
   await flush();
@@ -91,6 +97,9 @@ async function fixture(startupResult = 0) {
   return { element, connect, flush, tick: () => tick(), audio, writes, sockets,
     counts: () => ({ creates, exits }), device: (connectType: string) => device({ connectType }),
     visibility: async (hidden: boolean) => { testDocument.hidden = hidden; visibilityListener?.(); await flush(); },
+    backgroundExit: async () => { hub({ sysEvent: { eventType: events.FOREGROUND_EXIT_EVENT } }); await flush(); },
+    foregroundEnter: async () => { hub({ sysEvent: { eventType: events.FOREGROUND_ENTER_EVENT } }); await flush(); },
+    pagehide: async () => { pagehideListener?.(); await flush(); },
     systemExit: () => { const ws = sockets.at(-1); hub({ sysEvent: { eventType: events.SYSTEM_EXIT_EVENT } }); ws?.close(); } };
 }
 
@@ -149,4 +158,22 @@ test('microphone intent survives temporary device loss and hidden companion UI',
   assert.equal(f.audio.at(-1), false);
   await f.visibility(false);
   assert.equal(f.audio.at(-1), true);
+});
+
+test('Even foreground exit and enter suspend then restore microphone intent without a new tap', async () => {
+  const f = await fixture(); await f.connect();
+  f.element('audio').onclick(); await f.flush();
+  assert.equal(f.audio.at(-1), true);
+  await f.backgroundExit(); assert.equal(f.audio.at(-1), false);
+  await f.foregroundEnter(); assert.equal(f.audio.at(-1), true);
+});
+
+test('pagehide is non-destructive and native foreground entry reconnects a dropped transport', async () => {
+  const f = await fixture(); const first = await f.connect();
+  await f.pagehide();
+  assert.equal(first.readyState, 1, 'pagehide must not dispose the resumable socket');
+  first.drop(); await f.foregroundEnter();
+  assert.equal(f.sockets.length, 2, 'foreground entry should bypass the pending backoff');
+  const second = f.sockets[1]; second.readyState = 1; second.onopen();
+  assert.equal(second.sent[0].resume_session_id, '22222222-2222-4222-8222-222222222222');
 });
