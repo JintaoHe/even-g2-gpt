@@ -9,6 +9,7 @@ let speechAvailable = true;
 let emailAvailable = false;
 let cliSearchEnabled = false;
 let downloadToken = '', jobTimer;
+let forceColdStart = false;
 const answers = new Map();
 const labels = { listening: '等待说话 / 继续追问', thinking: '判断意图中（可继续说）', answering: '回答中（可插话）', paused: '已暂停', exit_pending: '已停止收音，等待退出确认', closed: '已结束' };
 const active = () => connected && ['listening', 'thinking', 'answering'].includes(state);
@@ -270,11 +271,20 @@ $('cancelExit').onclick = () => exitChoice(false);
 $('exitDialog').oncancel = event => { event.preventDefault(); exitChoice(false); };
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopMic(); });
 window.addEventListener('online', () => session.networkAvailable());
-window.addEventListener('pagehide', () => { stopMic(); session.dispose(); });
+window.addEventListener('pagehide', () => {
+  if (forceColdStart) return;
+  stopMic(); session.dispose();
+});
 
 if (isLoopbackHost(location.hostname)) {
   $('devControls').hidden = false;
   $('resumeSession').onclick = () => { if (!session.simulateResume()) notice('需要先连接，才能模拟 session resume。'); };
+  $('forceColdStart').onclick = () => {
+    if (!session.canSimulateColdStart()) return notice('需要先连接并保存恢复凭证，才能模拟冷启动。');
+    forceColdStart = true;
+    notice('正在清空页面内存并模拟冷启动…');
+    location.reload();
+  };
   $('dropSocket').onclick = () => { if (!session.simulateDrop()) notice('当前没有可断开的连接。'); };
   $('retryConnection').onclick = () => { if (!session.networkAvailable()) notice('当前已连接，或没有可恢复的会话。'); };
   $('repeatSubmit').onclick = () => { if (!session.repeatLastSubmission()) notice('还没有可重复提交的文字消息。'); };

@@ -23,6 +23,7 @@ let locationController: LocationController | undefined, locationAvailable = fals
 let developmentLocation: { label: string; latitude: number; longitude: number; accuracy: number; timezone: string } | undefined;
 let connected = false, speech = false, audio = false, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
+let skipPagehideCleanup = false;
 let hasReady = false;
 const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
 let credentialStore: SessionCredentialStore;
@@ -347,12 +348,24 @@ void (async () => {
   if (credentialStore.load()) connection.resumeIfAvailable();
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
 window.addEventListener('online', () => connection?.networkAvailable());
-window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void audioController?.dispose(); locationController?.cancelAutomatic(); void locationController?.stop(); connection?.dispose(); });
+window.addEventListener('pagehide', () => {
+  if (skipPagehideCleanup) return;
+  disposed = true; display.close(); clearInterval(timer); void audioController?.dispose();
+  locationController?.cancelAutomatic(); void locationController?.stop(); connection?.dispose();
+});
 document.addEventListener('visibilitychange', () => { void audioController?.setVisible(!document.hidden); });
 if (import.meta.env.DEV) {
   void import('../dev/session-controls').then(({ installSessionControls }) => { developmentSessionControls = installSessionControls({
     backendUrl: conversationWebSocketUrl(location, packagedBackendOrigin),
     resume: () => connection.reconnectNow(),
+    coldStart: async () => {
+      if (!connection.connected || !credentialStore.load()) return false;
+      await credentialStore.whenSettled();
+      if (!connection.connected || !credentialStore.load() || !credentialStore.persistenceHealthy) return false;
+      skipPagehideCleanup = true;
+      try { location.reload(); return true; }
+      catch { skipPagehideCleanup = false; return false; }
+    },
     expire: () => connection.forgetResumeCredential() && connection.send({ type: 'test.session.expire' }),
     command: type => connection.send({ type }),
   }); });

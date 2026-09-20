@@ -207,7 +207,7 @@ test('four unauthenticated sockets cannot prevent the owner from authenticating'
   }
 });
 
-test('heartbeat terminates a peer that does not pong and releases its lease', { timeout: 10_000 }, async () => {
+test('raw half-open peer is BUSY before heartbeat release and its credential remains resumable', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-heartbeat-'));
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
@@ -221,7 +221,16 @@ test('heartbeat terminates a peer that does not pong and releases its lease', { 
   const readyPromise = waitFor(silent, 'ready');
   silent.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token }));
   const ready = await readyPromise;
-  await once(silent, 'close');
+  const silentClosed = once(silent, 'close');
+
+  const blocked = new WebSocket(url); await once(blocked, 'open');
+  const busyPromise = waitFor(blocked, 'error');
+  blocked.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId,
+    resume_session_id: ready.session_id, resume_credential: ready.resume_credential, last_seen_sequence: 0 }));
+  assert.equal((await busyPromise).code, 'BUSY');
+  blocked.terminate();
+
+  await silentClosed;
 
   const replacement = new WebSocket(url); await once(replacement, 'open');
   try {

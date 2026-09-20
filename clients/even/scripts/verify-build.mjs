@@ -19,6 +19,8 @@ const developmentOnlyPatterns = [
   /Des Moines\s*·\s*Downtown/,
   /41\.5868/,
   /developmentLocationPanel/,
+  /force-cold-start-now/,
+  /模拟 WebView 被系统终止/,
   /test\.storage\.(?:seed_expired|cleanup_apply)/,
   /test\.session\.expire/
 ];

@@ -87,6 +87,7 @@ export class BrowserSessionClient {
   sendBinary(value) { if (this.socket?.readyState !== WebSocket.OPEN) return false; this.socket.send(value); return true; }
   repeatLastSubmission() { if (!this.lastSubmission || this.socket?.readyState !== WebSocket.OPEN) return false;
     this.socket.send(JSON.stringify(this.lastSubmission)); return true; }
+  canSimulateColdStart() { return this.socket?.readyState === WebSocket.OPEN && !!this.credential(); }
   simulateDrop() { if (!this.socket) return false; this.socket.close(4000, 'Simulator drop'); return true; }
   simulateResume() { return this.simulateDrop(); }
   storageTest(type) { return LOCAL_TEST_COMMANDS.has(type) && type !== 'test.session.expire' ? this.send({ type }) : false; }

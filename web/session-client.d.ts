@@ -19,6 +19,7 @@ export class BrowserSessionClient {
   send(value: Record<string, unknown>): boolean;
   sendBinary(value: ArrayBuffer | ArrayBufferView): boolean;
   repeatLastSubmission(): boolean;
+  canSimulateColdStart(): boolean;
   simulateDrop(): boolean;
   simulateResume(): boolean;
   storageTest(type: 'test.storage.inspect' | 'test.storage.seed_expired' | 'test.storage.cleanup_preview' | 'test.storage.cleanup_apply'): boolean;

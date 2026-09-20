@@ -26,38 +26,48 @@ export function storageReportText(event: any) {
 type StorageCommand = 'test.storage.inspect' | 'test.storage.seed_expired'
   | 'test.storage.cleanup_preview' | 'test.storage.cleanup_apply';
 
+type ControlAction = () => boolean | Promise<boolean>;
+
 export function installSessionControls(options: {
   backendUrl: string;
   resume: () => boolean;
   expire: () => boolean;
+  coldStart: ControlAction;
   command: (type: StorageCommand) => boolean;
-}) {
+}, root: Document = document) {
   if (!isLoopbackWebSocket(options.backendUrl)) return undefined;
-  const section = document.createElement('section');
+  const section = root.createElement('section');
   section.id = 'session-storage-controls';
-  const title = document.createElement('strong');
+  const title = root.createElement('strong');
   title.textContent = '本地会话与 SQLite 实验台';
-  const controls = document.createElement('div');
-  const report = document.createElement('pre');
+  const controls = root.createElement('div');
+  const report = root.createElement('pre');
   report.id = 'session-storage-report';
   report.textContent = '尚未读取 SQLite 状态。';
-  const hint = document.createElement('small');
-  hint.textContent = '只在 loopback 开发版显示；不读取对话正文，三年清理只删除固定测试记录。';
-  const add = (id: string, label: string, action: () => boolean, failure: string, danger = false) => {
-    const button = document.createElement('button');
+  const hint = root.createElement('small');
+  hint.textContent = '只在 loopback 开发版显示；冷启动会清空当前 JS 内存但保留原生恢复凭证，不读取对话正文，三年清理只删除固定测试记录。';
+  const add = (id: string, label: string, action: ControlAction, failure: string, danger = false) => {
+    const button = root.createElement('button');
     button.id = id; button.type = 'button'; button.textContent = label;
     if (danger) button.style.background = '#ffd6c9';
-    button.onclick = () => { if (!action()) report.textContent = failure; };
+    button.onclick = async () => {
+      button.disabled = true;
+      try { if (!await action()) report.textContent = failure; }
+      catch { report.textContent = failure; }
+      finally { button.disabled = false; }
+    };
     controls.append(button);
   };
   add('resume-session-now', '一键模拟 session resume', options.resume, '当前未连接，无法模拟恢复。');
+  add('force-cold-start-now', '模拟 WebView 被系统终止（冷启动）', options.coldStart,
+    '需要已连接、且原生恢复凭证已安全保存后才能模拟冷启动。', true);
   add('expire-session-now', '立即模拟恢复窗口过期', options.expire, '当前未连接，无法模拟过期。', true);
   add('inspect-sqlite-now', '查看 SQLite 状态', () => options.command('test.storage.inspect'), '当前未连接，无法读取状态。');
   add('seed-expired-record', '写入 3 年前测试记录', () => options.command('test.storage.seed_expired'), '当前未连接，无法写入测试记录。');
   add('preview-retention', '预览测试记录清理（固定三年）', () => options.command('test.storage.cleanup_preview'), '当前未连接，无法预览。');
   add('apply-retention', '清理 3 年前测试记录', () => options.command('test.storage.cleanup_apply'), '当前未连接，无法清理。', true);
   section.append(title, controls, report, hint);
-  document.body.append(section);
+  root.body.append(section);
   return { element: section, handleEvent(event: any) {
     if (event?.type !== 'test.storage.report') return false;
     report.textContent = storageReportText(event); return true;

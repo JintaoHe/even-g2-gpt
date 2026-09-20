@@ -285,3 +285,27 @@ PR #34 已于 2026-09-20 squash merge 到 `main`，commit `0ef947a`。
 ### Gate
 
 Recovery hardening PR 2 本地自动化与安全 gate：**PASS**。尚未部署 Linux、没有构建新的 `.ehpk`，也没有提前实现 forced-kill harness、device credential、persisted ACK、foreground lifecycle 或 durable drafts；这些继续由后续独立 PR 负责。
+
+## 2026-09-20 — Recovery hardening Rev 6 · PR 3 working tree
+
+### 实现
+
+- Even companion simulator 新增“模拟 WebView 被系统终止（冷启动）”控制。执行前必须处于已连接状态、存在有效的短期 resume credential，并等待所有 Even host storage 写入完成；原生存储不健康时 fail closed。
+- 冷启动控制只在 `import.meta.env.DEV` 动态模块且 loopback WebSocket 目标下安装。它只为本次 reload 跳过正常 pagehide 清理，故意丢弃页面内 JS 状态并保留原生恢复凭证；主 token 仍未持久化。
+- 本地 browser lab 提供相同的可见冷启动控制，用于快速检查页面内状态丢失后的 resume 行为。该页面 reload 不能伪造 iOS jetsam 或真实射频 half-open，因此没有把 browser reload 当成 half-open 证明。
+- raw WebSocket integration test 使用 `autoPong: false` 的已认证 peer 确定性重放 half-open：心跳清理前第二条连接必须收到 `BUSY`；心跳 deadline 终止旧 peer 后，同一 client/session 的原 credential 仍可成功恢复。这同时证明失败的 BUSY 尝试没有烧掉 credential。
+- production client release verifier 新增 forced-cold-start 控件文本与 ID 检查，确保开发 harness 不进入 Even Hub 发布包。公网 Linux server 的 test-control 拒绝边界保持不变。
+
+### 自动化结果
+
+1. Half-open／protocol／browser targeted tests：`13 passed / 0 failed`。
+2. Even client full regression：`58 passed / 0 failed`；新增 loopback 控件、异步 action 与公网不安装测试。
+3. Root full regression：`350 passed / 0 failed / 2 Windows platform skips`，共 352 tests；两个 skip 仍是 Windows 无权创建测试 symlink，Linux gate 需重跑。
+4. Root 与 Even client TypeScript：通过。
+5. Server-only build：通过；发布目录不包含 browser lab、SDK、simulator、tests、credentials 或 local data。
+6. Even client production build：通过；release verifier 检查 2 个文件，未发现 forced-cold-start/debug fixture、source map、private key 或明显 credential。
+7. Public audit：277 个 source/document files 未发现禁止路径或 credential pattern。
+
+### Gate
+
+Recovery hardening PR 3 本地自动化、生产构建与安全 gate：**PASS**。真实 iOS jetsam 白屏、host 是否会自动重载 plugin，以及真机锁屏/内存压力仍只能留到 Physical Acceptance；本 PR 没有部署 Linux、没有构建 `.ehpk`，也没有提前实现 device credential、persisted ACK、同 client lease takeover、foreground lifecycle 或 durable drafts。

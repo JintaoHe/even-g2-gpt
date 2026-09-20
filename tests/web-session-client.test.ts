@@ -27,7 +27,9 @@ test('browser reference client uses v2 resume, stable message ids and duplicate-
   assert.deepEqual(sockets[0].sent.at(-1), submitted);
   assert.equal(client.storageTest('test.storage.inspect'), true);
   assert.match(sockets[0].sent.at(-1).command_id, /^[0-9a-f-]{36}$/);
+  assert.equal(client.canSimulateColdStart(), true);
   assert.equal(client.simulateResume(), true);
+  assert.equal(client.canSimulateColdStart(), false);
   assert.equal(timers.length, 1);
   timers[0](); sockets[1].open(); assert.equal(sockets[1].sent[0].resume_credential, 'r'.repeat(32));
 });
