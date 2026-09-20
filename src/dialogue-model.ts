@@ -6,7 +6,7 @@ import { deliveryActions, DELIVERY_INSTRUCTIONS } from './delivery-intent.js';
 import { calendarActions, CALENDAR_INTENT } from './calendar-planner.js';
 
 export type ApplicationCapabilities = { calendar?: boolean; documents?: boolean; email?: boolean; location?: boolean; environment?: boolean; conditionalTasks?: boolean };
-export type DialogueOptions = { reasoningEffort?: ReasoningEffort; adaptiveReasoning?: boolean; intentTokens?: number; replyTokens?: number; extraInstructions?: string; deliveryRouting?: boolean; calendarRouting?: boolean; locationRouting?: boolean; taskRouting?: boolean; webRouting?: boolean; sessionSearchCalls?: number; applicationCapabilities?: ApplicationCapabilities };
+export type DialogueOptions = { reasoningEffort?: ReasoningEffort; adaptiveReasoning?: boolean; intentTokens?: number; replyTokens?: number; extraInstructions?: string; deliveryRouting?: boolean; calendarRouting?: boolean; locationRouting?: boolean; taskRouting?: boolean; webRouting?: boolean; sessionSearchCalls?: number; applicationCapabilities?: ApplicationCapabilities; fetcher?: typeof fetch };
 
 export const WEB_SEARCH_INTENT = `Also classify search_action independently from cognitive_mode.
 search: the current answer requires fresh public/external evidence, such as news, market data, current events, current business/place facts, live recommendations, or an explicit request to browse/verify. decision_support and planning may select search when their decision depends on current external facts.
@@ -240,7 +240,7 @@ export class OpenAIDialogue implements DialogueModel {
   startSession() { this.sessionSearchReserved = 0; }
   endSession() { this.sessionSearchReserved = 0; }
   private async request(body: object, signal: AbortSignal) {
-    const response = await fetch(this.endpoint, {
+    const response = await (this.options.fetcher ?? fetch)(this.endpoint, {
       method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(90000)]),
       headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: this.model, store: false, service_tier: 'default',
@@ -466,7 +466,7 @@ If two or more plausible physical venues remain, return ask with one concise ato
     const now = new Date();
     const response = await this.request({
       instructions: `You are the user's personal glasses assistant. Understand Mandarin/English code-switching and preserve context.
-You receive the complete current-session conversation as short-term memory, including messages from earlier topic threads. Resolve references such as “刚才那家”, “你之前提到的 idea”, or “前面第2点” from that session. Topic metadata is backend context: never quote or expose it. Keep the latest user correction authoritative and do not blend unrelated threads unless the user refers back to them.
+You receive bounded current-session memory: a backend summary plus recent raw messages and relevant topic context. Resolve references such as “刚才那家”, “你之前提到的 idea”, or “前面第2点” when that context supports them. Summary/context metadata is backend data: never quote or expose it, and reread live facts through tools. Keep the latest user correction authoritative and do not blend unrelated threads unless the user refers back to them.
 The user's latest explicit correction, cancelled trip or plan/city change supersedes older plans. Do not continue researching an old city, hotel or trip unless the user clearly refers back to it.
 ${cognitiveMode ? modeGuidance(cognitiveMode) : ''}
 Reply in the user's language and optimize for a five-line glasses display. Lead with the answer, then at most 2–3 short supporting points.

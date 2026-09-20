@@ -479,12 +479,12 @@ npm run audit:public
 
 #### 5.1 建立 `ContextBuilder`
 
-- [ ] 删除 `history.length >= 100` 的会话终止逻辑。
-- [ ] 存储层允许 100+ messages；模型上下文层按 token／字符预算选择内容。
-- [ ] 默认组合：session summary、当前 topic summary、最近 20–30 条原始消息、未完成事项和本轮输入。
-- [ ] artifact 生成可以选择 topic／时间范围，不默认导出整个无限历史。
-- [ ] interrupted/failed assistant message带状态进入上下文，不能伪装成已确认结论。
-- [ ] Calendar／Email／成本／路线的当前事实始终由工具重新读取。
+- [x] 删除 `history.length >= 100` 的会话终止逻辑。
+- [x] 存储层允许 100+ messages；模型上下文层按 token／字符预算选择内容。
+- [x] 默认组合：session summary、当前 topic summary、最近 20–30 条原始消息、未完成事项和本轮输入。
+- [x] artifact 生成选择当前 topic 的不可变快照，不默认导出整个无限历史；更细的显式时间范围选择保留为后续 UI 增强。
+- [x] interrupted/failed assistant message带状态进入上下文，不能伪装成已确认结论。
+- [x] Calendar／Email／成本／路线的当前事实始终由工具重新读取。
 
 新增测试：`tests/context-builder.test.ts`。
 
@@ -494,13 +494,13 @@ npm run audit:public
 
 #### 5.2 实现异步 session summary
 
-- [ ] 只在达到消息／token threshold 后排队生成摘要。
-- [ ] 摘要生成失败不能阻塞当前回答。
-- [ ] 摘要使用固定 schema，经过 runtime validation。
-- [ ] 摘要保存 `through_sequence`，只总结尚未覆盖的 committed messages。
-- [ ] 同一范围的重复任务幂等；服务重启后不重复收费。
-- [ ] 摘要模型调用计入现有跨 provider 成本账本。
-- [ ] 摘要禁止启用 web search 或 Calendar／Email 写工具。
+- [x] 只在达到消息 threshold 后排队生成摘要；模型输入仍由独立字符预算控制。
+- [x] 摘要生成失败不能阻塞当前回答。
+- [x] 摘要使用固定 schema，经过 runtime validation，并仅允许一次 schema 修复。
+- [x] 摘要保存 `through_sequence`，只总结尚未覆盖的 committed messages。
+- [x] 同一范围的重复任务幂等；服务重启后把不确定的 provider 结果标为 `unknown`，不自动重试收费。
+- [x] 摘要模型调用经过现有 metered OpenAI fetch，计入跨 provider 成本账本。
+- [x] 摘要请求不暴露 web search、Calendar 或 Email 工具。
 
 新增测试：`tests/session-summary.test.ts`。
 
@@ -510,10 +510,10 @@ npm run audit:public
 
 #### 5.3 修正 MD 导出的 100-message 耦合
 
-- [ ] `JobStore.enqueue` 不再把“会话消息数”当作文档输入的唯一限制。
-- [ ] 导出请求先形成经过用户确认的 document/topic selection，再提交 immutable document input。
-- [ ] 继续保留总字节、附件大小和邮件大小限制。
-- [ ] 不允许 job worker 在后台读取不断变化的整个 session。
+- [x] `JobStore.enqueue` 不再把“会话消息数”当作文档输入的唯一限制。
+- [x] 导出请求先形成当前 topic selection 或经过用户确认的 document，再提交 immutable input。
+- [x] 继续保留总字节、附件大小和邮件大小限制。
+- [x] job worker 只读取入队时冻结的内容，不在后台读取不断变化的整个 session。
 
 新增测试：扩展 `tests/job-store.test.ts`、`tests/delivery.test.ts`。
 

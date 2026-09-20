@@ -53,7 +53,9 @@ export class DeliveryDialogue implements DialogueModel {
   private draft?: Draft;
   private jobId?: string;
   constructor(private base: DialogueModel, private jobs: JobStore, private generate: DraftGenerator,
-    private sender?: MailSender, private now: () => number = Date.now, private notifyResult?: (id: string, result: string) => void) {}
+    private sender?: MailSender, private now: () => number = Date.now,
+    private notifyResult?: (id: string, result: string) => void,
+    private artifactSource?: () => Message[]) {}
   invalidate() { this.approval = undefined; }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan> {
     const approval = this.approval; this.invalidate();
@@ -144,7 +146,10 @@ export class DeliveryDialogue implements DialogueModel {
       // Normal Luna replies receive the whole session as short-term memory. A
       // generated artifact remains scoped to the active topic so a trip plan and
       // a business idea are never silently blended into one document.
-      const generated = await this.generate(activeTopicHistory(history), action, action === 'revise' ? this.draft : undefined, signal);
+      const source = this.artifactSource?.() ?? history;
+      const selection = activeTopicHistory(source).map(message => ({ ...message,
+        citations: message.citations?.map(citation => ({ ...citation })) }));
+      const generated = await this.generate(selection, action, action === 'revise' ? this.draft : undefined, signal);
       signal.throwIfAborted();
       if ('clarification' in generated) { delta(generated.clarification + '\n尚未发送邮件。'); return; }
       const job = this.jobs.enqueueDocument(generated.document, generated.calendar); newJob = job.id;

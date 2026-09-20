@@ -222,6 +222,7 @@ SONIOX_API_KEY=<secret>
 SONIOX_TRANSCRIBE_MODEL=stt-rt-v5
 # Optional rollback only:
 OPENAI_TRANSCRIBE_MODEL=gpt-live-transcribe
+OPENAI_TRANSCRIBE_USD_PER_MINUTE=0.017
 OPENAI_INTENT_MODEL=<model-name>
 OPENAI_REPLY_MODEL=<model-name>
 OPENAI_WEB_SEARCH=true
@@ -229,6 +230,16 @@ OPENAI_MAX_SEARCH_CALLS=10
 OPENAI_SEARCH_SESSION_LIMIT=50
 OPENAI_SEARCH_DAILY_LIMIT=100
 OPENAI_SEARCH_MONTHLY_LIMIT=1200
+COST_TOTAL_MONTHLY_USD=80
+COST_OPENAI_MONTHLY_USD=50
+COST_SONIOX_MONTHLY_USD=20
+COST_GOOGLE_MONTHLY_USD=10
+# Keep these aligned with the deployed OpenAI model's official pricing.
+OPENAI_INPUT_USD_PER_M=0.20
+OPENAI_CACHED_INPUT_USD_PER_M=0.02
+OPENAI_CACHE_WRITE_USD_PER_M=0.25
+OPENAI_OUTPUT_USD_PER_M=1.20
+OPENAI_WEB_SEARCH_USD_PER_CALL=0.01
 CONVERSATION_PORT=3001
 CONVERSATION_TIMEZONE=America/Chicago
 EVEN_PUBLIC_HOST=<your-domain.example>
@@ -253,8 +264,8 @@ EMAIL_AI_SUMMARY=true
 `GOOGLE_MAPS_ENABLED` 在本地人工路线验收前保持 `false`。启用前按
 [Google Maps 路线指南](GOOGLE_MAPS_ROUTES.md) 把 key 限制到 Places API
 (New)、Routes API 和 Lightsail 静态出口 IP。Calendar OAuth 文件不能代替该
-key。OpenAI 的 `$40/月` project hard limit 必须在 API Dashboard 单独开启；
-环境变量中的搜索次数只限制 web search，不是美元硬上限。
+key。OpenAI 的 `$50/月` project hard limit 必须在 API Dashboard 单独开启；
+环境变量中的 `$80/月` 跨 provider 账本是应用层纵深保护，不能替代 provider 控制台预算。
 
 这只是字段清单。不要把真实文件放进仓库，也不要把 Secret 作为 shell 命令参数写入历史。安装后设置：
 

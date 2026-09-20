@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket, { WebSocketServer } from 'ws';
 import { Conversation, type DialogueModel, type Event, type Message } from '../src/conversation.js';
+import { ContextBuilder, contextCharacterCount } from '../src/context-builder.js';
 import { sse, parseDecision, OpenAIDialogue } from '../src/dialogue-model.js';
 import { TurnDetector } from '../src/vad.js';
 import { createConversationServer, fileSaver } from '../src/conversation-server.js';
@@ -85,6 +86,32 @@ test('exit stops input before save; cancel remains paused; save failure is visib
   const failing = new Conversation(immediate, e => events.push(e), async () => { throw new Error('disk'); });
   await failing.requestExit(); assert.equal(failing.state, 'exit_pending');
   assert.ok(events.some(e => e.code === 'SAVE_FAILED'));
+});
+
+test('more than 100 stored messages continue while model input stays bounded', async () => {
+  const events: Event[] = []; let planned: Message[] = [], replied: Message[] = [];
+  const model: DialogueModel = {
+    plan: async history => { planned = history; return { decision: 'respond' }; },
+    decide: async () => 'respond',
+    reply: async (history, _signal, delta) => { replied = history; delta('继续'); },
+  };
+  const conversation = new Conversation(model, event => events.push(event), undefined, undefined,
+    new ContextBuilder({ maxCharacters: 3_000, recentMessageCount: 24 }));
+  conversation.restoreHistory(Array.from({ length: 120 }, (_, index) => ({
+    role: index % 2 ? 'assistant' as const : 'user' as const,
+    content: `历史 ${index} ${'内容'.repeat(20)}`,
+    sequence: index + 1,
+    status: 'committed' as const,
+  })));
+
+  await conversation.submit('第 121 条之后仍然继续');
+
+  assert.equal(conversation.state, 'listening');
+  assert.equal(conversation.history.length, 122);
+  assert.equal(events.some(event => event.code === 'HISTORY_LIMIT'), false);
+  assert.ok(contextCharacterCount(planned) <= 3_000);
+  assert.ok(contextCharacterCount(replied) <= 3_000);
+  assert.equal(replied.at(-1)?.content, '第 121 条之后仍然继续');
 });
 
 test('answer completion is emitted only after durable save and save failure never reports done', async () => {

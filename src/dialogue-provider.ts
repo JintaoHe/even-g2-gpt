@@ -1,11 +1,11 @@
 import { createHybridDialogue } from './hybrid-dialogue.js';
 import { CodexDialogue, createCodexRunner } from './codex-dialogue.js';
 
-export function createDialogueProvider(env: NodeJS.ProcessEnv = process.env) {
+export function createDialogueProvider(env: NodeJS.ProcessEnv = process.env, options: { fetcher?: typeof fetch } = {}) {
   const provider = env.DIALOGUE_PROVIDER ?? 'api';
   if (provider === 'api') {
     if (!env.OPENAI_API_KEY) throw new Error('API dialogue requires OPENAI_API_KEY');
-    return { ...createHybridDialogue(env.OPENAI_API_KEY, { ...env, EVEN_DELIVERY_ROUTING: 'true' }), provider,
+    return { ...createHybridDialogue(env.OPENAI_API_KEY, { ...env, EVEN_DELIVERY_ROUTING: 'true' }, { fetcher: options.fetcher }), provider,
       delivery: 'token-stream', webSearch: env.OPENAI_WEB_SEARCH !== 'false', close: async () => {} };
   }
   if (provider !== 'codex-cli') throw new Error('DIALOGUE_PROVIDER must be api or codex-cli');

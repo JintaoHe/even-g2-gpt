@@ -6,6 +6,9 @@
 - Dedicated Google Calendar query with notes, conflict checks, compact previews,
   confirmation-gated create/update/cancel and fixed-recipient invitations.
 - Retained session drafts are separate from expiring one-use authorization.
+- SQLite-backed logical sessions use stable message IDs, rotating scoped resume credentials and a 15-minute reconnect window; a second input client is rejected.
+- Sessions can exceed 100 messages. Model input uses a deterministic character budget plus validated asynchronous summaries; interrupted/failed answers remain explicitly unconfirmed.
+- Topic-scoped Markdown export freezes immutable selected content and keeps byte, disk and email limits instead of treating 100 messages as a hard document limit.
 - Read health/error feedback and bounded retry; uncertain writes are not replayed.
 - Confirmed Markdown delivery, calendar attachments and explicit resend protection.
 - Source-only repository; separate SDK/simulator dependencies and server-only build.
@@ -139,7 +142,7 @@ Do not reorder or collapse these steps:
 Weather, Air Quality and transit are separate later gates. They are not enabled by
 this POC and must not be inferred from the route result.
 
-Separate control-plane TODO: set the OpenAI project's monthly spend limit to `$40`
+Separate control-plane requirement: set the OpenAI project's monthly spend limit to `$50`
 and enable hard enforcement in the API dashboard. Application search limits are
 10/answer, 50/session, 100/day and 1200/calendar-month, but they do not cap all API,
 Maps or AWS charges.

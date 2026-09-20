@@ -1,8 +1,10 @@
 import nodemailer from 'nodemailer';
 import { connect as connectTls } from 'node:tls';
 import { connect as connectTcp, type Socket } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { mailPresentation, type Presentation } from './document-presentation.js';
 import { calendarAttachment, calendarDetails, calendarInvitation, type CalendarInvitation, type CalendarEvent } from './calendar.js';
+import type { CostAlert, CostAlertSender } from './cost-ledger.js';
 
 export type MailResult = 'accepted' | 'failed' | 'unknown';
 export type MailSender = (id: string, markdown: Buffer, metadata?: Presentation, calendar?: CalendarEvent, created?: string, deliveryId?: string) => Promise<MailResult>;
@@ -38,6 +40,53 @@ export function mailConfig(env: NodeJS.ProcessEnv): Config | undefined {
   return { user, password, to, port };
 }
 
+async function sendPayload(config: Config, deliveryId: string, payload: Record<string, unknown>): Promise<MailResult> {
+  let socket: Socket | undefined;
+  let transport: ReturnType<typeof nodemailer.createTransport> | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  const attempt = async (): Promise<MailResult> => {
+    socket = config.port === 465 ? connectTls({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com',
+      minVersion: 'TLSv1.2', rejectUnauthorized: true }) : connectTcp({ host: 'smtp.gmail.com', port: 587 });
+    await new Promise<void>((resolve, reject) => {
+      socket!.once(config.port === 465 ? 'secureConnect' : 'connect', resolve); socket!.once('error', reject);
+    });
+    transport = nodemailer.createTransport({
+      connection: socket, secured: config.port === 465,
+      host: 'smtp.gmail.com', port: config.port, secure: config.port === 465, requireTLS: true,
+      auth: { user: config.user, pass: config.password },
+      tls: { minVersion: 'TLSv1.2', rejectUnauthorized: true, servername: 'smtp.gmail.com' },
+      connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 10000, dnsTimeout: 10000,
+      logger: false, debug: false, disableFileAccess: true, disableUrlAccess: true
+    });
+    const info = await transport.sendMail({
+      from: { name: 'Even Assistant · 系统通知', address: config.user }, to: config.to,
+      envelope: { from: config.user, to: [config.to] },
+      messageId: `<even-${deliveryId}@${config.user.split('@')[1]}>`,
+      ...payload, disableFileAccess: true, disableUrlAccess: true
+    });
+    return info.accepted?.length === 1 && info.rejected?.length === 0 ? 'accepted' : 'failed';
+  };
+  try {
+    const result = attempt().catch((error: { code?: string }) => error.code === 'EAUTH' || error.code === 'EENVELOPE' ? 'failed' as const : 'unknown' as const);
+    return await Promise.race([result, new Promise<MailResult>(resolve => {
+      timer = setTimeout(() => { socket?.destroy(new Error('MAIL_TIMEOUT')); resolve('unknown'); }, 20000);
+    })]);
+  } finally { if (timer) clearTimeout(timer); socket?.destroy(); transport?.close(); }
+}
+
+function alertPayload(alert: CostAlert) {
+  const subject = `[Even Assistant] Google Maps ${alert.label} 已达到 ${alert.threshold}%`;
+  const text = `Even Assistant 成本监控通知\n\n计费月：${alert.period}（美国太平洋时间）\nGoogle SKU：${alert.label}\n当前用量：${alert.units.toLocaleString('en-US')}\n每月免费额度：${alert.freeUnits.toLocaleString('en-US')}\n提醒阈值：${alert.threshold}%\n\n系统仍会遵守 Google $10 与跨 provider $80 的月度应用层硬上限。请登录 Google Cloud Billing 核对官方用量；本邮件不包含位置、对话、日历或密钥。`;
+  const html = `<div style="font-family:system-ui,sans-serif;line-height:1.55"><h2>Even Assistant 成本监控通知</h2><p><strong>${alert.label}</strong> 已达到免费月额度的 <strong>${alert.threshold}%</strong>。</p><ul><li>计费月：${alert.period}（美国太平洋时间）</li><li>当前用量：${alert.units.toLocaleString('en-US')}</li><li>每月免费额度：${alert.freeUnits.toLocaleString('en-US')}</li></ul><p>系统仍会遵守 Google $10 与跨 provider $80 的月度应用层硬上限。请登录 Google Cloud Billing 核对官方用量。</p><p style="color:#666">本邮件不包含位置、对话、日历或密钥。</p></div>`;
+  return { subject, text, html };
+}
+
+export function createCostAlertSender(env: NodeJS.ProcessEnv = process.env): CostAlertSender | undefined {
+  const config = mailConfig(env);
+  if (!config) return undefined;
+  return alert => sendPayload(config, randomUUID(), alertPayload(alert));
+}
+
 export function createMailSender(env: NodeJS.ProcessEnv = process.env, options: { calendarOnly?: boolean; invitation?: CalendarInvitation } = {}): MailSender | undefined {
   const config = mailConfig(env);
   if (!config) return undefined;
@@ -47,39 +96,6 @@ export function createMailSender(env: NodeJS.ProcessEnv = process.env, options: 
     if (!/^[a-f0-9-]{36}$/.test(id) || !markdown.length || markdown.length > 2 * 1024 * 1024) return 'failed';
     let payload: ReturnType<typeof mailPayload>;
     try { payload = mailPayload(id, markdown, metadata, calendar, created, options.calendarOnly, options.invitation); } catch { return 'failed'; }
-    // Own the socket so the overall deadline can destroy it, including during DATA.
-    // A non-pooled transport makes exactly one attempt (no pool requeue behavior).
-    let socket: Socket | undefined;
-    let transport: ReturnType<typeof nodemailer.createTransport> | undefined;
-    let timer: NodeJS.Timeout | undefined;
-    const attempt = async (): Promise<MailResult> => {
-      socket = config.port === 465 ? connectTls({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com',
-        minVersion: 'TLSv1.2', rejectUnauthorized: true }) : connectTcp({ host: 'smtp.gmail.com', port: 587 });
-      await new Promise<void>((resolve, reject) => {
-        socket!.once(config.port === 465 ? 'secureConnect' : 'connect', resolve); socket!.once('error', reject);
-      });
-      transport = nodemailer.createTransport({
-      connection: socket, secured: config.port === 465,
-      host: 'smtp.gmail.com', port: config.port, secure: config.port === 465, requireTLS: true,
-      auth: { user: config.user, pass: config.password },
-      tls: { minVersion: 'TLSv1.2', rejectUnauthorized: true, servername: 'smtp.gmail.com' },
-      connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 10000, dnsTimeout: 10000,
-      logger: false, debug: false, disableFileAccess: true, disableUrlAccess: true
-    });
-      const info = await transport.sendMail({
-        from: { name: 'Even Assistant · 系统通知', address: config.user }, to: config.to,
-        envelope: { from: config.user, to: [config.to] },
-        messageId: `<even-${deliveryId}@${config.user.split('@')[1]}>`,
-        ...payload,
-        disableFileAccess: true, disableUrlAccess: true
-      });
-      return info.accepted?.length === 1 && info.rejected?.length === 0 ? 'accepted' : 'failed';
-    };
-    try {
-      const result = attempt().catch((error: { code?: string }) => error.code === 'EAUTH' || error.code === 'EENVELOPE' ? 'failed' as const : 'unknown' as const);
-      return await Promise.race([result, new Promise<MailResult>(resolve => {
-        timer = setTimeout(() => { socket?.destroy(new Error('MAIL_TIMEOUT')); resolve('unknown'); }, 20000);
-      })]);
-    } finally { if (timer) clearTimeout(timer); socket?.destroy(); transport?.close(); }
+    return sendPayload(config, deliveryId, payload as unknown as Record<string, unknown>);
   };
 }
