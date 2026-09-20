@@ -274,7 +274,7 @@ npm run audit:public
 #### 1.2 实现稳定 ID 和原子写入
 
 - [x] server 生成 session、turn、assistant message 和 topic UUID。
-- [ ] typed input 的 `message_id` 由客户端生成，服务端验证并去重。（client/server integration 待 Phase 2/4）
+- [x] typed input 的 `message_id` 由客户端生成，服务端验证并去重。
 - [x] STT final 的 user message ID 由服务端分配并持久化。
 - [x] 在一个 transaction 中写入 user message、turn 和 sequence。
 - [x] 相同 `message_id`、相同内容重复提交返回原 ACK。
@@ -314,7 +314,7 @@ npm run audit:public
 - [x] `SessionRegistry` 根据 session ID 创建、查找、绑定、解绑和过期 runtime。
 - [x] WebSocket close 只 detach connection；不立即调用 conversation `close()`。
 - [x] runtime 在恢复窗口内保留；过期后 flush、结束并释放模型／工具资源。
-- [ ] production 和 simulator 都使用 15 分钟恢复窗口；server 侧配置与受限测试控制已完成，simulator 按钮留到 Phase 4。
+- [x] production 和 simulator 都使用 15 分钟恢复窗口；simulator 显示 server 返回的实际配置，并提供受限的立即过期控制。
 - [x] 时间判断依赖可注入 clock，自动化测试不使用真实 sleep。
 - [x] 本地开发控制可以强制当前 detached session 过期；正式 build 和公网服务器拒绝注册该控制。
 - [x] Linux 服务重启后按需从 SQLite hydrate 最近 session。
@@ -348,7 +348,7 @@ npm run audit:public
 - [x] `hello` 增加 `protocol_version`、`client_id`、`resume_session_id`、`last_seen_sequence` 和 resume credential。
 - [x] `ready` 返回 `connection_id`、`session_id`、`resumed`、`latest_sequence` 和恢复快照。
 - [x] 服务端只补发客户端缺少的 committed／interrupted messages。
-- [ ] 超出恢复窗口时明确返回新 session，不把旧历史误接到新会话。
+- [x] 超出恢复窗口时明确返回新 session，不把旧历史误接到新会话。
 - [x] 快照包含显示所需的 user/assistant messages、conversation state 和 interrupted turn 提示。
 - [x] snapshot 不包含精确位置、API credential、审批 token 或邮件附件内容。
 
@@ -414,13 +414,13 @@ npm run audit:public
 
 #### 4.1 提取 `ConnectionController`
 
-- [ ] 从 `clients/even/src/main.ts` 提取连接、hello、ACK、重连和 snapshot restore。
-- [ ] 使用带 jitter 的退避：建议 0.5s、1s、2s、5s、10s、30s 上限。
-- [ ] 网络恢复或设备重新连接时允许立即触发一次重连，不等待下一个 timer。
-- [ ] 页面隐藏不再发送 conversation `pause`；它只能影响 audio/display/connection。
-- [ ] page unload 不发送“结束会话”；服务端依靠 detach 和恢复窗口处理。
-- [ ] 明确退出仍走系统确认，并撤销 resume credential／清除 session location。
-- [ ] UI 明确显示：正在重连、会话已恢复、恢复失败后新会话、凭证过期。
+- [x] 从 `clients/even/src/main.ts` 提取连接、hello、ACK、重连和 snapshot restore。
+- [x] 使用带 jitter 的退避：0.5s、1s、2s、5s、10s、30s 上限。
+- [x] 网络恢复或设备重新连接时允许立即触发一次重连，不等待下一个 timer。
+- [x] 页面隐藏不再发送 conversation `pause`；它只能影响 audio/display/connection。
+- [x] page unload 不发送“结束会话”；服务端依靠 detach 和恢复窗口处理。
+- [x] 明确退出仍走系统确认，并撤销 resume credential／清除 session location。
+- [x] UI 明确显示：正在重连、会话已恢复、恢复失败后新会话、凭证过期。
 
 新增测试：`clients/even/tests/connection-controller.test.ts`。
 
@@ -430,14 +430,14 @@ npm run audit:public
 
 #### 4.2 提取 `AudioController`
 
-- [ ] 把用户希望收音的 `desired` 状态和 SDK 实际 `actual` 状态分开。
-- [ ] 状态至少包含 `off | starting | streaming | unavailable`。
-- [ ] 麦克风失败不关闭 conversation，不清空历史，不撤销 session。
-- [ ] 串行化所有 `audioControl(true/false)`，避免 open/close 竞态。
-- [ ] 开启失败最多进行 3 次有限重试，每次重新核验 startup page 和设备状态。
-- [ ] 连续失败后显示“请重新打开应用”的可操作提示，不做无限循环。
-- [ ] 用户主动关闭麦克风时取消尚未执行的 retry。
-- [ ] 页面隐藏时是否停麦作为 Even Hub 策略开关；默认安全地停麦，但会话保持可恢复。
+- [x] 把用户希望收音的 `desired` 状态和 SDK 实际 `actual` 状态分开。
+- [x] 状态至少包含 `off | starting | streaming | unavailable`。
+- [x] 麦克风失败不关闭 conversation，不清空历史，不撤销 session。
+- [x] 串行化所有 `audioControl(true/false)`，避免 open/close 竞态。
+- [x] 开启失败最多进行 3 次有限重试，每次重新核验 backend、visibility 和设备状态。
+- [x] 连续失败后显示“请重新打开应用”的可操作提示，不做无限循环。
+- [x] 用户主动关闭麦克风时取消尚未执行的 retry。
+- [x] 页面隐藏默认安全地停麦，但保留 desired 和 logical session；恢复可见后按原意图重试。
 
 新增测试：`clients/even/tests/audio-controller.test.ts`。
 
@@ -447,12 +447,12 @@ npm run audit:public
 
 #### 4.3 接入 Even SDK 设备状态
 
-- [ ] 使用 `onDeviceStatusChanged` 监听 connecting、connected、disconnected 和 connectionFailed。
-- [ ] glasses disconnected 时停止实际 audio，但保留 `desired` 和 logical session。
-- [ ] connected 后仅在用户此前希望收音时尝试重新获取麦克风。
-- [ ] 区分 SDK microphone unavailable 与 STT/network unavailable。
-- [ ] 不把 `audioControl(false)` 解释为 session 结束。
-- [ ] simulator 没有完整设备事件时使用 fake bridge 做自动测试。
+- [x] 使用 `onDeviceStatusChanged` 监听 connecting、connected、disconnected 和 connectionFailed。
+- [x] glasses disconnected 时停止实际 audio，但保留 `desired` 和 logical session。
+- [x] connected 后仅在用户此前希望收音时尝试重新获取麦克风。
+- [x] 区分 SDK microphone unavailable 与 STT/network unavailable。
+- [x] 不把 `audioControl(false)` 解释为 session 结束。
+- [x] simulator 没有完整设备事件时使用 fake bridge 做自动测试。
 
 新增测试：扩展 `clients/even/tests/client-lifecycle.test.ts`。
 
@@ -460,14 +460,14 @@ npm run audit:public
 
 #### 4.4 同步 browser simulator/reference client
 
-- [ ] `web/app.js` 使用相同 protocol v2、session ID、message ID、ACK 和重连规则。
-- [ ] 页面上明确显示 local/Linux backend、connection ID、session ID 短前缀和 resumed/new 状态。
-- [ ] 浏览器 visibility change 不结束 logical session。
-- [ ] simulator 能手动制造 socket drop、服务端重启和重复 submit。
-- [ ] simulator 显示当前恢复窗口：与正式配置一致，默认 15 分钟。
-- [ ] 增加“模拟会话恢复窗口过期”按钮：仅在 `DEV`、loopback backend 且 server 显式启用 test controls 时可用。
-- [ ] 点击后先断开当前 connection、由测试 server 将 detached session 的 clock 推进到过期，再重连并验证返回新 session。
-- [ ] production client build、`.ehpk` 和 Linux 公网 WSS 不包含也不接受该测试控制消息。
+- [x] `web/app.js` 使用相同 protocol v2、session ID、message ID、ACK 和重连规则。
+- [x] 页面上明确显示 local/Linux backend、connection ID、session ID 短前缀和 resumed/new 状态。
+- [x] 浏览器 visibility change 不结束 logical session。
+- [x] simulator 能手动制造 socket drop、服务端重启和重复 submit。
+- [x] simulator 显示当前恢复窗口：读取 server 配置，默认 15 分钟。
+- [x] 增加“模拟会话恢复窗口过期”按钮：仅在 `DEV`、loopback backend 且 server 显式启用 test controls 时可用。
+- [x] 点击后由测试 server 关闭并 detach 当前 connection、立即过期该 session，再由客户端使用内存中的主 token 建立新 session。
+- [x] production client build、`.ehpk` 和 Linux 公网 WSS 不包含也不接受该测试控制消息。
 
 新增测试：优先把可测逻辑提取成 TypeScript/纯函数；避免只靠人工点击。
 

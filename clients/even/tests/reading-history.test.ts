@@ -98,3 +98,16 @@ test('itinerary bullets become semantic pages without repeating the previous poi
   assert.ok(h.pages.some(page => (page.match(/^-/gm) ?? []).length >= 2), 'short points should stack on one page');
   for (const page of h.pages) assert.ok(page.split('\n').length <= 5);
 });
+
+test('snapshot restore replaces an empty UI and deduplicates later replayed events by stable message id', () => {
+  const h = new ReadingHistory(); h.reset('old placeholder');
+  h.restoreSnapshot([
+    { id: 'u1', sequence: 1, role: 'user', status: 'committed', content: '前一个问题' },
+    { id: 'a1', sequence: 2, role: 'assistant', status: 'interrupted', content: '中断的回答' },
+  ], true);
+  assert.equal(h.entries.length, 2); assert.match(h.label, /已打断/);
+  h.event({ type: 'turn.committed', message_id: 'u1', text: '前一个问题' });
+  assert.equal(h.entries.length, 2);
+  h.restoreSnapshot([{ id: 'a2', sequence: 3, role: 'assistant', status: 'committed', content: '补发回答' }]);
+  assert.equal(h.entries.length, 3); assert.equal(h.current, '补发回答');
+});

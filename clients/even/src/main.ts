@@ -1,27 +1,34 @@
 import { waitForEvenAppBridge, CreateStartUpPageContainer, TextContainerProperty, TextContainerUpgrade,
-  OsEventTypeList, type EvenAppBridge } from '@evenrealities/even_hub_sdk';
+  DeviceConnectType, OsEventTypeList, type EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { ReadingHistory } from './reading-history';
 import { DisplaySession } from './display-session';
 import { conversationWebSocketUrl } from './backend-url';
 import { LocationController, locationReport } from './location';
+import { AudioController } from './audio-controller';
+import { ConnectionController, type ConnectionStatus } from './connection-controller';
+import { SessionCredentialStore } from './session-credential';
 
 const element = (id: string) => document.getElementById(id)!;
 const packagedBackendOrigin = typeof __EVEN_BACKEND_ORIGIN__ === 'string' ? __EVEN_BACKEND_ORIGIN__ : '';
 const connectionLabel = typeof __EVEN_CONNECTION_LABEL__ === 'string' ? __EVEN_CONNECTION_LABEL__ : '连接配置不可见';
 element('backend-target').textContent = `连接目标：${connectionLabel}`;
+element('recovery-window').textContent = '会话恢复窗口：连接后由服务器确认';
 const pager = new ReadingHistory();
 const display = new DisplaySession();
-let connecting = false;
 let shutdown: Promise<void> | undefined;
 pager.reset('请在伴随页面连接后端。\n连接后可输入文字或开启麦克风。');
-let bridge: EvenAppBridge | undefined, socket: WebSocket | undefined;
+let bridge: EvenAppBridge | undefined, audioController: AudioController | undefined;
 let locationController: LocationController | undefined, locationAvailable = false;
 let developmentLocation: { label: string; latitude: number; longitude: number; accuracy: number; timezone: string } | undefined;
-let connected = false, speech = false, audio = false, audioEpoch = 0, state = 'closed', channel = '?';
+let connected = false, speech = false, audio = false, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
+let hasReady = false;
 const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
-function send(event: object) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); }
+const credentialStore = new SessionCredentialStore(localStorage);
+let connection: ConnectionController;
+function send(event: Record<string, unknown>) { connection?.send(event); }
 function refresh() { dirty = true; element('status').textContent = `${status} · 麦克风${audio ? '开启' : '关闭'}`; }
+function syncAudioAvailability() { void audioController?.setBackendAvailable(active()); }
 const locationPermissionKey = 'glass-assistant.location-succeeded.v1';
 function firstLocationRequest() {
   try { return localStorage.getItem(locationPermissionKey) !== '1'; }
@@ -46,7 +53,7 @@ async function automaticLocation(event: any, ws: WebSocket) {
       accuracy: selected.accuracy, timestamp: Date.now()
     }, event.request_id, selected.timezone);
     status = `模拟定位 · ${selected.label}`; refresh();
-    if (socket === ws && ws.readyState === WebSocket.OPEN && report) send(report);
+    if (connection.socket === ws && ws.readyState === WebSocket.OPEN && report) send(report);
     else send({ type: 'location.failed', request_id: event.request_id, reason: 'unavailable' });
     return;
   }
@@ -61,23 +68,17 @@ async function automaticLocation(event: any, ws: WebSocket) {
     // owns actual sampling; our request asks for at most one update per 10s.
     void locationController.start();
   }
-  if (socket !== ws || ws.readyState !== WebSocket.OPEN || result.ok || result.reason === 'cancelled') return;
+  if (connection.socket !== ws || ws.readyState !== WebSocket.OPEN || result.ok || result.reason === 'cancelled') return;
   send({ type: 'location.failed', request_id: event.request_id, reason: result.reason });
 }
 async function stopAudio() {
-  audioEpoch++; audio = false; refresh();
-  if (bridge) await bridge.audioControl(false).catch(() => false);
+  await audioController?.setDesired(false);
 }
 async function toggleAudio() {
-  if (!bridge || !connected || !speech || exiting || disposed || state === 'exit_pending') { status = '请先连接 SDK 与后端，退出待确认时请先恢复'; refresh(); return; }
-  if (audio) { await stopAudio(); send({ type: 'pause' }); return; }
+  if (!bridge || !connected || !speech || exiting || disposed || state === 'exit_pending' || !audioController) { status = '请先连接 SDK 与后端，退出待确认时请先恢复'; refresh(); return; }
+  if (audioController.desired) { await stopAudio(); send({ type: 'pause' }); return; }
   if (state === 'paused') send({ type: 'resume' });
-  const epoch = ++audioEpoch;
-  try {
-    const ok = await bridge.audioControl(true);
-    if (epoch !== audioEpoch || !connected || disposed) { await bridge.audioControl(false); return; }
-    audio = ok; status = ok ? '正在听' : '麦克风开启失败'; refresh();
-  } catch { status = '麦克风不可用'; refresh(); }
+  await audioController.setDesired(true);
 }
 function exitDialog() {
   if (shutdown) return shutdown;
@@ -96,37 +97,40 @@ async function requestExit() {
   // An SDK acknowledgement is not proof the user confirmed. Stay paused until
   // unload/disconnect, or explicit cancellation through the companion control.
 }
-element('connect').onclick = async () => {
-  if (connecting || disposed) return;
-  if (!exiting && socket && socket.readyState < WebSocket.CLOSING) return;
-  let token = (element('token') as HTMLInputElement).value.trim();
-  if (token.length < 32) { status = '请输入至少 32 字符的应用 token'; refresh(); return; }
-  connecting = true;
-  try {
-    if (exiting) {
-      const old = socket; socket = undefined; old?.close();
-      connected = false; state = 'closed'; answerId = undefined;
-      await stopAudio();
-      if (!await restoreDisplay()) return;
-    }
-  const ws = socket = new WebSocket(conversationWebSocketUrl(location, packagedBackendOrigin));
-  ws.onopen = () => { if (socket !== ws) { token = ''; ws.close(); return; } ws.send(JSON.stringify({ type: 'hello', token })); token = ''; (element('token') as HTMLInputElement).value = ''; };
-  ws.onmessage = ({ data }) => {
-    if (socket !== ws) return;
-    const event = JSON.parse(data);
+function handleConnectionStatus(next: ConnectionStatus) {
+  connected = next.state === 'connected';
+  if (next.state === 'recovering') status = next.reason === 'credential_expired'
+    ? '恢复凭证已过期，正在建立新会话'
+    : `正在重连${next.attempt ? ` · 第 ${next.attempt} 次` : ''}`;
+  else if (next.state === 'connecting') status = '正在连接后端';
+  else if (next.state === 'disconnected' && next.reason === 'credential_expired') status = '恢复凭证已过期，请重新输入应用 token';
+  else if (next.state === 'disconnected' && next.reason !== 'disposed') status = '连接已断开；等待恢复或重新连接';
+  if (next.connectionId && next.sessionId) {
+    const mode = next.reason === 'resumed' ? '会话已恢复' : next.reason === 'new_session' ? '恢复失败后新会话' : '新会话';
+    element('connection-meta').textContent = `${mode} · 连接 ${next.connectionId.slice(0, 8)} · 会话 ${next.sessionId.slice(0, 8)}`;
+  }
+  syncAudioAvailability(); refresh();
+}
+
+function handleServerEvent(event: any) {
     if (event.type === 'ready') {
+      if (event.resumed === true && Array.isArray(event.snapshot?.messages)) pager.restoreSnapshot(event.snapshot.messages, !hasReady);
+      else if (hasReady && connection.status.reason === 'new_session') pager.reset('原会话已过期，已建立新会话。\n请继续说话或输入文字。');
+      hasReady = true;
       connected = true; speech = event.capabilities?.speech === true;
       locationAvailable = event.capabilities?.location === true;
       channel = event.capabilities?.provider === 'api' ? 'API' : event.capabilities?.provider === 'codex-cli' ? 'CLI' : '?';
       const stt = event.capabilities?.speechProvider === 'soniox' ? 'Soniox' : event.capabilities?.speechProvider === 'openai' ? 'OpenAI' : 'STT';
       element('channel').textContent = `当前测试：${channel} · 模型 ${event.models?.reply ?? '?'} · 语音 ${stt}`;
-      pager.reset('已连接。\n可输入文字，或主动开启麦克风。');
+      element('recovery-window').textContent = Number.isInteger(event.resume_window_minutes)
+        ? `会话恢复窗口：${event.resume_window_minutes} 分钟` : '会话恢复窗口：服务器未提供';
+      if (!event.resumed) pager.reset('已连接。\n可输入文字，或主动开启麦克风。');
     }
     pager.event(event);
     if (event.type === 'state') {
       state = event.state;
       status = ({ listening: '等待说话 / 追问', thinking: '判断意图中', answering: '正在回答', paused: '已暂停', exit_pending: '等待系统退出确认', closed: '已结束' } as Record<string, string>)[state] ?? state;
-      if (!active()) void stopAudio();
+      syncAudioAvailability();
     }
     if (event.type === 'answer.start') answerId = event.id;
     if (event.type === 'answer.cancelled' && event.id === answerId) { answerId = undefined; status = '已打断'; }
@@ -160,10 +164,10 @@ element('connect').onclick = async () => {
     if (event.type === 'speech.ended') status = '正在完成识别';
     if (event.type === 'transcript.final') status = '识别结果已保留';
     if (event.type === 'turn.waiting') status = '请继续说';
-    if (event.type === 'location.request') void automaticLocation(event, ws);
+    if (event.type === 'location.request' && connection.socket) void automaticLocation(event, connection.socket as WebSocket);
     if (event.type === 'location.cancel') locationController?.cancelAutomatic(event.request_id);
     if (event.type === 'exit.confirmation_required') void exitDialog();
-    if (event.type === 'error') { status = `错误：${event.code}`; void stopAudio(); }
+    if (event.type === 'error') status = event.code === 'SESSION_UNAVAILABLE' ? '恢复凭证已过期，正在建立新会话' : `错误：${event.code}`;
     if (event.type === 'notice') status = event.text;
     if (event.type === 'location.status') {
       status = event.state === 'available'
@@ -171,12 +175,27 @@ element('connect').onclick = async () => {
         : event.state === 'cleared' ? '本次会话位置已清除' : '位置不可用，请手动提供出发地';
     }
     refresh();
-  };
-  ws.onclose = () => { if (socket !== ws) return; connected = false; state = 'closed'; answerId = undefined; token = ''; status = '已断开，请重新连接'; element('channel').textContent = '通道：已断开'; void stopAudio(); void locationController?.stop(); refresh(); };
-  ws.onerror = () => { if (socket !== ws) return; status = '连接失败，请检查后端'; refresh(); };
-  } catch {
-    status = '连接配置无效或后端不可用'; refresh();
-  } finally { connecting = false; }
+}
+
+connection = new ConnectionController({
+  url: () => conversationWebSocketUrl(location, packagedBackendOrigin),
+  socket: url => new WebSocket(url) as unknown as import('./connection-controller').SocketLike,
+  credentials: credentialStore,
+  onEvent: handleServerEvent,
+  onStatus: handleConnectionStatus,
+});
+
+element('connect').onclick = async () => {
+  if (disposed) return;
+  const tokenInput = element('token') as HTMLInputElement;
+  const token = tokenInput.value.trim();
+  if (!credentialStore.load() && token.length < 32) { status = '请输入至少 32 字符的应用 token'; refresh(); return; }
+  if (exiting) {
+    await stopAudio();
+    if (!await restoreDisplay()) return;
+  }
+  if (!connection.connect(token)) { status = connection.connected ? '已经连接' : '无法连接，请检查 token 或恢复凭证'; refresh(); return; }
+  tokenInput.value = '';
 };
 element('form').onsubmit = event => {
   event.preventDefault(); const input = element('text') as HTMLTextAreaElement;
@@ -185,7 +204,7 @@ element('form').onsubmit = event => {
 };
 element('audio').onclick = () => void toggleAudio();
 element('resume').onclick = async () => {
-  if (disposed || connecting) return;
+  if (disposed) return;
   if (exiting && !await restoreDisplay()) return;
   if (state === 'exit_pending') send({ type: 'exit.confirm', confirm: false });
   send({ type: 'resume' });
@@ -281,20 +300,35 @@ void (async () => {
   const candidate = await waitForEvenAppBridge();
   if (disposed) return;
   bridge = candidate;
+  audioController = new AudioController({
+    bridge: candidate,
+    onState: next => { audio = next === 'streaming'; status = next === 'starting' ? '正在开启麦克风'
+      : next === 'streaming' ? '正在听' : next === 'unavailable' ? '麦克风不可用' : status; refresh(); },
+    onUnavailable: () => { status = '麦克风连续开启失败，请重新打开应用'; refresh(); },
+  });
   locationController = new LocationController(candidate, report => send(report));
+  candidate.onDeviceStatusChanged(device => {
+    const available = device.connectType === DeviceConnectType.Connected;
+    void audioController?.setDeviceAvailable(available);
+    if (!available) { status = device.connectType === DeviceConnectType.Connecting ? '眼镜正在重新连接'
+      : device.connectType === DeviceConnectType.ConnectionFailed ? '眼镜连接失败' : '眼镜已断开'; refresh(); }
+  });
   console.info('[even-agent] ready');
   candidate.onEvenHubEvent(event => {
     const system = event.sysEvent?.eventType;
-    if (system === OsEventTypeList.FOREGROUND_EXIT_EVENT) { void stopAudio(); send({ type: 'pause' }); return; }
+    if (system === OsEventTypeList.FOREGROUND_EXIT_EVENT) { void audioController?.setVisible(false); return; }
     if (system === OsEventTypeList.SYSTEM_EXIT_EVENT || system === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
+      const confirmedExit = system === OsEventTypeList.SYSTEM_EXIT_EVENT && state === 'exit_pending' && connection.connected;
       exiting = true; display.close(); connected = false; state = 'closed'; answerId = undefined;
-      const old = socket; socket = undefined; old?.close(); void stopAudio(); void locationController?.stop();
+      if (confirmedExit) connection.confirmExit(true);
+      else connection.dispose();
+      void stopAudio(); void locationController?.stop();
       status = '眼镜页面已退出；可重新连接或恢复画面'; refresh(); return;
     }
-    if (event.audioEvent && audio && active() && socket?.readyState === WebSocket.OPEN) {
+    if (event.audioEvent && audio && active() && connection.socket?.readyState === WebSocket.OPEN) {
       const pcm = event.audioEvent.audioPcm;
-      if (socket.bufferedAmount > 64000) { void stopAudio(); send({ type: 'pause' }); return; }
-      for (let offset = 0; offset < pcm.length; offset += 3200) socket.send(pcm.slice(offset, offset + 3200));
+      if ((connection.socket.bufferedAmount ?? 0) > 64000) { void stopAudio(); send({ type: 'pause' }); return; }
+      for (let offset = 0; offset < pcm.length; offset += 3200) connection.sendBinary(pcm.slice(offset, offset + 3200));
       return;
     }
     const input = event.textEvent ?? event.sysEvent;
@@ -307,10 +341,16 @@ void (async () => {
     refresh();
   });
   await restoreDisplay();
+  if (credentialStore.load()) connection.resumeIfAvailable();
 })().catch(() => { element('bridge').textContent = 'Even SDK 初始化失败；请在官方模拟器中打开'; });
-window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void stopAudio(); locationController?.cancelAutomatic(); void locationController?.stop(); socket?.close(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden) { void stopAudio(); send({ type: 'pause' }); } });
+window.addEventListener('online', () => connection.networkAvailable());
+window.addEventListener('pagehide', () => { disposed = true; display.close(); clearInterval(timer); void audioController?.dispose(); locationController?.cancelAutomatic(); void locationController?.stop(); connection.dispose(); });
+document.addEventListener('visibilitychange', () => { void audioController?.setVisible(!document.hidden); });
 if (import.meta.env.DEV) {
+  void import('../dev/session-controls').then(({ installSessionControls }) => installSessionControls({
+    backendUrl: conversationWebSocketUrl(location, packagedBackendOrigin),
+    expire: () => connection.simulateSessionExpiry(),
+  }));
   void import('../dev/location-presets').then(({ installLocationPresets }) => installLocationPresets(location => {
     developmentLocation = location;
     status = location ? `已选择模拟位置 · ${location.label}` : '已恢复真实 SDK 定位';
