@@ -77,8 +77,16 @@ async function stopAudio() {
 }
 async function toggleAudio() {
   if (!bridge || !connected || !speech || exiting || disposed || state === 'exit_pending' || !audioController) { status = '请先连接 SDK 与后端，退出待确认时请先恢复'; refresh(); return; }
+  // A backend pause deliberately preserves microphone intent so reconnect and
+  // foreground restoration can reopen it. Handle that state before the normal
+  // desired=true "pause" branch, otherwise the first temple tap only pauses a
+  // second time and the user has to tap twice.
+  if (state === 'paused') {
+    send({ type: 'resume' });
+    await audioController.setDesired(true);
+    return;
+  }
   if (audioController.desired) { await stopAudio(); send({ type: 'pause' }); return; }
-  if (state === 'paused') send({ type: 'resume' });
   await audioController.setDesired(true);
 }
 function exitDialog() {
@@ -175,7 +183,10 @@ function handleServerEvent(event: any) {
     if (event.type === 'location.cancel') locationController?.cancelAutomatic(event.request_id);
     if (event.type === 'exit.confirmation_required') void exitDialog();
     if (event.type === 'error') status = event.code === 'SESSION_UNAVAILABLE' ? '恢复凭证已过期，正在建立新会话' : `错误：${event.code}`;
-    if (event.type === 'notice') status = event.text;
+    if (event.type === 'notice') {
+      status = event.text;
+      if (event.code === 'EXIT_CANCELLED') pager.notice(event.text);
+    }
     if (event.type === 'location.status') {
       status = event.state === 'available'
         ? `本次会话位置可用${typeof event.accuracy_m === 'number' ? ` · 精度约 ${event.accuracy_m}m` : ''}`

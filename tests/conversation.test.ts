@@ -362,6 +362,13 @@ test('local WebSocket authenticates, runs dialogue, pauses and rejects cross-ori
     waiting = waitFor('exit.confirmation_required'); client.send(JSON.stringify({ type: 'exit.request' })); await waiting;
     client.send(Buffer.alloc(640)); client.send(JSON.stringify({ type: 'text.submit', text: 'ignored' }));
     waiting = waitFor('state'); client.send(JSON.stringify({ type: 'exit.confirm', confirm: false })); assert.equal((await waiting).state, 'paused');
+    waiting = waitFor('notice');
+    const secondExit = waitFor('exit.confirmation_required');
+    client.send(JSON.stringify({ type: 'exit.request' })); await secondExit;
+    client.send(JSON.stringify({ type: 'exit.confirm', confirm: false }));
+    const cancellation = await waiting;
+    assert.equal(cancellation.code, 'EXIT_CANCELLED');
+    assert.equal(cancellation.text, '退出已取消，麦克风仍暂停；点击一次继续。');
     assert.equal(events.filter(e => e.type === 'turn.committed').length, 1);
     client.close();
     const cross = new WebSocket(`ws://${host}/ws/conversation`, { origin: 'https://evil.example' });

@@ -48,7 +48,7 @@ async function fixture(startupResult = 0) {
   };
   class Property { constructor(value: object) { Object.assign(this, value); } }
   const events = { FOREGROUND_EXIT_EVENT: 1, FOREGROUND_ENTER_EVENT: 2,
-    SYSTEM_EXIT_EVENT: 3, ABNORMAL_EXIT_EVENT: 4, DOUBLE_CLICK_EVENT: 5 };
+    SYSTEM_EXIT_EVENT: 3, ABNORMAL_EXIT_EVENT: 4, DOUBLE_CLICK_EVENT: 5, CLICK_EVENT: 6 };
   const deviceTypes = { None: 'none', Connecting: 'connecting', Connected: 'connected', Disconnected: 'disconnected', ConnectionFailed: 'connectionFailed' };
   const sdk = { waitForEvenAppBridge: async () => bridge, CreateStartUpPageContainer: Property,
     TextContainerProperty: Property, TextContainerUpgrade: Property, OsEventTypeList: events, DeviceConnectType: deviceTypes };
@@ -100,6 +100,7 @@ async function fixture(startupResult = 0) {
     backgroundExit: async () => { hub({ sysEvent: { eventType: events.FOREGROUND_EXIT_EVENT } }); await flush(); },
     foregroundEnter: async () => { hub({ sysEvent: { eventType: events.FOREGROUND_ENTER_EVENT } }); await flush(); },
     pagehide: async () => { pagehideListener?.(); await flush(); },
+    tap: async () => { hub({ textEvent: { eventType: events.CLICK_EVENT } }); await flush(); },
     systemExit: () => { const ws = sockets.at(-1); hub({ sysEvent: { eventType: events.SYSTEM_EXIT_EVENT } }); ws?.close(); } };
 }
 
@@ -155,6 +156,34 @@ test('explicit cancel restores display and resumes the existing session without 
   await f.flush(); await f.element('resume').onclick(); await f.tick();
   assert.ok(ws.sent.some((event: any) => event.type === 'exit.confirm' && event.confirm === false));
   assert.equal(f.sockets.length, 1); assert.equal(f.counts().creates, 2);
+  assert.equal(f.audio.includes(true), false);
+});
+
+test('server pause keeps microphone intent and one temple tap resumes capture', async () => {
+  const f = await fixture(); const ws = await f.connect();
+  await f.tap();
+  assert.equal(f.audio.at(-1), true);
+
+  ws.onmessage({ data: JSON.stringify({ type: 'state', state: 'paused' }) });
+  await f.flush();
+  assert.equal(f.audio.at(-1), false);
+  const before = ws.sent.length;
+  await f.tap();
+  assert.deepEqual(ws.sent.slice(before).map((event: any) => event.type), ['resume']);
+  assert.equal(ws.sent.slice(before).some((event: any) => event.type === 'pause'), false);
+
+  ws.onmessage({ data: JSON.stringify({ type: 'state', state: 'listening' }) });
+  await f.flush();
+  assert.equal(f.audio.at(-1), true);
+});
+
+test('exit cancellation notice is visible on the glasses and keeps capture paused', async () => {
+  const f = await fixture(); const ws = await f.connect();
+  ws.onmessage({ data: JSON.stringify({ type: 'notice', code: 'EXIT_CANCELLED',
+    text: '退出已取消，麦克风仍暂停；点击一次继续。' }) });
+  await f.flush(); await f.tick();
+  assert.match(f.writes.at(-1)!, /退出已取消/);
+  assert.match(f.writes.at(-1)!, /点击一次继续/);
   assert.equal(f.audio.includes(true), false);
 });
 
