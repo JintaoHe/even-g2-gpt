@@ -1,0 +1,37 @@
+[Unit]
+Description=Run a %i-hour private Even Agent metadata-only soak monitor
+After=even-agent.service
+Requires=even-agent.service
+OnFailure=even-agent-health-failure@%n.service
+
+[Service]
+Type=oneshot
+User=even-agent
+Group=even-agent
+WorkingDirectory=/opt/even-agent/current
+Environment=EVEN_DATA_DIR=/var/lib/even-agent
+ExecStart=/usr/local/bin/node --preserve-symlinks-main /opt/even-agent/current/src/soak-monitor.js --duration-hours %i --interval-seconds 60 --output-dir /var/lib/even-agent/soak
+UMask=0077
+Nice=10
+TimeoutStartSec=25h
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/even-agent

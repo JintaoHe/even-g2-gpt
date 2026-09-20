@@ -341,6 +341,30 @@ test('a multi-stop itinerary is inferred once and previews each event for separa
   assert.deepEqual([...f.records.values()].map(event => event.summary).filter((title: string) => title.startsWith('前往') || title.startsWith('和朋友')).sort(),
     ['前往 Ames DMV', '和朋友见面'].sort());
 });
+test('the six-event itinerary limit remains sequential and requires six separate confirmations', async t => {
+  const f = await fixture(t);
+  const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'none', deliveryAction: 'none' }; },
+    async decide() { return 'respond' as const; }, async reply() {} };
+  const events = Array.from({ length: 6 }, (_, index) => ({
+    title: `行程 ${index + 1}`,
+    start: `2026-10-01T${String(9 + index).padStart(2, '0')}:00-05:00`,
+    end: `2026-10-01T${String(9 + index).padStart(2, '0')}:30-05:00`,
+    timezone: 'America/Chicago', allDay: false, location: `地点 ${index + 1}`, notes: '',
+  }));
+  const conversation = new Conversation(new CalendarDialogue(base, f.service,
+    async () => { throw new Error('single planner must not run'); }, undefined, Date.now, undefined,
+    async () => ({ action: 'plan', clarification: '', events })), () => {});
+  await conversation.submit('把出发、早餐、拜访朋友、公园、晚餐和返程这六段行程分别创建成日历事件', true);
+  assert.match(conversation.history.at(-1)!.content, /第1\/6项[\s\S]*行程 1/);
+  for (let index = 1; index <= 6; index++) {
+    await conversation.submit(index === 1 ? '确认创建' : '确认', true);
+    const reply = conversation.history.at(-1)!.content;
+    if (index < 6) assert.match(reply, new RegExp(`已保存第${index}\\/6项[\\s\\S]*第${index + 1}\\/6项`));
+    else assert.match(reply, /已保存全部6项日程/);
+  }
+  assert.equal(f.writes(), 8);
+  for (const event of events) assert.ok([...f.records.values()].some(record => record.summary === event.title));
+});
 test('notes revise the current unsaved batch item and draft status never pretends it was created', async t => {
   const f = await fixture(t); let plannerCalls = 0;
   const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'none', deliveryAction: 'none' }; },

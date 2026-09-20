@@ -16,6 +16,7 @@ const conversationServer = await readFile(new URL('../src/conversation-server.ts
 const backupService = await readFile(new URL('../deploy/even-agent-backup.service', import.meta.url), 'utf8');
 const backupTimer = await readFile(new URL('../deploy/even-agent-backup.timer', import.meta.url), 'utf8');
 const caddy = await readFile(new URL('../deploy/Caddyfile', import.meta.url), 'utf8');
+const soakService = await readFile(new URL('../deploy/even-agent-soak@.service', import.meta.url), 'utf8');
 
 test('automatic updater follows only protected main and builds without service secrets', () => {
   assert.match(updateScript, /readonly UPDATE_BRANCH='main'/);
@@ -55,6 +56,29 @@ test('automatic updater is periodic, persistent, serialized, and filesystem cons
   assert.match(updateService, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
   assert.match(updateService, /RestrictNamespaces=true/);
   assert.match(updateService, /ReadWritePaths=\/opt\/even-agent \/var\/lib\/even-agent-updater \/var\/lib\/even-agent \/run\/lock/);
+});
+
+test('runtime and updater failures are observable without weakening service confinement', () => {
+  assert.match(runtimeService, /OnFailure=even-agent-health-failure@%n\.service/);
+  assert.match(updateService, /OnFailure=even-agent-health-failure@%n\.service/);
+  assert.match(runtimeService, /Restart=on-failure/);
+  assert.match(updateService, /ProtectSystem=strict/);
+  assert.match(conversationServer, /process\.once\('unhandledRejection'/);
+  assert.match(conversationServer, /shutdown\(\)\.finally\(\(\) => process\.exit\(1\)\)/);
+  assert.doesNotMatch(conversationServer, /fatal_unhandled_rejection[^\n]*(?:message|stack)/);
+});
+
+test('soak monitor is manual, metadata-only, loopback-bound and owner-private', () => {
+  assert.match(soakService, /Description=Run a %i-hour private Even Agent metadata-only soak monitor/);
+  assert.match(soakService, /After=even-agent\.service/);
+  assert.match(soakService, /ExecStart=.*soak-monitor\.js --duration-hours %i --interval-seconds 60/);
+  assert.match(soakService, /UMask=0077/);
+  assert.match(soakService, /NoNewPrivileges=true/);
+  assert.match(soakService, /ProtectSystem=strict/);
+  assert.match(soakService, /CapabilityBoundingSet=\s*$/m);
+  assert.match(soakService, /ReadWritePaths=\/var\/lib\/even-agent/);
+  assert.doesNotMatch(soakService, /EnvironmentFile=|G2_CLIENT_TOKEN|OPENAI_API_KEY|EMAIL_/);
+  assert.match(buildScript, /even-agent-soak@\.service/);
 });
 
 test('production health monitoring exposes only a minimal public check and keeps Calendar probing local', () => {

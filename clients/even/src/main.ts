@@ -150,7 +150,12 @@ function handleServerEvent(event: any) {
     if (event.type === 'answer.start') answerId = event.id;
     if (event.type === 'answer.cancelled' && event.id === answerId) { answerId = undefined; status = '已打断'; }
     if (event.type === 'answer.done' && event.id === answerId) answerId = undefined;
-    if (event.type === 'search.status' && event.id === answerId) status = event.status === 'searching' ? '正在查资料' : '整理回答中';
+    if (event.type === 'search.status' && event.id === answerId) {
+      status = event.status === 'searching' ? '正在查资料'
+        : event.status === 'quota_exhausted' || event.status === 'session_quota_exhausted' ? '联网额度已用完，仍可聊天'
+        : event.status === 'quota_unavailable' ? '无法核实联网额度，继续离线回答'
+        : '整理回答中';
+    }
     if (event.type === 'artifact.status' && event.id === answerId) status = event.status === 'sending' ? '正在提交邮件' : '正在生成文件';
     if (event.type === 'calendar.status' && event.id === answerId) status = event.status === 'saving' ? '正在保存日历' : event.status === 'querying' ? '正在查询日历' : '正在理解日历请求';
     if (event.type === 'task.status' && event.id === answerId) {
