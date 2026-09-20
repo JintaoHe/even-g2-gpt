@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { ConversationStore, ResumeCredentialError } from '../src/conversation-store.js';
+import { ConversationStore, DeviceCredentialError, ResumeCredentialError } from '../src/conversation-store.js';
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'even-session-credential-'));
@@ -112,5 +112,113 @@ test('terminal sessions cannot issue or rotate resume credentials', async () => 
     assert.throws(() => store.rotateResumeCredential({
       secret: issued.secret, clientId, sessionId, at: 121, expiresAt: 1_001,
     }), ResumeCredentialError);
+  } finally { await store.close(); }
+});
+
+test('device credential is client-scoped, opaque and stored only as a hash', async () => {
+  const { root, store, clientId } = await fixture();
+  try {
+    const issued = store.issueDeviceCredential({
+      clientId, createdAt: 200, expiresAt: 20_000, persistDeadlineAt: 500,
+    });
+    assert.match(issued.secret, /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
+    assert.equal(issued.clientId, clientId);
+    assert.equal(issued.persistDeadlineAt, 500);
+
+    const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
+    try {
+      const row = db.prepare('SELECT secret_hash,state,predecessor_id FROM device_credentials WHERE id=?')
+        .get(issued.id) as any;
+      assert.equal(row.state, 'pending');
+      assert.equal(row.predecessor_id, null);
+      assert.equal(row.secret_hash, createHash('sha256').update(issued.secret).digest('hex'));
+      assert.equal(JSON.stringify(db.prepare('SELECT * FROM device_credentials').all()).includes(issued.secret), false);
+    } finally { db.close(); }
+  } finally { await store.close(); }
+});
+
+test('persisted ACK makes the new device generation authoritative and revokes the predecessor', async () => {
+  const { store, clientId } = await fixture();
+  try {
+    const first = store.issueDeviceCredential({
+      clientId, createdAt: 200, expiresAt: 20_000, persistDeadlineAt: 500,
+    });
+    assert.equal(store.acknowledgeDeviceCredential({ id: first.id, clientId, at: 220 }), true);
+    const second = store.rotateDeviceCredential({
+      secret: first.secret, clientId, at: 300, expiresAt: 30_000, persistDeadlineAt: 600,
+    });
+    assert.equal(store.acknowledgeDeviceCredential({ id: second.id, clientId, at: 320 }), true);
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: first.secret, clientId, at: 321, expiresAt: 30_001, persistDeadlineAt: 601,
+    }), DeviceCredentialError);
+    const third = store.rotateDeviceCredential({
+      secret: second.secret, clientId, at: 330, expiresAt: 30_010, persistDeadlineAt: 630,
+    });
+    assert.notEqual(third.secret, second.secret);
+  } finally { await store.close(); }
+});
+
+test('presenting a pending device generation proves persistence when its ACK was lost', async () => {
+  const { store, clientId } = await fixture();
+  try {
+    const first = store.issueDeviceCredential({
+      clientId, createdAt: 200, expiresAt: 20_000, persistDeadlineAt: 500,
+    });
+    const second = store.rotateDeviceCredential({
+      secret: first.secret, clientId, at: 250, expiresAt: 20_050, persistDeadlineAt: 500,
+    });
+    const third = store.rotateDeviceCredential({
+      secret: second.secret, clientId, at: 300, expiresAt: 20_100, persistDeadlineAt: 600,
+    });
+    assert.notEqual(third.secret, second.secret);
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: first.secret, clientId, at: 301, expiresAt: 20_101, persistDeadlineAt: 601,
+    }), DeviceCredentialError);
+  } finally { await store.close(); }
+});
+
+test('unacknowledged overlap cannot be extended and the newest generation wins at the hard deadline', async () => {
+  const { store, clientId } = await fixture();
+  try {
+    const first = store.issueDeviceCredential({
+      clientId, createdAt: 200, expiresAt: 20_000, persistDeadlineAt: 500,
+    });
+    assert.equal(store.acknowledgeDeviceCredential({ id: first.id, clientId, at: 210 }), true);
+    const second = store.rotateDeviceCredential({
+      secret: first.secret, clientId, at: 250, expiresAt: 20_050, persistDeadlineAt: 500,
+    });
+    const replacement = store.rotateDeviceCredential({
+      secret: first.secret, clientId, at: 300, expiresAt: 20_100, persistDeadlineAt: 700,
+    });
+    assert.equal(replacement.persistDeadlineAt, 500);
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: second.secret, clientId, at: 400, expiresAt: 20_200, persistDeadlineAt: 700,
+    }), DeviceCredentialError);
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: first.secret, clientId, at: 500, expiresAt: 20_300, persistDeadlineAt: 800,
+    }), DeviceCredentialError);
+    const next = store.rotateDeviceCredential({
+      secret: replacement.secret, clientId, at: 500, expiresAt: 20_300, persistDeadlineAt: 800,
+    });
+    assert.notEqual(next.secret, replacement.secret);
+  } finally { await store.close(); }
+});
+
+test('device credentials reject wrong clients, excessive lifetimes and explicit revocation', async () => {
+  const { store, clientId } = await fixture();
+  try {
+    const issued = store.issueDeviceCredential({
+      clientId, createdAt: 200, expiresAt: 20_000, persistDeadlineAt: 500,
+    });
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: issued.secret, clientId: randomUUID(), at: 250, expiresAt: 20_050, persistDeadlineAt: 550,
+    }), DeviceCredentialError);
+    assert.throws(() => store.issueDeviceCredential({
+      clientId, createdAt: 200, expiresAt: 400 * 24 * 60 * 60_000, persistDeadlineAt: 500,
+    }), DeviceCredentialError);
+    assert.equal(store.revokeDeviceCredentials(clientId, 260), 1);
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: issued.secret, clientId, at: 270, expiresAt: 20_070, persistDeadlineAt: 570,
+    }), DeviceCredentialError);
   } finally { await store.close(); }
 });

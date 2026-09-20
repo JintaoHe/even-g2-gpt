@@ -5,6 +5,8 @@ import { SessionCredentialStore, sessionCredentialStorageKeys } from '../src/ses
 const clientId = '11111111-1111-4111-8111-111111111111';
 const sessionId = '22222222-2222-4222-8222-222222222222';
 const credential = { clientId, sessionId, secret: 'r'.repeat(32), expiresAt: 1_000 };
+const deviceCredential = { clientId, id: '33333333-3333-4333-8333-333333333333',
+  secret: 'd'.repeat(32), expiresAt: 2_000 };
 
 function hostStorage(initial: Record<string, string> = {}, acceptWrites = true) {
   const data = new Map(Object.entries(initial));
@@ -38,6 +40,27 @@ test('persists only stable identity and scoped credential in native host storage
   const serialized = JSON.stringify([...host.data.entries()]);
   assert.doesNotMatch(serialized, /access.?token|openai|google|soniox/i);
   assert.deepEqual(store.load(), credential);
+});
+
+test('persists a revocable device credential separately and never accepts a master token field', async () => {
+  const host = hostStorage();
+  const store = await SessionCredentialStore.open(host, undefined, () => 100, () => clientId);
+  assert.equal(await store.saveDevice(deviceCredential), true);
+  await store.whenSettled();
+  assert.deepEqual(store.loadDevice(), deviceCredential);
+  assert.equal(host.data.get(sessionCredentialStorageKeys.device), JSON.stringify(deviceCredential));
+  assert.throws(() => store.saveDevice({ ...deviceCredential, token: 'must-not-persist' } as any), /invalid/i);
+  assert.equal(JSON.stringify([...host.data.entries()]).includes('must-not-persist'), false);
+});
+
+test('device credential host writes fail closed and false never counts as persistence', async () => {
+  const host = hostStorage({}, false);
+  const store = await SessionCredentialStore.open(host, undefined, () => 100, () => clientId);
+  assert.equal(await store.saveDevice(deviceCredential), false);
+  assert.equal(store.persistenceHealthy, false);
+  assert.deepEqual(store.loadDevice(), deviceCredential, 'same-process memory may continue during a host write failure');
+  const reopened = await SessionCredentialStore.open(hostStorage(), undefined, () => 100, () => clientId);
+  assert.equal(reopened.loadDevice(), undefined, 'failed native persistence must not survive a cold start');
 });
 
 test('migrates a valid legacy browser credential only after native writes succeed', async () => {

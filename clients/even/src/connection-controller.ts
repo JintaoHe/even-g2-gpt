@@ -1,4 +1,4 @@
-import { SessionCredentialStore, type ResumeSessionCredential } from './session-credential.ts';
+import { SessionCredentialStore, type DeviceCredential, type ResumeSessionCredential } from './session-credential.ts';
 
 export type ClientConnectionState = 'disconnected' | 'connecting' | 'connected' | 'recovering';
 export type ConnectionStatus = {
@@ -58,6 +58,7 @@ export class ConnectionController {
   private recoveryFailed = false;
   private lastSeenSequence = 0;
   private resumeAttempted = false;
+  private deviceAttempted = false;
   private statusValue: ConnectionStatus = { state: 'disconnected' };
 
   constructor(options: ControllerOptions) {
@@ -89,7 +90,7 @@ export class ConnectionController {
   }
 
   resumeIfAvailable() {
-    if (this.disposed || !this.options.credentials.load()) return false;
+    if (this.disposed || (!this.options.credentials.load() && !this.options.credentials.loadDevice())) return false;
     this.cancelRetry();
     return this.open(true);
   }
@@ -102,7 +103,8 @@ export class ConnectionController {
   private open(recovering: boolean) {
     if (this.disposed) return false;
     const credential = this.forceFresh ? undefined : this.options.credentials.load();
-    if (!credential && !this.accessToken) {
+    const deviceCredential = this.options.credentials.loadDevice();
+    if (!credential && !deviceCredential && !this.accessToken) {
       this.update({ state: 'disconnected', reason: this.forceFresh ? 'credential_expired' : 'offline' });
       return false;
     }
@@ -110,18 +112,21 @@ export class ConnectionController {
     const ws = this.options.socket(this.options.url());
     this.socketValue = ws;
     this.resumeAttempted = !!credential;
+    this.deviceAttempted = !credential && !!deviceCredential;
     this.update({ state: recovering || this.attempt > 0 ? 'recovering' : 'connecting',
       reason: recovering || this.attempt > 0 ? 'reconnecting' : undefined, attempt: this.attempt });
     ws.onopen = () => {
       if (!this.current(ws, generation)) return ws.close();
       const hello: Record<string, unknown> = {
         type: 'hello', protocol_version: 2, client_id: credential?.clientId ?? this.options.credentials.clientId(),
+        credential_storage: 'even_host_v1',
       };
       if (credential) {
         hello.resume_session_id = credential.sessionId;
         hello.resume_credential = credential.secret;
         hello.last_seen_sequence = this.lastSeenSequence;
-      } else hello.token = this.accessToken;
+      } else if (deviceCredential) hello.device_credential = deviceCredential.secret;
+      else hello.token = this.accessToken;
       ws.send(JSON.stringify(hello));
     };
     ws.onmessage = event => {
@@ -129,11 +134,16 @@ export class ConnectionController {
       let message: any;
       try { message = JSON.parse(event.data); } catch { return; }
       if (!message || typeof message.type !== 'string') return;
-      if (message.type === 'ready') this.ready(message);
+      if (message.type === 'ready') this.ready(message, ws, generation);
       else if (message.type === 'resume.credential') this.replaceCredential(message);
       else if (message.type === 'message.ack' || message.type === 'answer.committed') this.observeSequence(message.sequence);
       else if (message.type === 'error' && message.code === 'SESSION_UNAVAILABLE') {
         void this.options.credentials.clearSession();
+        this.forceFresh = true;
+        this.recoveryFailed = true;
+        this.update({ state: 'recovering', reason: 'credential_expired', attempt: this.attempt });
+      } else if (message.type === 'error' && message.code === 'DEVICE_CREDENTIAL_INVALID') {
+        void this.options.credentials.clearDevice();
         this.forceFresh = true;
         this.recoveryFailed = true;
         this.update({ state: 'recovering', reason: 'credential_expired', attempt: this.attempt });
@@ -160,7 +170,7 @@ export class ConnectionController {
     return this.socketValue === socket && this.generation === generation;
   }
 
-  private ready(message: any) {
+  private ready(message: any, socket: SocketLike, generation: number) {
     if (message.protocol_version !== 2 || typeof message.connection_id !== 'string'
       || typeof message.session_id !== 'string' || typeof message.resume_credential !== 'string'
       || !Number.isSafeInteger(message.resume_expires_at)) return;
@@ -168,12 +178,32 @@ export class ConnectionController {
     const credential: ResumeSessionCredential = { clientId, sessionId: message.session_id,
       secret: message.resume_credential, expiresAt: message.resume_expires_at };
     this.persistCredential(credential);
+    if (message.device_credential_id !== undefined || message.device_credential !== undefined
+      || message.device_expires_at !== undefined || message.device_persist_deadline_at !== undefined) {
+      if (typeof message.device_credential_id !== 'string' || typeof message.device_credential !== 'string'
+        || !Number.isSafeInteger(message.device_expires_at) || !Number.isSafeInteger(message.device_persist_deadline_at)) return;
+      const device: DeviceCredential = { clientId, id: message.device_credential_id,
+        secret: message.device_credential, expiresAt: message.device_expires_at };
+      try {
+        void this.options.credentials.saveDevice(device).then(saved => {
+          if (!this.current(socket, generation)) return;
+          if (saved && socket.readyState === OPEN) socket.send(JSON.stringify({
+            type: 'credential.persisted', credential_id: device.id,
+          }));
+          else if (!saved) this.options.onEvent({ type: 'notice', text: '设备恢复凭证未保存；冷启动后可能需要重新输入应用 token' });
+        });
+      } catch {
+        void this.options.credentials.clearDevice();
+      }
+    }
     this.forceFresh = false;
     this.attempt = 0;
     this.cancelRetry();
     this.observeSequence(message.latest_sequence);
-    const reason = message.resumed === true ? 'resumed' : this.recoveryFailed || this.resumeAttempted ? 'new_session' : undefined;
+    const reason = message.resumed === true ? 'resumed'
+      : this.recoveryFailed || this.resumeAttempted || this.deviceAttempted ? 'new_session' : undefined;
     this.recoveryFailed = false;
+    this.deviceAttempted = false;
     this.update({ state: 'connected', reason, connectionId: message.connection_id, sessionId: message.session_id });
   }
 
@@ -248,7 +278,7 @@ export class ConnectionController {
   }
 
   forgetResumeCredential() {
-    if (!this.connected || !this.accessToken) return false;
+    if (!this.connected || (!this.accessToken && !this.options.credentials.loadDevice())) return false;
     this.forceFresh = true;
     this.recoveryFailed = true;
     void this.options.credentials.clearSession();

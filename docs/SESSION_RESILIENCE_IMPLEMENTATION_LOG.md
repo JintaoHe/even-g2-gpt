@@ -309,3 +309,29 @@ Recovery hardening PR 2 本地自动化与安全 gate：**PASS**。尚未部署 
 ### Gate
 
 Recovery hardening PR 3 本地自动化、生产构建与安全 gate：**PASS**。真实 iOS jetsam 白屏、host 是否会自动重载 plugin，以及真机锁屏/内存压力仍只能留到 Physical Acceptance；本 PR 没有部署 Linux、没有构建 `.ehpk`，也没有提前实现 device credential、persisted ACK、同 client lease takeover、foreground lifecycle 或 durable drafts。
+
+## 2026-09-20 — Recovery hardening Rev 6 · PR 4 working tree
+
+### 实现
+
+- conversation SQLite schema 升至 v4，新增独立 `device_credentials` 表。设备 secret 始终只以 SHA-256 hash 保存；记录绑定一个随机 `client_id`，包含到期、前代、persist deadline、ACK／撤销状态，不包含 master token、provider key 或 session 内容。
+- protocol v2 增加第三种互斥 hello：`device_credential`。它只能创建新的单用户会话，不能恢复任意 session，也不扩大 Calendar、Email、文件或 provider 权限。未声明 `even_host_v1` 原生存储能力的旧／browser client 不会收到设备凭证。
+- master bootstrap、已认证 session resume 或 device auth 都会返回 pending 新代；resume 重新签发覆盖“session secret 已落盘但首次 device secret 尚未落盘就被杀”的窄窗口。客户端必须等待 `bridge.setLocalStorage(...) === true` 才发送 `credential.persisted`；false、异常、字段越界或错误 ACK 一律 fail closed。
+- ACK 或 pending secret 首次成功使用会使新代成为权威并撤销前代。未收到 ACK 时新旧两代只在固定 5 分钟窗口内并存；重放旧代不能延长窗口，截止时最新 pending 代胜出。设备凭证使用时轮换，默认 30 天未使用到期，并支持按 client 整体撤销。
+- 冷启动顺序为：有效 session resume credential → scoped device credential → 当前页面内存中的 master token。超过 15 分钟恢复窗口时，客户端清除失效 session credential，并用设备凭证建立新 session，不把 master token 写入 SDK/browser storage。
+- `SessionRegistry.create()` 的授权回调放在 lease／ID 检查之后、runtime 创建之前；因此失败的 device auth 或已有 active lease 不会创建空 session 或提前消耗 credential。lease takeover、foreground lifecycle 和 audio `requires_reopen` 仍留给 PR 5。
+
+### 自动化结果
+
+1. Device store／protocol／registry targeted tests：`26 passed / 0 failed`。
+2. Device WebSocket integration：覆盖 master bootstrap、persisted ACK、无 master token 新建 session、轮换和旧代 replay 拒绝；完整 reconnect suite `13 passed / 0 failed`。
+3. Root full regression：`358 passed / 0 failed / 2 Windows platform skips`，共 360 tests。
+4. Even client full regression：`63 passed / 0 failed`；覆盖 host write 为 `false` 时绝不 ACK。
+5. Root 与 Even client TypeScript：通过。
+6. Server-only build：通过；发布目录不含 browser lab、SDK、simulator、tests、credentials 或 local data。
+7. Even client production build：通过；release verifier 检查 2 个文件，未发现 debug fixture、source map、private key 或明显 credential。
+8. Public audit：277 个 source/document files 未发现禁止路径或 credential pattern；`git diff --check` 通过。
+
+### Gate
+
+Recovery hardening PR 4 的本地自动化、生产构建、公开仓库扫描与最终 diff review：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建 `.ehpk`，也没有提前实现同 client lease takeover、`FOREGROUND_ENTER_EVENT`、audio `requires_reopen` 或 durable drafts。

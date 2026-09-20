@@ -16,17 +16,17 @@ test('conversation store creates a private WAL database with idempotent migratio
   let store = await ConversationStore.create(root);
   const health = store.health();
   assert.deepEqual(health, {
-    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 3,
+    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 4,
   });
   await store.close();
 
   // Simulate a production database created by PR1 before summary jobs existed.
   const legacy = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
-  legacy.exec('DROP TABLE summary_jobs; DROP TABLE legacy_session_imports; DELETE FROM schema_migrations WHERE version>=2;');
+  legacy.exec('DROP TABLE summary_jobs; DROP TABLE legacy_session_imports; DROP TABLE device_credentials; DELETE FROM schema_migrations WHERE version>=2;');
   legacy.close();
 
   store = await ConversationStore.create(root);
-  assert.equal(store.health().schemaVersion, 3);
+  assert.equal(store.health().schemaVersion, 4);
   await store.close();
 
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
@@ -34,10 +34,11 @@ test('conversation store creates a private WAL database with idempotent migratio
     assert.deepEqual((db.prepare('SELECT version,name FROM schema_migrations').all() as any[]).map(row => ({ ...row })),
       [{ version: 1, name: 'conversation-foundation' },
         { version: 2, name: 'durable-session-summary-jobs' },
-        { version: 3, name: 'legacy-session-import-ledger' }]);
+        { version: 3, name: 'legacy-session-import-ledger' },
+        { version: 4, name: 'scoped-device-credentials' }]);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(row => row.name);
     for (const table of ['sessions', 'clients', 'resume_credentials', 'topics', 'turns', 'messages', 'session_summaries',
-      'summary_jobs', 'legacy_session_imports']) {
+      'summary_jobs', 'legacy_session_imports', 'device_credentials']) {
       assert.ok(tables.includes(table), `missing table ${table}`);
     }
   } finally { db.close(); }

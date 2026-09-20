@@ -76,7 +76,7 @@
 - 服务器只保存 hash，即使 SQLite 被读取也没有明文 credential；
 - 客户端可通过 Even SDK local storage 保存这张临时凭证，而不是保存主 token。
 
-这样做对单人项目仍有价值：既避免每次短暂掉线都重新输入主 token，也把凭证被读取后的影响限制在一个很短的恢复窗口内。第一版不使用长期 device credential；超过 15 分钟且原 WebView 已消失时，仍需要主 token 重新认证。是否以后增加长期设备注册属于新的安全决策，不在本阶段自动扩大范围。
+这样做对单人项目仍有价值：既避免每次短暂掉线都重新输入主 token，也把凭证被读取后的影响限制在一个很短的恢复窗口内。此处描述的是最初的短期恢复设计；后续已由第 12 节获批的 Recovery hardening Rev 6 扩展为受限、可吊销且轮换的 device credential，主 token 仍不得持久化。
 
 ## 5. 目标模块边界
 
@@ -714,8 +714,8 @@ npm run audit:public
 
 1. **[x] Recovery Safety：** 启动前统一校验 migration-sensitive 配置；测试控件默认关闭并拆分 read/write；storage warning 真正触发 health 告警；Calendar-enabled backup 完整性、current-code restore open、pre-update 数据快照与失败回滚；同时提前加入 20 秒 ping + 10 秒 pong deadline 的服务端 heartbeat。PR #34 已于 2026-09-20 squash merge 到 `main`（`0ef947a`）。
 2. **[x] Even Host Storage：** 通过 `bridge.getLocalStorage`／`setLocalStorage` 建立异步 host-side adapter，把现有短期 resume credential 从 browser storage 安全迁走；主 token 永不持久化。PR #35 已于 2026-09-20 squash merge 到 `main`（`4f0c5ad`）。
-3. **[x] Recovery Test Harness：** 在任何生命周期重构之前提供 simulator forced cold-start／kill 控件和 raw half-open integration test，使后续每个 PR 都能重放真实故障。本地自动化、生产构建与安全 gate 已通过，等待独立 PR review／merge。
-4. **Scoped Device Credential：** 新表、第三种 hello、可吊销 device scope、persisted ACK，以及有明确到期上界的双代 credential 窗口；`setLocalStorage` 只有返回 `true` 才可 ACK。
+3. **[x] Recovery Test Harness：** 在任何生命周期重构之前提供 simulator forced cold-start／kill 控件和 raw half-open integration test，使后续每个 PR 都能重放真实故障。PR #37 已于 2026-09-20 squash merge 到 `main`（`40be181`）。
+4. **Scoped Device Credential（working tree）：** 新表、第三种 hello、可吊销 device scope、persisted ACK，以及有明确到期上界的双代 credential 窗口；`setLocalStorage` 只有返回 `true` 才可 ACK。设备凭证绑定单一随机 `client_id`，服务端只存 hash；成功使用时轮换，30 天未使用到期。新旧两代最多并存 5 分钟；ACK 或新 secret 首次成功使用会立即撤销旧代，ACK 丢失时窗口结束自动以最新代为准，旧代不能无限续期。
 5. **Lifecycle and Connection Liveness：** `FOREGROUND_ENTER_EVENT` reconnect、非破坏性 pagehide、认证前后容量边界、同一 `client_id` 持有效 credential 抢占旧 lease、connection-owned capture hook、audio `requires_reopen`。registry 现有 late-close guard 保留，不重复实现。
 6. **Durable Draft and Side-effect Recovery：** 持久化可恢复草稿和 recovery manifest；Calendar／Email 的 `sending`／`unknown` 必须查服务端最终状态，不能盲目重放；冷启动后重新 preview、重新确认，旧 approval 失效。Calendar operation 的 id／期望短语／expiry／state 继续保存在 ledger；用户说出口的授权和“已经同意”事实不得持久化。ordinal candidates、route/location context 维持 ephemeral，冷启动后需要重新查询。
 7. **Physical Acceptance：** 真机重复 cold start、锁屏、network switching、memory pressure、audio wedge、15 分钟窗口和 Calendar／Email duplicate-protection 验收。

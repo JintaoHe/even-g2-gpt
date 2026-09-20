@@ -6,8 +6,10 @@ import { DatabaseSync } from 'node:sqlite';
 import type { ContextSummary } from './context-builder.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
+const MAX_DEVICE_CREDENTIAL_MS = 366 * 24 * 60 * 60_000;
+const MAX_DEVICE_ROTATION_WINDOW_MS = 10 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type ConversationStoreHealth = {
@@ -146,6 +148,15 @@ export type SummaryJobRecord = {
   errorCode?: string;
 };
 
+export type DeviceCredential = {
+  id: string;
+  clientId: string;
+  secret: string;
+  createdAt: number;
+  expiresAt: number;
+  persistDeadlineAt: number;
+};
+
 export type ConversationRetentionReport = {
   enabled: boolean;
   retentionDays: number;
@@ -218,6 +229,11 @@ export class ConversationStoreConflictError extends Error {
 export class ResumeCredentialError extends Error {
   readonly code = 'RESUME_CREDENTIAL_INVALID';
   constructor() { super('Resume credential is invalid or expired'); this.name = 'ResumeCredentialError'; }
+}
+
+export class DeviceCredentialError extends Error {
+  readonly code = 'DEVICE_CREDENTIAL_INVALID';
+  constructor() { super('Device credential is invalid, expired or revoked'); this.name = 'DeviceCredentialError'; }
 }
 
 function processIsAlive(pid: number) {
@@ -494,6 +510,26 @@ export class ConversationStore {
         `);
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (3,?,?)')
           .run('legacy-session-import-ledger', Date.now());
+      }
+      if (latest < 4) {
+        db.exec(`
+          CREATE TABLE device_credentials (
+            id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            secret_hash TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL CHECK(state IN ('active','pending','revoked')),
+            predecessor_id TEXT REFERENCES device_credentials(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            persist_deadline_at INTEGER NOT NULL,
+            persisted_at INTEGER,
+            revoked_at INTEGER
+          ) STRICT;
+          CREATE INDEX device_credentials_client_idx
+            ON device_credentials(client_id,state,expires_at,persist_deadline_at);
+        `);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (4,?,?)')
+          .run('scoped-device-credentials', Date.now());
       }
     });
   }
@@ -848,6 +884,120 @@ export class ConversationStore {
       WHERE session_id=? AND revoked_at IS NULL`).run(at, sessionId).changes);
   }
 
+  issueDeviceCredential(input: {
+    clientId: string; createdAt: number; expiresAt: number; persistDeadlineAt: number;
+  }): DeviceCredential {
+    this.ensureOpen();
+    this.validateDeviceCredentialTimes(input.createdAt, input.expiresAt, input.persistDeadlineAt);
+    if (!validUuid(input.clientId)) throw new DeviceCredentialError();
+    const generated = newCredentialSecret();
+    return transaction(this.db, () => {
+      this.settleDeviceCredentialRotations(input.createdAt);
+      const client = this.db.prepare('SELECT 1 FROM clients WHERE id=?').get(input.clientId);
+      if (!client) throw new DeviceCredentialError();
+      const predecessor = this.db.prepare(`SELECT id FROM device_credentials
+        WHERE client_id=? AND state='active' AND revoked_at IS NULL AND expires_at>?
+        ORDER BY persisted_at DESC,created_at DESC LIMIT 1`).get(input.clientId, input.createdAt) as { id: string } | undefined;
+      this.db.prepare(`INSERT INTO device_credentials(id,client_id,secret_hash,state,predecessor_id,
+        created_at,expires_at,persist_deadline_at) VALUES (?,?,?,'pending',?,?,?,?)`)
+        .run(generated.id, input.clientId, credentialHash(generated.secret), predecessor?.id ?? null,
+          input.createdAt, input.expiresAt, input.persistDeadlineAt);
+      return { ...generated, clientId: input.clientId, createdAt: input.createdAt,
+        expiresAt: input.expiresAt, persistDeadlineAt: input.persistDeadlineAt };
+    });
+  }
+
+  rotateDeviceCredential(input: {
+    secret: string; clientId: string; at: number; expiresAt: number; persistDeadlineAt: number;
+  }): DeviceCredential {
+    this.ensureOpen();
+    this.validateDeviceCredentialTimes(input.at, input.expiresAt, input.persistDeadlineAt);
+    if (!validUuid(input.clientId)) throw new DeviceCredentialError();
+    const match = /^([0-9a-f-]{36})\.([A-Za-z0-9_-]{43})$/.exec(input.secret);
+    if (!match || !validUuid(match[1])) throw new DeviceCredentialError();
+    const generated = newCredentialSecret();
+    return transaction(this.db, () => {
+      this.settleDeviceCredentialRotations(input.at);
+      let row = this.db.prepare('SELECT * FROM device_credentials WHERE id=?').get(match[1]) as any;
+      if (!row || row.client_id !== input.clientId || row.revoked_at !== null || row.expires_at <= input.at
+        || !['active', 'pending'].includes(row.state)
+        || !safeHashEqual(row.secret_hash, credentialHash(input.secret))) throw new DeviceCredentialError();
+
+      // Successfully presenting a pending secret proves that the client stored
+      // it even when its ACK was lost. Make it authoritative before rotating.
+      if (row.state === 'pending') {
+        this.promoteDeviceCredential(row.id, input.clientId, input.at);
+        row = this.db.prepare('SELECT * FROM device_credentials WHERE id=?').get(row.id) as any;
+      }
+
+      const existing = this.db.prepare(`SELECT MIN(persist_deadline_at) AS deadline FROM device_credentials
+        WHERE client_id=? AND predecessor_id=? AND state='pending' AND revoked_at IS NULL`)
+        .get(input.clientId, row.id) as { deadline: number | null };
+      const hardDeadline = existing.deadline === null
+        ? input.persistDeadlineAt : Math.min(existing.deadline, input.persistDeadlineAt);
+      if (hardDeadline <= input.at) throw new DeviceCredentialError();
+      // A replay of the predecessor gets a fresh successor but can never
+      // extend the original overlap deadline.
+      this.db.prepare(`UPDATE device_credentials SET state='revoked',revoked_at=?
+        WHERE client_id=? AND predecessor_id=? AND state='pending' AND revoked_at IS NULL`)
+        .run(input.at, input.clientId, row.id);
+      this.db.prepare(`INSERT INTO device_credentials(id,client_id,secret_hash,state,predecessor_id,
+        created_at,expires_at,persist_deadline_at) VALUES (?,?,?,'pending',?,?,?,?)`)
+        .run(generated.id, input.clientId, credentialHash(generated.secret), row.id,
+          input.at, input.expiresAt, hardDeadline);
+      this.db.prepare('UPDATE clients SET last_seen_at=MAX(last_seen_at,?) WHERE id=?').run(input.at, input.clientId);
+      return { ...generated, clientId: input.clientId, createdAt: input.at,
+        expiresAt: input.expiresAt, persistDeadlineAt: hardDeadline };
+    });
+  }
+
+  acknowledgeDeviceCredential(input: { id: string; clientId: string; at: number }): boolean {
+    this.ensureOpen();
+    if (!validUuid(input.id) || !validUuid(input.clientId) || !Number.isSafeInteger(input.at) || input.at < 0) {
+      throw new DeviceCredentialError();
+    }
+    return transaction(this.db, () => {
+      this.settleDeviceCredentialRotations(input.at);
+      const row = this.db.prepare('SELECT * FROM device_credentials WHERE id=?').get(input.id) as any;
+      if (!row || row.client_id !== input.clientId || row.revoked_at !== null || row.expires_at <= input.at) {
+        throw new DeviceCredentialError();
+      }
+      if (row.state === 'active' && row.persisted_at !== null) return true;
+      if (row.state !== 'pending' || row.persist_deadline_at < input.at) throw new DeviceCredentialError();
+      this.promoteDeviceCredential(row.id, input.clientId, input.at);
+      return true;
+    });
+  }
+
+  revokeDeviceCredentials(clientId: string, at: number): number {
+    this.ensureOpen();
+    if (!validUuid(clientId) || !Number.isSafeInteger(at) || at < 0) throw new DeviceCredentialError();
+    return Number(this.db.prepare(`UPDATE device_credentials SET state='revoked',revoked_at=?
+      WHERE client_id=? AND revoked_at IS NULL`).run(at, clientId).changes);
+  }
+
+  private promoteDeviceCredential(id: string, clientId: string, at: number) {
+    const promoted = this.db.prepare(`UPDATE device_credentials SET state='active',persisted_at=COALESCE(persisted_at,?)
+      WHERE id=? AND client_id=? AND state IN ('pending','active') AND revoked_at IS NULL AND expires_at>?`)
+      .run(at, id, clientId, at);
+    if (promoted.changes !== 1) throw new DeviceCredentialError();
+    this.db.prepare(`UPDATE device_credentials SET state='revoked',revoked_at=?
+      WHERE client_id=? AND id<>? AND revoked_at IS NULL`).run(at, clientId, id);
+  }
+
+  private settleDeviceCredentialRotations(at: number) {
+    const clients = this.db.prepare(`SELECT DISTINCT client_id FROM device_credentials
+      WHERE state='pending' AND revoked_at IS NULL AND persist_deadline_at<=?`).all(at) as Array<{ client_id: string }>;
+    for (const client of clients) {
+      const winner = this.db.prepare(`SELECT id FROM device_credentials
+        WHERE client_id=? AND state='pending' AND revoked_at IS NULL AND persist_deadline_at<=?
+        ORDER BY created_at DESC,id DESC LIMIT 1`).get(client.client_id, at) as { id: string } | undefined;
+      if (winner) this.promoteDeviceCredential(winner.id, client.client_id, at);
+    }
+    this.db.prepare(`UPDATE device_credentials SET state='revoked',revoked_at=COALESCE(revoked_at,?)
+      WHERE expires_at<=? AND revoked_at IS NULL`).run(at, at);
+  }
+
   markSessionAttached(sessionId: string, at: number): SessionRecord {
     return this.transitionLiveSession(sessionId, 'active', at);
   }
@@ -890,6 +1040,15 @@ export class ConversationStore {
   private validateCredentialTimes(createdAt: number, expiresAt: number) {
     if (!Number.isSafeInteger(createdAt) || createdAt < 0 || !Number.isSafeInteger(expiresAt)
       || expiresAt <= createdAt || expiresAt - createdAt > MAX_RESUME_CREDENTIAL_MS) throw new ResumeCredentialError();
+  }
+
+  private validateDeviceCredentialTimes(createdAt: number, expiresAt: number, persistDeadlineAt: number) {
+    if (!Number.isSafeInteger(createdAt) || createdAt < 0 || !Number.isSafeInteger(expiresAt)
+      || expiresAt <= createdAt || expiresAt - createdAt > MAX_DEVICE_CREDENTIAL_MS
+      || !Number.isSafeInteger(persistDeadlineAt) || persistDeadlineAt <= createdAt
+      || persistDeadlineAt - createdAt > MAX_DEVICE_ROTATION_WINDOW_MS || persistDeadlineAt > expiresAt) {
+      throw new DeviceCredentialError();
+    }
   }
 
   commitUserTurn(input: CommitUserTurn): CommitAcknowledgement {

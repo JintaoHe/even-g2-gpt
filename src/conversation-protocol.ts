@@ -55,7 +55,14 @@ export type HelloMessageV2 = {
   token?: string;
   resume_session_id?: string;
   resume_credential?: string;
+  device_credential?: string;
+  credential_storage?: 'even_host_v1';
   last_seen_sequence?: number;
+};
+
+export type CredentialPersistedMessageV2 = {
+  type: 'credential.persisted';
+  credential_id: string;
 };
 
 export type TextSubmitMessageV2 = {
@@ -72,7 +79,7 @@ export type LocalTestControlType = 'test.session.expire' | 'test.storage.inspect
 export type LocalTestControlMessageV2 = { type: LocalTestControlType; command_id: string };
 
 export type CoreClientMessageV2 = HelloMessageV2 | TextSubmitMessageV2 | CommandMessageV2
-  | ExitConfirmMessageV2 | LocalTestControlMessageV2;
+  | ExitConfirmMessageV2 | CredentialPersistedMessageV2 | LocalTestControlMessageV2;
 
 export type SnapshotMessageV2 = {
   id: string;
@@ -101,6 +108,10 @@ export type ReadyEventV2 = {
   resume_window_minutes: number;
   resume_credential: string;
   resume_expires_at: number;
+  device_credential_id?: string;
+  device_credential?: string;
+  device_expires_at?: number;
+  device_persist_deadline_at?: number;
   snapshot: ConversationSnapshotV2;
 };
 
@@ -162,6 +173,7 @@ export const CLIENT_MESSAGE_POLICY = {
   'answer.retry': { persistence: 'session-state', idempotency: 'command_id', replay: 'never-replay-automatically' },
   'exit.request': { persistence: 'session-state', idempotency: 'command_id', replay: 'safe-state-command' },
   'exit.confirm': { persistence: 'session-state', idempotency: 'command_id', replay: 'safe-state-command' },
+  'credential.persisted': { persistence: 'none', idempotency: 'credential', replay: 'authenticate-once' },
   'test.session.expire': {
     persistence: 'none', idempotency: 'command_id', replay: 'development-only', production: false,
   },
@@ -221,24 +233,40 @@ export function parseCoreClientMessage(input: unknown, options: ParseOptions = {
   if (typeof value.type !== 'string') invalid();
 
   if (value.type === 'hello') {
-    exactKeys(value, ['type', 'protocol_version', 'client_id', 'token', 'resume_session_id', 'resume_credential', 'last_seen_sequence']);
+    exactKeys(value, ['type', 'protocol_version', 'client_id', 'token', 'resume_session_id', 'resume_credential',
+      'device_credential', 'credential_storage', 'last_seen_sequence']);
     if (value.protocol_version !== CONVERSATION_PROTOCOL_VERSION) invalid();
     const tokenPresent = value.token !== undefined, resumePresent = value.resume_credential !== undefined;
-    if (tokenPresent === resumePresent) invalid();
+    const devicePresent = value.device_credential !== undefined;
+    if (Number(tokenPresent) + Number(resumePresent) + Number(devicePresent) !== 1) invalid();
     const result: HelloMessageV2 = {
       type: 'hello', protocol_version: CONVERSATION_PROTOCOL_VERSION, client_id: uuid(value.client_id),
     };
+    if (value.credential_storage !== undefined) {
+      if (value.credential_storage !== 'even_host_v1') invalid();
+      result.credential_storage = value.credential_storage;
+    }
     if (tokenPresent) result.token = credential(value.token);
     if (value.resume_session_id !== undefined) result.resume_session_id = uuid(value.resume_session_id);
     if (resumePresent) {
       if (!result.resume_session_id) invalid();
       result.resume_credential = credential(value.resume_credential);
     }
+    if (devicePresent) {
+      if (result.resume_session_id || value.last_seen_sequence !== undefined
+        || value.credential_storage !== 'even_host_v1') invalid();
+      result.device_credential = credential(value.device_credential);
+    }
     if (value.last_seen_sequence !== undefined) {
       if (!result.resume_session_id) invalid();
       result.last_seen_sequence = sequence(value.last_seen_sequence);
     }
     return result;
+  }
+
+  if (value.type === 'credential.persisted') {
+    exactKeys(value, ['type', 'credential_id']);
+    return { type: 'credential.persisted', credential_id: uuid(value.credential_id) };
   }
 
   if (value.type === 'text.submit') {

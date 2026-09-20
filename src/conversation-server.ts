@@ -30,7 +30,7 @@ import { createEnvironmentProvider, type EnvironmentProvider } from './environme
 import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type PlanningEvidenceSelector } from './planning-evidence-dialogue.js';
 import { CostLedger } from './cost-ledger.js';
 import { createMeteredOpenAIFetch } from './metered-openai.js';
-import { ConversationStore, ResumeCredentialError } from './conversation-store.js';
+import { ConversationStore, DeviceCredentialError, ResumeCredentialError } from './conversation-store.js';
 import { runConversationMaintenance } from './conversation-maintenance.js';
 import { readConversationStartupConfig } from './conversation-startup-config.js';
 import { StoreConversationPersistence } from './conversation-persistence.js';
@@ -59,6 +59,9 @@ export function createConversationServer(options: {
   resumeWindowMs?: number;
   /** Test override. Production refreshes at two-thirds of the resume window. */
   resumeCredentialRefreshMs?: number;
+  /** Test overrides. Production device credentials rotate on use and expire after 30 idle days. */
+  deviceCredentialTtlMs?: number;
+  deviceCredentialPersistWindowMs?: number;
   ownerScope?: string;
   /** Fixed, non-arbitrary simulator controls. Never valid with a public host. */
   localTestControls?: { read: boolean; write: boolean };
@@ -221,6 +224,13 @@ export function createConversationServer(options: {
     ?? Math.max(60_000, Math.floor(resumeWindowMs * 2 / 3));
   if (!Number.isSafeInteger(resumeCredentialRefreshMs) || resumeCredentialRefreshMs < 10
     || resumeCredentialRefreshMs >= resumeCredentialTtlMs) throw new Error('Invalid resume credential refresh interval');
+  const deviceCredentialTtlMs = options.deviceCredentialTtlMs ?? 30 * 24 * 60 * 60_000;
+  const deviceCredentialPersistWindowMs = options.deviceCredentialPersistWindowMs ?? 5 * 60_000;
+  if (!Number.isSafeInteger(deviceCredentialTtlMs) || deviceCredentialTtlMs < 1_000
+    || deviceCredentialTtlMs > 366 * 24 * 60 * 60_000
+    || !Number.isSafeInteger(deviceCredentialPersistWindowMs) || deviceCredentialPersistWindowMs < 10
+    || deviceCredentialPersistWindowMs > 10 * 60_000
+    || deviceCredentialPersistWindowMs >= deviceCredentialTtlMs) throw new Error('Invalid device credential lifetime');
   const store = options.conversationStore;
   const buildRuntime = async (id: string, hydrate = false): Promise<ServerSessionRuntime> => {
     let sink: ((event: Event) => void) | undefined;
@@ -384,7 +394,9 @@ export function createConversationServer(options: {
     const remote = request.socket.remoteAddress ?? '';
     const localTestConnection = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote);
     let expireOnClose = false, credentialRefresh: NodeJS.Timeout | undefined;
+    let pendingDeviceCredentialId: string | undefined;
     let session: ServerSessionRuntime | undefined;
+    let authenticatedClientId: string | undefined;
     let current: Transcriber | undefined, lastActivity = Date.now(), totalBytes = 0, forced = false, segmentId = 0;
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
@@ -475,11 +487,29 @@ export function createConversationServer(options: {
       const clientId = protocolV2 ? String(msg.client_id ?? '') : randomUUID();
       if (!/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('Auth');
       let binding, credential: ReturnType<ConversationStore['issueResumeCredential']> | undefined;
+      let deviceCredential: ReturnType<ConversationStore['issueDeviceCredential']> | undefined;
       if (protocolV2 && typeof msg.resume_credential === 'string' && typeof msg.resume_session_id === 'string') {
         if (!store) throw new SessionUnavailableError();
         binding = await registry.resume(msg.resume_session_id, connectionId, send, () => {
           credential = store.rotateResumeCredential({ secret: msg.resume_credential, clientId,
             sessionId: msg.resume_session_id, at: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
+        });
+        if (msg.credential_storage === 'even_host_v1') {
+          const now = Date.now();
+          // Re-provision on every authenticated resume. This closes the narrow
+          // crash window where the resume secret reached host storage but the
+          // first device credential did not.
+          deviceCredential = store.issueDeviceCredential({ clientId, createdAt: now,
+            expiresAt: now + deviceCredentialTtlMs,
+            persistDeadlineAt: now + deviceCredentialPersistWindowMs });
+        }
+      } else if (protocolV2 && typeof msg.device_credential === 'string') {
+        if (!store) throw new SessionUnavailableError();
+        const now = Date.now();
+        binding = await registry.create(connectionId, send, randomUUID(), () => {
+          deviceCredential = store.rotateDeviceCredential({ secret: msg.device_credential, clientId, at: now,
+            expiresAt: now + deviceCredentialTtlMs,
+            persistDeadlineAt: now + deviceCredentialPersistWindowMs });
         });
       } else {
         const given = Buffer.from(typeof msg.token === 'string' ? msg.token : '');
@@ -489,8 +519,17 @@ export function createConversationServer(options: {
         binding = await registry.create(connectionId, send);
         if (store) credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
           createdAt: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
+        if (store && protocolV2 && msg.credential_storage === 'even_host_v1') {
+          const now = Date.now();
+          deviceCredential = store.issueDeviceCredential({ clientId, createdAt: now,
+            expiresAt: now + deviceCredentialTtlMs,
+            persistDeadlineAt: now + deviceCredentialPersistWindowMs });
+        }
       }
+      if (store && !credential) credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
+        createdAt: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
       session = binding.runtime as ServerSessionRuntime;
+      authenticatedClientId = clientId;
       session.setCaptureStop(connectionId, clearCapture);
       authenticated = true; releaseAuthSlot(); clearTimeout(authTimer);
       const lastSeen = protocolV2 && Number.isSafeInteger(msg.last_seen_sequence) && msg.last_seen_sequence >= 0 ? msg.last_seen_sequence : 0;
@@ -504,9 +543,13 @@ export function createConversationServer(options: {
         connection_id: connectionId, session_id: binding.sessionId, resumed: binding.resumed,
         latest_sequence: sessionRecord?.latestSequence ?? 0, resume_window_minutes: Math.ceil(resumeWindowMs / 60_000),
         resume_credential: credential?.secret, resume_expires_at: credential?.expiresAt,
+        ...(deviceCredential ? { device_credential_id: deviceCredential.id,
+          device_credential: deviceCredential.secret, device_expires_at: deviceCredential.expiresAt,
+          device_persist_deadline_at: deviceCredential.persistDeadlineAt } : {}),
         snapshot: { state: session.conversation.state, messages: snapshot,
           ...(recoverable?.turn.status === 'interrupted' ? { interrupted_turn_id: recoverable.turn.id } : {}) },
         models: options.models, capabilities: { ...options.capabilities, email: !!options.mail, calendar: !!options.calendar } });
+      pendingDeviceCredentialId = deviceCredential?.id;
       if (protocolV2 && store) {
         const refresh = () => {
           credentialRefresh = setTimeout(() => {
@@ -556,6 +599,7 @@ export function createConversationServer(options: {
           try { await authenticate(msg); }
           catch (error) {
             send({ type: 'error', code: error instanceof ActiveInputLeaseError ? 'BUSY'
+              : error instanceof DeviceCredentialError ? 'DEVICE_CREDENTIAL_INVALID'
               : error instanceof SessionUnavailableError || error instanceof ResumeCredentialError
                 ? 'SESSION_UNAVAILABLE' : 'INVALID_MESSAGE' });
             client.close(1008);
@@ -563,6 +607,7 @@ export function createConversationServer(options: {
           return;
         }
         if (protocolV2 && ['text.submit', 'turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry',
+          'credential.persisted',
           'exit.request', 'exit.confirm', 'test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
           'test.storage.cleanup_preview', 'test.storage.cleanup_apply'].includes(String(msg.type))) msg = parseCoreClientMessage(msg, {
             allowLocalTestControls: localTestConnection && (options.localTestControls?.read === true || options.localTestControls?.write === true),
@@ -581,6 +626,14 @@ export function createConversationServer(options: {
           return;
         }
         switch (msg.type) {
+          case 'credential.persisted':
+            if (!store || !authenticatedClientId || msg.credential_id !== pendingDeviceCredentialId) {
+              throw new Error('Invalid credential ACK');
+            }
+            store.acknowledgeDeviceCredential({ id: msg.credential_id, clientId: authenticatedClientId, at: Date.now() });
+            pendingDeviceCredentialId = undefined;
+            send({ type: 'credential.acknowledged', credential_id: msg.credential_id });
+            break;
           case 'jobs.email.received':
             if (!options.jobs || typeof msg.id !== 'string' || Object.keys(msg).some(key => !['type', 'id'].includes(key))) throw new Error('Invalid receipt');
             active.mailApproval = undefined; delivery?.invalidate();

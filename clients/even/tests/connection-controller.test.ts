@@ -45,12 +45,14 @@ test('jitter stays within 80-120 percent and backoff caps at 30 seconds', () => 
 test('initial auth uses protocol v2 and reconnect resumes with the saved scoped credential', async () => {
   const f = await fixture(); assert.equal(f.controller.connect('t'.repeat(32)), true);
   const first = f.sockets[0]; first.open();
-  assert.deepEqual(first.sent[0], { type: 'hello', protocol_version: 2, client_id: clientId, token: 't'.repeat(32) });
+  assert.deepEqual(first.sent[0], { type: 'hello', protocol_version: 2, client_id: clientId,
+    credential_storage: 'even_host_v1', token: 't'.repeat(32) });
   f.ready(first); first.drop();
   assert.equal(f.timers.size, 1); [...f.timers.values()][0]();
   const second = f.sockets[1]; second.open();
   assert.deepEqual(second.sent[0], { type: 'hello', protocol_version: 2, client_id: clientId,
-    resume_session_id: sessionId, resume_credential: 's'.repeat(32), last_seen_sequence: 4 });
+    credential_storage: 'even_host_v1', resume_session_id: sessionId,
+    resume_credential: 's'.repeat(32), last_seen_sequence: 4 });
   f.ready(second, true);
   assert.equal(f.controller.status.reason, 'resumed');
 });
@@ -87,6 +89,51 @@ test('send assigns stable idempotency identifiers and credential refresh replace
   assert.match(ws.sent.at(-1).command_id, /^[0-9a-f-]{36}$/i);
   ws.message({ type: 'resume.credential', session_id: sessionId, resume_credential: 'n'.repeat(32), resume_expires_at: 2_000 });
   assert.equal(f.credentials.load()?.secret, 'n'.repeat(32));
+});
+
+test('device credential is ACKed only after native host storage returns true', async () => {
+  const f = await fixture(); f.controller.connect('t'.repeat(32)); const ws = f.sockets[0]; ws.open();
+  const deviceId = '33333333-3333-4333-8333-333333333333';
+  ws.message({ type: 'ready', protocol_version: 2, connection_id: uuid(), session_id: sessionId,
+    resumed: false, latest_sequence: 0, resume_credential: 's'.repeat(32), resume_expires_at: 1_000,
+    device_credential_id: deviceId, device_credential: 'd'.repeat(32), device_expires_at: 2_000,
+    device_persist_deadline_at: 500, snapshot: { messages: [] } });
+  await f.credentials.whenSettled(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.credentials.loadDevice()?.id, deviceId);
+  assert.deepEqual(ws.sent.at(-1), { type: 'credential.persisted', credential_id: deviceId });
+});
+
+test('cold start uses the scoped device credential without persisting or requiring the master token', async () => {
+  const f = await fixture();
+  await f.credentials.saveDevice({ clientId, id: '33333333-3333-4333-8333-333333333333',
+    secret: 'd'.repeat(32), expiresAt: 2_000 });
+  assert.equal(f.controller.resumeIfAvailable(), true);
+  const ws = f.sockets[0]; ws.open();
+  assert.deepEqual(ws.sent[0], { type: 'hello', protocol_version: 2, client_id: clientId,
+    credential_storage: 'even_host_v1', device_credential: 'd'.repeat(32) });
+  assert.equal(JSON.stringify(ws.sent[0]).includes('token'), false);
+});
+
+test('a false native device write never emits persisted ACK', async () => {
+  const data = new Map<string, string>();
+  const host = { getLocalStorage: async (key: string) => data.get(key) ?? '',
+    setLocalStorage: async (key: string, value: string) => {
+      if (key.includes('device-credential')) return false;
+      data.set(key, value); return true;
+    } };
+  const credentials = await SessionCredentialStore.open(host, undefined, () => 100, () => clientId);
+  const sockets: FakeSocket[] = [], events: any[] = [];
+  const controller = new ConnectionController({ url: () => 'ws://test',
+    socket: () => { const ws = new FakeSocket(); sockets.push(ws); return ws; }, credentials,
+    onEvent: event => events.push(event), uuid });
+  controller.connect('t'.repeat(32)); const ws = sockets[0]; ws.open();
+  ws.message({ type: 'ready', protocol_version: 2, connection_id: uuid(), session_id: sessionId,
+    resumed: false, latest_sequence: 0, resume_credential: 's'.repeat(32), resume_expires_at: 1_000,
+    device_credential_id: '33333333-3333-4333-8333-333333333333', device_credential: 'd'.repeat(32),
+    device_expires_at: 2_000, device_persist_deadline_at: 500, snapshot: { messages: [] } });
+  await credentials.whenSettled(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ws.sent.some(item => item.type === 'credential.persisted'), false);
+  assert.equal(events.some(item => item.type === 'notice' && /未保存/.test(item.text)), true);
 });
 
 test('explicit exit clears resume authority and dispose prevents all reconnects', async () => {
