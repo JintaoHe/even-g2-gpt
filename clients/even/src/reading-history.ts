@@ -4,6 +4,7 @@ import { displayText } from './display-text.ts';
 type Entry = { id?: string; role: '你' | 'Even' | '提示'; raw: string; pending: boolean; interrupted?: boolean };
 type SnapshotMessage = { id: string; sequence: number; role: 'user' | 'assistant'; status: 'committed' | 'interrupted'; content: string };
 type Segment = { text: string; final: boolean };
+type RecoveryCounts = { sending: number; unknown: number };
 export class ReadingHistory {
   entries: Entry[] = [];
   index = 0; page = 0;
@@ -13,14 +14,19 @@ export class ReadingHistory {
   private manual = false;
   private segments = new Map<unknown, Segment>();
   private speaking = false;
+  private recoveryEntry?: Entry;
+  private recoveryMail?: RecoveryCounts;
+  private recoveryCalendar?: RecoveryCounts;
   reset(text: string) {
     this.entries = [{ role: '提示', raw: text, pending: false }]; this.index = this.page = 0;
     this.draft = this.answer = undefined; this.segments.clear(); this.answerId = undefined; this.manual = false; this.speaking = false;
+    this.recoveryEntry = undefined; this.recoveryMail = this.recoveryCalendar = undefined;
   }
   restoreSnapshot(messages: SnapshotMessage[], replace = false) {
     if (replace) {
       this.entries = []; this.index = this.page = 0;
       this.draft = this.answer = undefined; this.answerId = undefined; this.segments.clear(); this.speaking = false;
+      this.recoveryEntry = undefined; this.recoveryMail = this.recoveryCalendar = undefined;
     }
     const known = new Set(this.entries.map(entry => entry.id).filter(Boolean));
     for (const message of [...messages].sort((a, b) => a.sequence - b.sequence)) {
@@ -42,8 +48,47 @@ export class ReadingHistory {
     if (!this.draft) { this.draft = { role: '你', raw: '', pending: true }; this.entries.push(this.draft); this.select(this.draft); }
     return this.draft;
   }
+  private recoveryCounts(items: unknown, field: string): RecoveryCounts | undefined {
+    if (!Array.isArray(items)) return undefined;
+    return {
+      sending: items.filter(item => item && typeof item === 'object' && (item as any)[field] === 'sending').length,
+      unknown: items.filter(item => item && typeof item === 'object' && (item as any)[field] === 'unknown').length,
+    };
+  }
+  private syncRecoveryNotice() {
+    const line = (label: string, counts?: RecoveryCounts) => counts && counts.sending + counts.unknown > 0
+      ? `${label}待核实：${counts.sending + counts.unknown}${counts.sending ? `（发送中 ${counts.sending}` : '（'}${counts.sending && counts.unknown ? '，' : ''}${counts.unknown ? `结果不确定 ${counts.unknown}` : ''}）`
+      : undefined;
+    const warnings = [line('邮件', this.recoveryMail), line('日历', this.recoveryCalendar)].filter(Boolean) as string[];
+    if (!warnings.length) {
+      if (this.recoveryEntry) this.recoveryEntry.raw = '恢复检查完成：没有待核实的邮件或日历操作。';
+      return;
+    }
+    const raw = `恢复检查\n${warnings.join('\n')}\n不会自动重发或重放；请先核对结果。`;
+    if (!this.recoveryEntry) {
+      this.recoveryEntry = { role: '提示', raw, pending: false };
+      this.entries.push(this.recoveryEntry);
+    } else this.recoveryEntry.raw = raw;
+    if (!this.manual) this.select(this.recoveryEntry);
+  }
   event(event: { type: string; [key: string]: any }) {
     const key = event.segment_id ?? 'legacy';
+    if (event.type === 'ready') {
+      this.recoveryEntry = undefined;
+      const mail = Number(event.recovery?.uncertainMail);
+      const calendar = Number(event.recovery?.uncertainCalendar);
+      this.recoveryMail = Number.isInteger(mail) && mail >= 0 ? { sending: 0, unknown: mail } : undefined;
+      this.recoveryCalendar = Number.isInteger(calendar) && calendar >= 0 ? { sending: 0, unknown: calendar } : undefined;
+      this.syncRecoveryNotice();
+    }
+    if (event.type === 'jobs.list') {
+      const counts = this.recoveryCounts(event.jobs, 'mail_state');
+      if (counts) { this.recoveryMail = counts; this.syncRecoveryNotice(); }
+    }
+    if (event.type === 'calendar.list') {
+      const counts = this.recoveryCounts(event.operations, 'state');
+      if (counts) { this.recoveryCalendar = counts; this.syncRecoveryNotice(); }
+    }
     if (event.type === 'speech.started') {
       this.question(); this.speaking = true;
       this.segments.set(key, { text: '', final: false });

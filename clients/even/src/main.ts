@@ -126,10 +126,11 @@ function handleServerEvent(event: any) {
       element('channel').textContent = `当前测试：${channel} · 模型 ${event.models?.reply ?? '?'} · 语音 ${stt}`;
       element('recovery-window').textContent = Number.isInteger(event.resume_window_minutes)
         ? `会话恢复窗口：${event.resume_window_minutes} 分钟` : '会话恢复窗口：服务器未提供';
-      if (event.resumed === true) {
-        if (event.capabilities?.email === true) connection.send({ type: 'jobs.list' });
-        if (event.capabilities?.calendar === true) connection.send({ type: 'calendar.list' });
-      }
+      // A cold start can follow a WebView process death after the resume
+      // window has elapsed. Reconcile durable side effects on every ready,
+      // not only when the conversation session itself was resumed.
+      if (event.capabilities?.email === true) connection.send({ type: 'jobs.list' });
+      if (event.capabilities?.calendar === true) connection.send({ type: 'calendar.list' });
       if (!event.resumed) pager.reset('已连接。\n可输入文字，或主动开启麦克风。');
     }
     pager.event(event);
