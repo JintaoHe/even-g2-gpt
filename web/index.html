@@ -61,6 +61,7 @@ body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-wi
 <dialog id="exitDialog"><h2>确认退出？</h2><p>已经停止收音。这里模拟未来的 Even 系统确认框；取消后仍保持暂停。</p><button id="confirmExit">确认退出</button><button id="cancelExit" class="secondary">取消，保持暂停</button></dialog>
 <section id="devControls" hidden><strong>本地会话与 SQLite 实验台</strong><div>
   <button id="resumeSession" class="secondary">一键模拟 session resume</button>
+  <button id="forceColdStart" class="danger">模拟 WebView 被系统终止（冷启动）</button>
   <button id="dropSocket" class="secondary">模拟 socket 断线</button>
   <button id="retryConnection" class="secondary">立即重连</button>
   <button id="repeatSubmit" class="secondary">重复提交上一条文字</button>
@@ -69,7 +70,7 @@ body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-wi
   <button id="seedExpiredRecord" class="secondary">写入 3 年前测试记录</button>
   <button id="previewRetention" class="secondary">预览测试记录清理（固定三年）</button>
   <button id="applyRetention" class="danger">清理 3 年前测试记录</button>
-</div><pre id="storageReport">尚未读取 SQLite 状态。</pre><small>仅 loopback simulator 显示。状态不含对话正文；清理按钮只删除固定测试范围内的记录。公网 Linux WSS 拒绝全部测试控制。</small></section>
+</div><pre id="storageReport">尚未读取 SQLite 状态。</pre><small>仅 loopback simulator 显示。冷启动会丢弃当前页面内存并跳过正常 socket 清理，但保留恢复凭证；真正的 half-open lease 由独立集成测试覆盖。状态不含对话正文；公网 Linux WSS 拒绝全部测试控制。</small></section>
 <section id="googleCalendar" hidden></section>
 <script type="module" src="/app.js"></script>
 </html>
