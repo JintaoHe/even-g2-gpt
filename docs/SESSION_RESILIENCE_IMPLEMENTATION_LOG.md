@@ -157,3 +157,33 @@ Phase 1.3 storage foundation：**PASS**。SQLite 原语和现有 runtime 的 sav
 ### Gate
 
 Phase 2 server foundation 与 Phase 3 write-safety foundation：**PASS**。客户端 credential 持久化、自动重连、恢复 UI 和 simulator“立即过期”按钮仍属于 Phase 4，不在本阶段冒充完成。宽泛的跨 topic recap 仍留给 Phase 5 ContextBuilder；普通重连不会自动调用模型或重放副作用。
+
+## 2026-09-19 — Phase 4 client lifecycle 与 simulator 恢复
+
+### 实现
+
+- Even client 新增独立 `ConnectionController`：protocol v2 hello、稳定 client/message/command ID、短期 resume credential、增量 snapshot、单重连 timer、带 jitter 的 0.5/1/2/5/10/30 秒退避，以及网络恢复后的立即重连。
+- 主 `G2_CLIENT_TOKEN` 仍只保留在当前页面内存；local storage 只保存稳定 client ID 和 server 签发的短期、session-scoped resume credential。无效、过期或字段越界的记录会 fail closed 并清除。
+- 页面隐藏和 unload 不再向 logical conversation 发送 `pause`／结束；明确退出仍通过系统确认，并撤销本地恢复凭证。恢复凭证已过期且内存中没有主 token 时，UI 明确要求重新输入 token。
+- 新增独立 `AudioController`，把用户 desired intent 与 SDK actual state 分开；所有 bridge 操作串行，最多重试三次，旧 promise 和取消通过 epoch 失效。
+- 接入 `onDeviceStatusChanged`；眼镜或页面暂时不可用时关闭实际 audio，但保留 desired intent，设备／页面恢复后才按原意图重新开启。
+- Even companion UI 与 browser lab 均显示 connection/session ID、new/resumed 状态和 server 返回的实际恢复窗口。
+- browser reference client 同步 protocol v2、snapshot 去重、自动重连和稳定提交 ID；loopback 开发页面增加 socket drop、立即重连、重复 submit 和立即过期控制。
+- “立即过期”消息只有 DEV/loopback UI 会发出，并且 server 还要求显式 test gate 与 loopback peer；production client build 不包含相关开发模块，公网 server 配置拒绝启用该 gate。
+- 保持范围边界：本阶段没有声称解决 iOS 锁屏、Even 宿主 WebView 被回收、后台全天收音或真机蓝牙仲裁。
+
+### 自动化结果
+
+1. Browser reference client tests：`2 passed / 0 failed`。
+2. Even client tests：`46 passed / 0 failed`，包括 100 次 audio toggle/disconnect 循环、device disconnect/reconnect、visibility hide/show、旧 socket、重复 timer、凭证过期和明确退出。
+3. Protocol/reconnect/browser target tests：`16 passed / 0 failed`。
+4. Root TypeScript：通过。
+5. Root full regression：`311 passed / 0 failed / 1 Windows platform skip`，共 312 tests，约 29 秒。
+6. Windows skip 仍是无权限创建数据库文件 symlink；目录 junction 拒绝测试通过，Linux gate 仍需重跑 file symlink case。
+7. Even client production build：通过；Vite 生成 2 个 release files，build verifier 未发现 debug fixture、source map、private key 或明显 credential。
+8. Server-only build：通过；public audit 扫描 244 个 source/document files，未发现禁止路径或 credential pattern。
+9. 提交后将未提交的成本控制／文档改动临时隔离，对 PR commit 精确重跑：`306 passed / 0 failed / 1 Windows platform skip`，共 307 个 root tests；Even client `46 passed / 0 failed`；TypeScript、server-only build、255-file public audit 和 client production build 全部通过。随后已原样恢复隔离的本地改动。
+
+### Gate
+
+Phase 4：**PASS（自动化与构建）**。进入 Phase 5 前仍需通过 PR review；本阶段的 browser/Even simulator 人工断线体验将在后续本地验收 gate 统一执行，不提前部署 Linux 或构建 `.ehpk`。

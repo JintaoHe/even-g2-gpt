@@ -1,7 +1,8 @@
 import { paginate, wrapLines } from './pager.ts';
 import { displayText } from './display-text.ts';
 
-type Entry = { role: '你' | 'Even' | '提示'; raw: string; pending: boolean; interrupted?: boolean };
+type Entry = { id?: string; role: '你' | 'Even' | '提示'; raw: string; pending: boolean; interrupted?: boolean };
+type SnapshotMessage = { id: string; sequence: number; role: 'user' | 'assistant'; status: 'committed' | 'interrupted'; content: string };
 type Segment = { text: string; final: boolean };
 export class ReadingHistory {
   entries: Entry[] = [];
@@ -15,6 +16,22 @@ export class ReadingHistory {
   reset(text: string) {
     this.entries = [{ role: '提示', raw: text, pending: false }]; this.index = this.page = 0;
     this.draft = this.answer = undefined; this.segments.clear(); this.answerId = undefined; this.manual = false; this.speaking = false;
+  }
+  restoreSnapshot(messages: SnapshotMessage[], replace = false) {
+    if (replace) {
+      this.entries = []; this.index = this.page = 0;
+      this.draft = this.answer = undefined; this.answerId = undefined; this.segments.clear(); this.speaking = false;
+    }
+    const known = new Set(this.entries.map(entry => entry.id).filter(Boolean));
+    for (const message of [...messages].sort((a, b) => a.sequence - b.sequence)) {
+      if (!message?.id || known.has(message.id) || !['user', 'assistant'].includes(message.role)
+        || !['committed', 'interrupted'].includes(message.status) || typeof message.content !== 'string') continue;
+      this.entries.push({ id: message.id, role: message.role === 'user' ? '你' : 'Even', raw: message.content,
+        pending: false, interrupted: message.status === 'interrupted' });
+      known.add(message.id);
+    }
+    if (!this.entries.length) this.entries.push({ role: '提示', raw: '会话已恢复，等待你的下一句话。', pending: false });
+    this.latest();
   }
   notice(text: string) {
     const entry: Entry = { role: '提示', raw: text, pending: false };
@@ -41,16 +58,26 @@ export class ReadingHistory {
       draft.pending = [...this.segments.values()].some(s => !s.final);
     }
     if (event.type === 'turn.committed') {
+      const existing = typeof event.message_id === 'string' ? this.entries.find(entry => entry.id === event.message_id) : undefined;
+      if (existing) { if (!this.manual) this.select(existing); return; }
       const question = this.question(); question.raw = event.text; question.pending = false;
+      if (typeof event.message_id === 'string') question.id = event.message_id;
       this.draft = undefined; this.segments.clear(); this.speaking = false;
     }
     if (event.type === 'answer.start') {
+      const existing = typeof event.message_id === 'string' ? this.entries.find(entry => entry.id === event.message_id) : undefined;
+      if (existing) { this.answer = existing; this.answer.pending = true; this.answerId = event.id; if (!this.manual) this.select(existing); return; }
       this.answer = { role: 'Even', raw: '', pending: true }; this.answerId = event.id;
+      if (typeof event.message_id === 'string') this.answer.id = event.message_id;
       this.entries.push(this.answer);
       if (!this.manual) this.select(this.answer);
     }
     if (event.type === 'answer.delta' && event.id === this.answerId && this.answer) this.answer.raw += event.text;
     if (event.type === 'answer.citations' && event.id === this.answerId && this.answer) this.answer.raw = event.text;
+    if (event.type === 'answer.committed' && event.id === this.answerId && this.answer) {
+      this.answer.raw = event.content; this.answer.pending = false;
+      if (typeof event.message_id === 'string') this.answer.id = event.message_id;
+    }
     if (['answer.done', 'answer.cancelled'].includes(event.type) && event.id === this.answerId && this.answer) {
       this.answer.pending = false; this.answer.interrupted = event.type === 'answer.cancelled';
       this.answer = undefined; this.answerId = undefined;

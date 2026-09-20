@@ -401,7 +401,7 @@ export function createConversationServer(options: {
       })) : [];
       send({ type: 'ready', protocol_version: protocolV2 ? CONVERSATION_PROTOCOL_VERSION : undefined,
         connection_id: connectionId, session_id: binding.sessionId, resumed: binding.resumed,
-        latest_sequence: sessionRecord?.latestSequence ?? 0,
+        latest_sequence: sessionRecord?.latestSequence ?? 0, resume_window_minutes: Math.ceil(resumeWindowMs / 60_000),
         resume_credential: credential?.secret, resume_expires_at: credential?.expiresAt,
         snapshot: { state: session.conversation.state, messages: snapshot,
           ...(recoverable?.turn.status === 'interrupted' ? { interrupted_turn_id: recoverable.turn.id } : {}) },

@@ -1,9 +1,10 @@
 import { renderCitations } from './citations.js';
 import { createProgress } from './progress.js';
 import { calendarPanel } from './calendar.js';
+import { BrowserSessionClient, isLoopbackHost } from './session-client.js';
 const $ = id => document.getElementById(id);
 const progress = createProgress(text => { $('progress').textContent = text; });
-let socket, state = 'closed', connected = false, context, media, source, worklet, micEpoch = 0;
+let session, state = 'closed', connected = false, context, media, source, worklet, micEpoch = 0, hasReady = false;
 let speechAvailable = true;
 let emailAvailable = false;
 let cliSearchEnabled = false;
@@ -11,7 +12,7 @@ let downloadToken = '', jobTimer;
 const answers = new Map();
 const labels = { listening: '等待说话 / 继续追问', thinking: '判断意图中（可继续说）', answering: '回答中（可插话）', paused: '已暂停', exit_pending: '已停止收音，等待退出确认', closed: '已结束' };
 const active = () => connected && ['listening', 'thinking', 'answering'].includes(state);
-function send(value) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); }
+function send(value) { return session?.send(value) ?? false; }
 const calendarEvent = calendarPanel($('googleCalendar'), send);
 function notice(text) { $('notice').textContent = text; }
 function controls() {
@@ -92,22 +93,30 @@ function message(role, text = '') {
   box.append(label, body); $('history').append(box); box.scrollIntoView({ block: 'nearest' });
   return { label, body };
 }
-$('connect').onclick = () => {
-  if (socket && socket.readyState < WebSocket.CLOSING) return;
-  const token = $('token').value.trim();
-  if (token.length < 32) { notice('请填写本机 .env 中的 G2_CLIENT_TOKEN。'); return; }
-  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/conversation`);
-  socket.onopen = () => send({ type: 'hello', token });
-  socket.onmessage = ({ data }) => {
-    const e = JSON.parse(data);
+const restoredMessages = new Set();
+function restoreSnapshot(snapshot, replace) {
+  if (!Array.isArray(snapshot?.messages)) return;
+  if (replace) { $('history').replaceChildren(); restoredMessages.clear(); }
+  for (const item of [...snapshot.messages].sort((a, b) => a.sequence - b.sequence)) {
+    if (!item?.id || restoredMessages.has(item.id) || !['user', 'assistant'].includes(item.role)) continue;
+    const entry = message(item.role === 'user' ? '你' : item.status === 'interrupted' ? 'Even · 已打断' : 'Even', item.content ?? '');
+    entry.body.closest('.message').dataset.messageId = item.id; restoredMessages.add(item.id);
+  }
+}
+function handleServerEvent(e) {
     calendarEvent(e);
     progress.event(e);
     if (e.type === 'route.status' && e.status === 'failed') console.warn('Route request failed', {
       stage: e.stage, providerStatus: e.provider_status, providerReason: e.provider_reason
     });
     if (e.type === 'ready') {
+      if (e.resumed) restoreSnapshot(e.snapshot, !hasReady);
+      else if (hasReady) { $('history').replaceChildren(); restoredMessages.clear(); }
+      hasReady = true;
+      $('recoveryWindow').textContent = Number.isInteger(e.resume_window_minutes)
+        ? `会话恢复窗口：${e.resume_window_minutes} 分钟` : '会话恢复窗口：服务器未提供';
       emailAvailable = e.capabilities?.email === true;
-      downloadToken = token; clearInterval(jobTimer);
+      clearInterval(jobTimer);
       send({ type: 'jobs.list' }); jobTimer = setInterval(() => send({ type: 'jobs.list' }), 3000);
       connected = true; $('token').value = ''; notice('已连接。点击开启麦克风，或发送文字。');
       speechAvailable = e.capabilities?.speech !== false;
@@ -140,9 +149,16 @@ $('connect').onclick = () => {
     if (e.type === 'transcript.delta') $('transcript').textContent += e.text;
     if (e.type === 'transcript.final') $('transcript').textContent = e.text;
     if (e.type === 'turn.waiting') notice('这句话可能还没说完，请继续；也可以点“我说完了”。');
-    if (e.type === 'turn.committed') { message('你', e.text); notice(''); }
+    if (e.type === 'turn.committed') {
+      if (!e.message_id || !restoredMessages.has(e.message_id)) {
+        const entry = message('你', e.text); if (e.message_id) { restoredMessages.add(e.message_id); entry.body.closest('.message').dataset.messageId = e.message_id; }
+      }
+      notice('');
+    }
     if (e.type === 'answer.start') {
+      if (e.message_id && restoredMessages.has(e.message_id)) return;
       const answer = message('Even'); answers.set(e.id, answer);
+      if (e.message_id) { restoredMessages.add(e.message_id); answer.body.closest('.message').dataset.messageId = e.message_id; }
       if (['low', 'medium', 'high'].includes(e.reasoningEffort)) {
         const mode = document.createElement('small');
         const scenes = { casual: '聊天', explain: '解释', research: '研究', brainstorm: '头脑风暴', decision_support: '决策支持',
@@ -174,9 +190,28 @@ $('connect').onclick = () => {
     if (e.type === 'exit.confirmation_required') { stopMic(); if (!$('exitDialog').open) $('exitDialog').showModal(); }
     if (e.type === 'error') notice(`错误：${e.code}。请检查服务配置；暂停后可恢复或重新连接。`);
     if (e.type === 'notice') notice(e.text);
-  };
-  socket.onclose = () => { clearInterval(jobTimer); downloadToken = ''; progress.clear(); connected = false; state = 'closed'; stopMic(); $('channel').textContent = '测试通道：已断开，重新连接后确认'; $('channelDetails').textContent = ''; $('state').textContent = '连接已结束（重新连接将开启新会话）'; $('exitDialog').close(); controls(); };
-  socket.onerror = () => { progress.clear(); stopMic(); notice('连接失败，请确认本地服务正在运行。'); };
+}
+
+function handleConnectionStatus(status) {
+  connected = status.state === 'connected';
+  if (status.state === 'recovering') { stopMic(); $('state').textContent = status.reason === 'credential_expired'
+    ? '恢复凭证已过期，正在建立新会话' : `正在重连${status.attempt ? `（第 ${status.attempt} 次）` : ''}`; }
+  else if (status.state === 'connecting') $('state').textContent = '正在连接';
+  else if (status.state === 'disconnected') { stopMic(); $('state').textContent = status.reason === 'credential_expired'
+    ? '恢复凭证已过期，请重新输入应用 token' : status.reason === 'token_required'
+      ? '请输入应用 token 以建立会话' : '连接已断开'; }
+  if (status.connectionId && status.sessionId) $('connectionMeta').textContent = `${status.reason === 'resumed' ? '会话已恢复' : '新会话'} · 连接 ${status.connectionId.slice(0, 8)} · 会话 ${status.sessionId.slice(0, 8)}`;
+  controls();
+}
+
+const conversationUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/conversation`;
+session = new BrowserSessionClient({ url: conversationUrl, onEvent: handleServerEvent, onStatus: handleConnectionStatus });
+$('connect').onclick = () => {
+  const token = $('token').value.trim();
+  if (!session.credential() && token.length < 32) { notice('请填写本机 .env 中的 G2_CLIENT_TOKEN。'); return; }
+  if (token) downloadToken = token;
+  if (!session.connect(token)) { notice(connected ? '已经连接。' : '无法连接；请检查 token 或恢复凭证。'); return; }
+  $('token').value = '';
 };
 $('voice').onclick = async () => {
   stopMic(); const epoch = micEpoch;
@@ -195,8 +230,8 @@ $('voice').onclick = async () => {
     worklet.port.onmessage = ({ data }) => {
       if (!active()) return;
       if (data?.type === 'flushed') { send({ type: 'turn.submit' }); return; }
-      if (socket.bufferedAmount > 64000) { stopMic(); send({ type: 'pause' }); notice('音频发送积压，已暂停。'); return; }
-      socket.send(data);
+      if ((session.socket?.bufferedAmount ?? 0) > 64000) { stopMic(); send({ type: 'pause' }); notice('音频发送积压，已暂停。'); return; }
+      session.sendBinary(data);
     };
     source.connect(worklet); worklet.connect(audio.destination); // Processor outputs silence, never microphone feedback.
     stream.getAudioTracks()[0].onended = () => { if (media === stream) { stopMic(); send({ type: 'pause' }); } };
@@ -214,9 +249,19 @@ $('textForm').onsubmit = event => {
   event.preventDefault(); const text = $('text').value.trim(); if (!text || !active()) return;
   send({ type: 'text.submit', text }); $('text').value = '';
 };
-function exitChoice(confirm) { send({ type: 'exit.confirm', confirm }); $('exitDialog').close(); }
+function exitChoice(confirm) { session.confirmExit(confirm); $('exitDialog').close(); }
 $('confirmExit').onclick = () => exitChoice(true);
 $('cancelExit').onclick = () => exitChoice(false);
 $('exitDialog').oncancel = event => { event.preventDefault(); exitChoice(false); };
-document.addEventListener('visibilitychange', () => { if (document.hidden) { stopMic(); if (active()) send({ type: 'pause' }); } });
-window.addEventListener('pagehide', () => { stopMic(); socket?.close(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopMic(); });
+window.addEventListener('online', () => session.networkAvailable());
+window.addEventListener('pagehide', () => { stopMic(); session.dispose(); });
+
+if (isLoopbackHost(location.hostname)) {
+  $('devControls').hidden = false;
+  $('dropSocket').onclick = () => { if (!session.simulateDrop()) notice('当前没有可断开的连接。'); };
+  $('retryConnection').onclick = () => { if (!session.networkAvailable()) notice('当前已连接，或没有可恢复的会话。'); };
+  $('repeatSubmit').onclick = () => { if (!session.repeatLastSubmission()) notice('还没有可重复提交的文字消息。'); };
+  $('expireSession').onclick = () => { if (!session.simulateExpiry()) notice('需要先用 token 连接本地测试服务器。'); };
+}
+session.resumeIfAvailable();

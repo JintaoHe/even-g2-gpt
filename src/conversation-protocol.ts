@@ -96,6 +96,7 @@ export type ReadyEventV2 = {
   session_id: string;
   resumed: boolean;
   latest_sequence: number;
+  resume_window_minutes: number;
   resume_credential: string;
   resume_expires_at: number;
   snapshot: ConversationSnapshotV2;

@@ -6,8 +6,10 @@
 <p id="bridge">等待 Even SDK bridge；普通浏览器可查看伴随界面，但不能模拟眼镜。</p>
 <p><strong id="backend-target">连接目标：正在读取配置</strong></p>
 <strong id="channel">通道：未连接</strong>
+<p id="connection-meta"><small>连接与会话 ID：尚未建立</small></p>
+<p id="recovery-window"><small>会话恢复窗口：连接后由服务器确认</small></p>
 <p><input id="token" type="password" autocomplete="off" placeholder="助手访问 token"><button id="connect">连接后端</button></p>
-<small>只输入后端提供的助手访问 token，不要输入 OpenAI key。凭据仅保留在内存，模型与服务密钥始终留在后端。</small>
+<small>只输入后端提供的助手访问 token，不要输入 OpenAI key。主 token 仅保留在内存；浏览器只保存服务器签发的短期会话恢复凭证。模型与服务密钥始终留在后端。</small>
 <p id="status" role="status">未连接</p>
 <button id="audio">开启 / 暂停眼镜麦克风</button><button id="resume">取消退出 / 恢复文字</button><button id="interrupt">打断回答</button><button id="exit">退出（系统确认）</button>
 <form id="form"><textarea id="text" maxlength="6000" placeholder="输入问题，回答会显示到眼镜"></textarea><button>发送文字</button></form>

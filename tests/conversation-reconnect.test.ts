@@ -56,6 +56,7 @@ test('protocol v2 resumes after service restart, rotates credential and deduplic
   first.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token }));
   const ready1 = await ready1Promise;
   assert.equal(ready1.resumed, false);
+  assert.equal(ready1.resume_window_minutes, 15);
   assert.match(ready1.resume_credential, /^[0-9a-f-]{36}\./);
 
   const donePromise = waitFor(first, 'answer.done');
