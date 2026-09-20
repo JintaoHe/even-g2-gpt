@@ -87,6 +87,40 @@ test('exit stops input before save; cancel remains paused; save failure is visib
   assert.ok(events.some(e => e.code === 'SAVE_FAILED'));
 });
 
+test('answer completion is emitted only after durable save and save failure never reports done', async () => {
+  const gate = deferred<void>(), events: Event[] = []; let durable = false;
+  const c = new Conversation(immediate, event => events.push(event), async () => { await gate.promise; durable = true; });
+  const pending = c.submit('persist before done');
+  await tick();
+  assert.ok(events.some(event => event.type === 'answer.start'));
+  assert.equal(events.some(event => event.type === 'answer.done'), false);
+  gate.resolve(); await pending;
+  assert.equal(durable, true);
+  assert.ok(events.some(event => event.type === 'answer.done'));
+  assert.equal(c.state, 'listening');
+
+  const failed: Event[] = [];
+  const broken = new Conversation(immediate, event => failed.push(event), async () => { throw new Error('disk'); });
+  await broken.submit('must fail closed');
+  assert.equal(failed.some(event => event.type === 'answer.done'), false);
+  assert.ok(failed.some(event => event.type === 'error' && event.code === 'SAVE_FAILED'));
+  assert.equal(broken.state, 'paused');
+});
+
+test('interrupting during durable commit cancels display completion without duplicating final history', async () => {
+  const gate = deferred<void>(), events: Event[] = [];
+  const c = new Conversation(immediate, event => events.push(event), async () => { await gate.promise; });
+  const pending = c.submit('interrupt while saving');
+  await tick();
+  assert.equal(c.history.length, 2);
+  c.interrupt();
+  assert.equal(c.history.length, 2);
+  assert.ok(events.some(event => event.type === 'answer.cancelled'));
+  gate.resolve(); await pending;
+  assert.equal(events.some(event => event.type === 'answer.done'), false);
+  assert.equal(c.history.filter(message => message.role === 'assistant').length, 1);
+});
+
 test('model decisions, not keyword matches, govern exit; ambiguous intent asks', async () => {
   // Stub tests orchestration only, NOT model linguistic accuracy (live eval is separate).
   for (const text of ['不要退出', '把备注改成再见', '他说了再见']) {

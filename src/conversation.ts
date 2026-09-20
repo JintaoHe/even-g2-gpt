@@ -142,6 +142,7 @@ export class Conversation {
   private responseId?: number;
   private partial = '';
   private citations: Citation[] = [];
+  private committing = false;
   private currentTopic?: { id: string; label: string };
   private responseTopic?: { id: string; label: string; mode?: CognitiveMode };
   private topicCounter = 0;
@@ -153,8 +154,9 @@ export class Conversation {
   private cancel() {
     this.revision++; this.work?.abort(); this.work = undefined;
     if (this.responseId !== undefined) {
+      const committing = this.committing; this.committing = false;
       this.emit({ type: 'answer.cancelled', id: this.responseId });
-      if (this.partial) this.history.push({ role: 'assistant', content: this.partial + '\n[回答被用户打断，未完成]', citations: this.citations,
+      if (this.partial && !committing) this.history.push({ role: 'assistant', content: this.partial + '\n[回答被用户打断，未完成]', citations: this.citations,
         topicId: this.responseTopic?.id, topicLabel: this.responseTopic?.label, cognitiveMode: this.responseTopic?.mode,
         assistantMode: this.responseTopic?.mode });
       this.responseId = undefined; this.partial = ''; this.citations = [];
@@ -172,8 +174,8 @@ export class Conversation {
   resume() { if (this.state === 'paused') this.status('listening'); }
   async persist() {
     try { await this.save(this.history.map(item => ({ ...item,
-      content: item.role === 'assistant' ? stripInternalMetadata(item.content) : item.content }))); }
-    catch { this.emit({ type: 'error', code: 'SAVE_FAILED' }); }
+      content: item.role === 'assistant' ? stripInternalMetadata(item.content) : item.content }))); return true; }
+    catch { this.emit({ type: 'error', code: 'SAVE_FAILED' }); return false; }
   }
   async requestExit() {
     if (this.state === 'closed' || this.state === 'exit_pending') return;
@@ -266,10 +268,18 @@ export class Conversation {
       this.partial = stripInternalMetadata(this.partial);
       this.history.push({ role: 'assistant', content: this.partial, citations: this.citations,
         topicId: topic.id, topicLabel: topic.label, cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode });
+      this.committing = true;
+      const saved = await this.persist();
+      this.committing = false;
+      if (!current()) return;
+      if (!saved) {
+        this.responseId = undefined; this.partial = ''; this.citations = []; this.responseTopic = undefined;
+        this.status('paused'); return;
+      }
       this.emit({ type: 'answer.done', id: revision });
       this.responseId = undefined; this.partial = '';
       this.responseTopic = undefined;
-      this.status('listening'); await this.persist();
+      this.status('listening');
     } catch {
       if (!current()) return;
       this.cancel(); this.status('paused'); this.emit({ type: 'error', code: 'MODEL_FAILED' });
