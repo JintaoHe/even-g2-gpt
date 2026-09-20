@@ -44,7 +44,7 @@ function requestsAnswerRecovery(value: string) {
   const text = value.trim().replace(/[\r\n\t]+/g, ' ');
   if (!text || text.length > 300
     || /(?:不要|不用|别|无需|假如|假设|如果|举例|例子|他说|她说|对方说|原话|quoted?|example|if\b|suppose|he said|she said|do not|don't)/i.test(text)) return false;
-  const chinese = /(?:刚才|刚刚|上一轮|上一个|前面).{0,28}(?:没(?:有)?看到|没(?:有)?听到|没听清|没显示|中断|断了|再说|重说|重新回答|重复|回顾|复述)|(?:再说|重说|重新回答|重复|回顾|复述).{0,24}(?:刚才|刚刚|上一轮|上一个|答案|回答)/i;
+  const chinese = /(?:刚才|刚刚|上一轮|上一个|前面).{0,28}(?:没(?:有)?看到|没(?:有)?看完|没(?:有)?听到|没听清|没显示|中断|断了|说到一半|再说|继续说|接着说|重说|重新回答|重复|回顾|复述)|(?:再说|继续|继续说|接着说|重说|重新回答|重复|回顾|复述).{0,24}(?:刚才|刚刚|上一轮|上一个|答案|回答)|^(?:没看完[，,、\s]*)?(?:继续说|接着说)|^说到一半[了。！.!]*$/i;
   const english = /(?:didn't|did not|couldn't|could not).{0,24}(?:see|hear|catch|get).{0,24}(?:last|previous|answer|response)|(?:repeat|replay|say|answer).{0,24}(?:again|last|previous)/i;
   return chinese.test(text) || english.test(text);
 }
@@ -490,6 +490,7 @@ export function createConversationServer(options: {
     }, 1000);
     const lifetime = setTimeout(() => { session?.conversation.pause(); send({ type: 'error', code: 'SESSION_TIME_LIMIT' }); client.close(); }, 30 * 60000);
     const authenticate = async (msg: any) => {
+      const startedAt = Date.now();
       if (msg?.type !== 'hello') throw new Error('Auth');
       protocolV2 = msg.protocol_version === CONVERSATION_PROTOCOL_VERSION;
       if (protocolV2) msg = parseCoreClientMessage(msg);
@@ -600,6 +601,10 @@ export function createConversationServer(options: {
           lastHealthState = health.state;
         });
       }
+      const authDurationMs = Date.now() - startedAt;
+      if (binding.resumed || authDurationMs >= 500) console.info(JSON.stringify({ event: 'conversation_auth_ready',
+        duration_ms: authDurationMs, protocol_version: protocolV2 ? CONVERSATION_PROTOCOL_VERSION : 1,
+        resumed: binding.resumed, snapshot_messages: snapshot.length }));
     };
     const handleMessage = async (raw: WebSocket.RawData, binary: boolean) => {
       try {

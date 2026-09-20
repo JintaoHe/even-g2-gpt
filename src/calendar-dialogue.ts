@@ -154,9 +154,11 @@ function isConversationalClosure(value: string) {
 function completedCalendarAcknowledgement(value: string, history: Message[]) {
   const text = value.trim().replace(/[\r\n\t]+/g, ' ');
   const social = /(?:真|很|太)(?:棒|赞|贴心|好)|好棒|很好|做得好|贴心|谢谢|感谢|满意|做得不错|做得很好|thank|appreciate|great|awesome|nice/i.test(text);
-  const retrospective = /(?:已经|刚才|刚刚|你).{0,36}(?:帮我|给我)?.{0,20}(?:创建|新建|添加|保存).{0,5}(?:了|好|完成|成功)|(?:帮我|给我).{0,20}(?:创建|新建|添加|保存)了/i.test(text);
   const newRequest = /(?:再|另外|顺便|接着|还要|下一步|现在).{0,30}(?:帮我|给我|请|创建|新建|添加|修改|改到|取消|删除)|(?:请|麻烦|能不能|可以再).{0,24}(?:创建|新建|添加|修改|改到|取消|删除)/i.test(text);
-  if ((!social && !retrospective) || newRequest) return undefined;
+  const interrogative = /[?？]|(?:吗|么|没有|是不是|是否|有没有|成功没有|好了没有|好了吗|完成了吗)[。！.!]*$/i.test(text);
+  // A retrospective question is a request to re-read authoritative Calendar
+  // state, not a social acknowledgement of the previous success message.
+  if (!social || newRequest || interrogative) return undefined;
   // This bridge is intentionally one-shot. Once the result has been
   // acknowledged, later thanks or closure return to normal conversation.
   const success = history.at(-1);
