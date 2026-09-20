@@ -5,10 +5,17 @@ export type ResumeSessionCredential = {
   expiresAt: number;
 };
 
-type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+export type EvenHostStorage = {
+  getLocalStorage(key: string): Promise<string>;
+  setLocalStorage(key: string, value: string): Promise<boolean>;
+};
 
-const CLIENT_KEY = 'glass-assistant.client-id.v2';
-const RESUME_KEY = 'glass-assistant.resume-credential.v2';
+type LegacyStorage = Pick<Storage, 'getItem' | 'removeItem'>;
+
+const HOST_CLIENT_KEY = 'glass-assistant.client-id.v3';
+const HOST_RESUME_KEY = 'glass-assistant.resume-credential.v3';
+const LEGACY_CLIENT_KEY = 'glass-assistant.client-id.v2';
+const LEGACY_RESUME_KEY = 'glass-assistant.resume-credential.v2';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function validUuid(value: unknown): value is string {
@@ -24,61 +31,187 @@ function validCredential(value: unknown, now: number): value is ResumeSessionCre
     && Number.isSafeInteger(item.expiresAt) && Number(item.expiresAt) > now;
 }
 
-/** Browser storage is intentionally limited to the short-lived, server-scoped
- * resume credential. The long-lived G2 access token is never accepted here. */
+function parseCredential(raw: string | null | undefined, now: number) {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return validCredential(parsed, now) ? { ...parsed } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type HostRead = { available: boolean; value?: string };
+
+/**
+ * Keeps only a stable client id and a short-lived, server-scoped resume
+ * credential in the native Even App store. The long-lived application/master
+ * token is deliberately not part of this API and remains memory-only.
+ */
 export class SessionCredentialStore {
-  private readonly storage: StorageLike;
+  private readonly host: EvenHostStorage;
   private readonly now: () => number;
   private readonly uuid: () => string;
-  constructor(
-    storage: StorageLike,
-    now: () => number = Date.now,
-    uuid: () => string = () => crypto.randomUUID(),
-  ) {
-    this.storage = storage;
+  private initialized = false;
+  private clientIdValue = '';
+  private clientPersisted = false;
+  private credentialValue?: ResumeSessionCredential;
+  private persistenceHealthyValue = true;
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  private constructor(host: EvenHostStorage, now: () => number, uuid: () => string) {
+    this.host = host;
     this.now = now;
     this.uuid = uuid;
   }
 
+  static async open(
+    host: EvenHostStorage,
+    legacy?: LegacyStorage,
+    now: () => number = Date.now,
+    uuid: () => string = () => crypto.randomUUID(),
+  ) {
+    const store = new SessionCredentialStore(host, now, uuid);
+    await store.initialize(legacy);
+    return store;
+  }
+
+  get persistenceHealthy() { return this.persistenceHealthyValue; }
+
+  /** Allows lifecycle/ACK code to wait until all host writes have settled. */
+  whenSettled() { return this.writeQueue; }
+
   clientId() {
-    try {
-      const current = this.storage.getItem(CLIENT_KEY);
-      if (validUuid(current)) return current;
-      const created = this.uuid();
-      if (!validUuid(created)) throw new Error('Invalid UUID source');
-      this.storage.setItem(CLIENT_KEY, created);
-      return created;
-    } catch {
-      const fallback = this.uuid();
-      if (!validUuid(fallback)) throw new Error('Unable to create client identity');
-      return fallback;
-    }
+    this.assertInitialized();
+    return this.clientIdValue;
   }
 
   load() {
-    try {
-      const raw = this.storage.getItem(RESUME_KEY);
-      if (!raw) return undefined;
-      const parsed: unknown = JSON.parse(raw);
-      if (!validCredential(parsed, this.now())) {
-        this.storage.removeItem(RESUME_KEY);
-        return undefined;
-      }
-      return { ...parsed };
-    } catch {
-      try { this.storage.removeItem(RESUME_KEY); } catch { /* unavailable storage */ }
+    this.assertInitialized();
+    if (this.credentialValue && !validCredential(this.credentialValue, this.now())) {
+      void this.clearSession();
       return undefined;
     }
+    return this.credentialValue ? { ...this.credentialValue } : undefined;
   }
 
   save(value: ResumeSessionCredential) {
-    if (!validCredential(value, this.now())) throw new Error('Invalid resume credential');
-    this.storage.setItem(RESUME_KEY, JSON.stringify(value));
+    this.assertInitialized();
+    if (!validCredential(value, this.now()) || value.clientId !== this.clientIdValue) {
+      throw new Error('Invalid resume credential');
+    }
+    this.credentialValue = { ...value };
+    return this.enqueueWrite(() => this.persistCredential(value));
   }
 
   clearSession() {
-    try { this.storage.removeItem(RESUME_KEY); } catch { /* unavailable storage */ }
+    this.assertInitialized();
+    this.credentialValue = undefined;
+    return this.enqueueWrite(() => this.write(HOST_RESUME_KEY, ''));
+  }
+
+  private async initialize(legacy?: LegacyStorage) {
+    const [hostClientRead, hostResumeRead] = await Promise.all([
+      this.read(HOST_CLIENT_KEY), this.read(HOST_RESUME_KEY),
+    ]);
+    const legacyClient = this.legacyGet(legacy, LEGACY_CLIENT_KEY);
+    const validHostClient = validUuid(hostClientRead.value) ? hostClientRead.value : undefined;
+    const validLegacyClient = validUuid(legacyClient) ? legacyClient : undefined;
+    const selectedClient = validHostClient ?? validLegacyClient ?? this.uuid();
+    if (!validUuid(selectedClient)) throw new Error('Unable to create client identity');
+
+    let clientPersisted = !!validHostClient;
+    if (!clientPersisted && hostClientRead.available) {
+      clientPersisted = await this.write(HOST_CLIENT_KEY, selectedClient);
+    }
+    this.clientIdValue = selectedClient;
+    this.clientPersisted = clientPersisted;
+
+    const hostCredential = parseCredential(hostResumeRead.value, this.now());
+    if (hostCredential?.clientId === selectedClient) {
+      this.credentialValue = hostCredential;
+      if (legacy) {
+        this.legacyRemove(legacy, LEGACY_CLIENT_KEY);
+        this.legacyRemove(legacy, LEGACY_RESUME_KEY);
+      }
+    } else {
+      if (hostResumeRead.value && hostResumeRead.available) await this.write(HOST_RESUME_KEY, '');
+      const legacyCredential = parseCredential(this.legacyGet(legacy, LEGACY_RESUME_KEY), this.now());
+      if (legacyCredential?.clientId === selectedClient) {
+        // Preserve continuity during a transient host-storage failure, but never
+        // write new credentials back to browser storage.
+        this.credentialValue = legacyCredential;
+        if (clientPersisted && hostResumeRead.available) {
+          const migrated = await this.write(HOST_RESUME_KEY, JSON.stringify(legacyCredential));
+          if (migrated && legacy) {
+            this.legacyRemove(legacy, LEGACY_CLIENT_KEY);
+            this.legacyRemove(legacy, LEGACY_RESUME_KEY);
+          }
+        }
+      } else if (legacy) {
+        this.legacyRemove(legacy, LEGACY_RESUME_KEY);
+        if (clientPersisted) this.legacyRemove(legacy, LEGACY_CLIENT_KEY);
+      }
+    }
+
+    if (validHostClient && legacy) this.legacyRemove(legacy, LEGACY_CLIENT_KEY);
+    this.initialized = true;
+  }
+
+  private async persistCredential(value: ResumeSessionCredential) {
+    if (!this.clientPersisted) {
+      this.clientPersisted = await this.write(HOST_CLIENT_KEY, this.clientIdValue);
+      if (!this.clientPersisted) return false;
+    }
+    return this.write(HOST_RESUME_KEY, JSON.stringify(value));
+  }
+
+  private enqueueWrite(operation: () => Promise<boolean>) {
+    const result = this.writeQueue.then(operation, operation);
+    this.writeQueue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private assertInitialized() {
+    if (!this.initialized) throw new Error('Session credential store is not initialized');
+  }
+
+  private async read(key: string): Promise<HostRead> {
+    try {
+      const value = await this.host.getLocalStorage(key);
+      return { available: true, value: typeof value === 'string' ? value : '' };
+    } catch {
+      this.persistenceHealthyValue = false;
+      return { available: false };
+    }
+  }
+
+  private async write(key: string, value: string) {
+    try {
+      const saved = await this.host.setLocalStorage(key, value);
+      if (saved !== true) this.persistenceHealthyValue = false;
+      return saved === true;
+    } catch {
+      this.persistenceHealthyValue = false;
+      return false;
+    }
+  }
+
+  private legacyGet(legacy: LegacyStorage | undefined, key: string) {
+    if (!legacy) return null;
+    try { return legacy.getItem(key); }
+    catch { return null; }
+  }
+
+  private legacyRemove(legacy: LegacyStorage, key: string) {
+    try { legacy.removeItem(key); }
+    catch { /* A failed cleanup is retried on the next cold start. */ }
   }
 }
 
-export const sessionCredentialStorageKeys = { client: CLIENT_KEY, resume: RESUME_KEY } as const;
+export const sessionCredentialStorageKeys = {
+  client: HOST_CLIENT_KEY,
+  resume: HOST_RESUME_KEY,
+  legacyClient: LEGACY_CLIENT_KEY,
+  legacyResume: LEGACY_RESUME_KEY,
+} as const;

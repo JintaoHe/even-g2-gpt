@@ -133,7 +133,7 @@ export class ConnectionController {
       else if (message.type === 'resume.credential') this.replaceCredential(message);
       else if (message.type === 'message.ack' || message.type === 'answer.committed') this.observeSequence(message.sequence);
       else if (message.type === 'error' && message.code === 'SESSION_UNAVAILABLE') {
-        this.options.credentials.clearSession();
+        void this.options.credentials.clearSession();
         this.forceFresh = true;
         this.recoveryFailed = true;
         this.update({ state: 'recovering', reason: 'credential_expired', attempt: this.attempt });
@@ -167,7 +167,7 @@ export class ConnectionController {
     const clientId = this.options.credentials.clientId();
     const credential: ResumeSessionCredential = { clientId, sessionId: message.session_id,
       secret: message.resume_credential, expiresAt: message.resume_expires_at };
-    try { this.options.credentials.save(credential); } catch { this.options.credentials.clearSession(); }
+    this.persistCredential(credential);
     this.forceFresh = false;
     this.attempt = 0;
     this.cancelRetry();
@@ -181,7 +181,17 @@ export class ConnectionController {
     const current = this.options.credentials.load();
     if (!current || current.sessionId !== message.session_id || typeof message.resume_credential !== 'string'
       || !Number.isSafeInteger(message.resume_expires_at)) return;
-    this.options.credentials.save({ ...current, secret: message.resume_credential, expiresAt: message.resume_expires_at });
+    this.persistCredential({ ...current, secret: message.resume_credential, expiresAt: message.resume_expires_at });
+  }
+
+  private persistCredential(credential: ResumeSessionCredential) {
+    try {
+      void this.options.credentials.save(credential).then(saved => {
+        if (!saved) this.options.onEvent({ type: 'notice', text: '会话恢复凭证未保存；应用重开后可能需要重新连接' });
+      });
+    } catch {
+      void this.options.credentials.clearSession();
+    }
   }
 
   private observeSequence(value: unknown) {
@@ -232,7 +242,7 @@ export class ConnectionController {
     if (confirm) {
       this.ending = true;
       this.cancelRetry();
-      this.options.credentials.clearSession();
+      void this.options.credentials.clearSession();
     }
     return this.send({ type: 'exit.confirm', confirm });
   }
@@ -241,7 +251,7 @@ export class ConnectionController {
     if (!this.connected || !this.accessToken) return false;
     this.forceFresh = true;
     this.recoveryFailed = true;
-    this.options.credentials.clearSession();
+    void this.options.credentials.clearSession();
     return true;
   }
 

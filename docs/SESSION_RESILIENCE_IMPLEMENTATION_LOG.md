@@ -260,3 +260,28 @@ Phase 6 与 Phase 7.1/7.2：**PASS**。Phase 7.3 用户本地 simulator 验收�
 ### Gate
 
 Recovery hardening PR 1 自动化与构建：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建新的 `.ehpk`；scoped device credential、host storage、ACK rotation、同 client 抢占和 durable drafts 仍属于后续独立 PR。
+
+PR #34 已于 2026-09-20 squash merge 到 `main`，commit `0ef947a`。
+
+## 2026-09-20 — Recovery hardening Rev 6 · PR 2 working tree
+
+### 实现
+
+- Even client 不再把新 credential 写入 WebView/browser `localStorage`；稳定 `client_id` 与短期、session-scoped resume credential 改用 SDK 0.0.14 的 `bridge.getLocalStorage`／`setLocalStorage` 原生 host storage。
+- 主 `G2_CLIENT_TOKEN` 仍只存在当前页面内存，host adapter 的类型和序列化 schema 均不接受 master token、provider key 或其他 credential。
+- 启动时异步读取 host storage，再创建 `ConnectionController`；每次 plugin 启动均可从原生侧读取已保存的受限恢复状态。
+- browser v2 数据只作为一次性迁移源：host client ID 与 resume credential 都确认写入成功后才删除旧记录；任一原生写入返回 `false` 或抛错时保留旧数据，供下次冷启动重试。
+- host 中无效、过期、字段越界或带额外字段的 resume record fail closed；由于 SDK 没有 remove API，使用已检查成功结果的空字符串写入进行清除。
+- 所有原生写入严格串行，避免连续 credential rotation 的旧异步写入晚到并覆盖新值。原生读取在启动期失败时，下一次 credential save 会先补写稳定 client ID，再写 resume record。
+- 原生存储失败不会泄漏 secret；当前进程仍可使用内存中的短期凭证，并向用户显示“重开后可能需要重新连接”的有限提示。persisted ACK 与双代 credential window 仍严格留在 PR 4。
+
+### 自动化结果
+
+1. Even client：`56 passed / 0 failed`；新增成功迁移、host 优先、迁移失败保留、无效 record、`setLocalStorage=false`、启动读取失败恢复，以及重叠轮换按序落盘测试。
+2. Client TypeScript：通过。
+3. Even client production build：通过；release verifier 检查 2 个预期文件，未发现 debug fixture、test command、source map、private key 或明显 credential。
+4. Root full regression、Root TypeScript、server-only build 与 public audit：通过；未调用真实 OpenAI、Soniox、Google、SMTP 或 Calendar provider。
+
+### Gate
+
+Recovery hardening PR 2 本地自动化与安全 gate：**PASS**。尚未部署 Linux、没有构建新的 `.ehpk`，也没有提前实现 forced-kill harness、device credential、persisted ACK、foreground lifecycle 或 durable drafts；这些继续由后续独立 PR 负责。
