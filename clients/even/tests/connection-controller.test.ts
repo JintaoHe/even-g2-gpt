@@ -98,16 +98,17 @@ test('explicit exit clears resume authority and dispose prevents all reconnects'
 });
 
 test('development expiry requires a connected socket and retained in-memory access token', () => {
-  const f = fixture(); assert.equal(f.controller.simulateSessionExpiry(), false);
+  const f = fixture(); assert.equal(f.controller.forgetResumeCredential(), false);
   f.controller.connect('t'.repeat(32)); const ws = f.sockets[0]; ws.open(); f.ready(ws);
-  assert.equal(f.controller.simulateSessionExpiry(), true);
+  assert.equal(f.controller.forgetResumeCredential(), true);
+  assert.equal(f.controller.send({ type: 'test.session.expire' }), true);
   assert.equal(ws.sent.at(-1).type, 'test.session.expire');
   assert.equal(f.credentials.load(), undefined);
 });
 
 test('development resume closes one connected socket and reconnects with its saved credential', () => {
   const f = fixture(); f.controller.connect('t'.repeat(32)); const first = f.sockets[0]; first.open(); f.ready(first);
-  assert.equal(f.controller.simulateSessionResume(), true);
+  assert.equal(f.controller.reconnectNow(), true);
   assert.equal(f.timers.size, 1);
   [...f.timers.values()][0]();
   const second = f.sockets[1]; second.open();

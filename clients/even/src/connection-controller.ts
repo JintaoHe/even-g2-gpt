@@ -39,8 +39,6 @@ const OPEN = 1;
 const CLOSING = 2;
 const BACKOFF_MS = [500, 1_000, 2_000, 5_000, 10_000, 30_000] as const;
 const COMMAND_TYPES = new Set(['turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry', 'exit.request']);
-const LOCAL_TEST_COMMANDS = new Set(['test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
-  'test.storage.cleanup_preview', 'test.storage.cleanup_apply']);
 
 export function reconnectDelay(attempt: number, random = Math.random) {
   const base = BACKOFF_MS[Math.min(Math.max(0, attempt), BACKOFF_MS.length - 1)];
@@ -218,7 +216,7 @@ export class ConnectionController {
     if (!ws || ws.readyState !== OPEN) return false;
     const message = { ...value };
     if (message.type === 'text.submit' && message.message_id === undefined) message.message_id = this.options.uuid();
-    if ((COMMAND_TYPES.has(String(message.type)) || message.type === 'exit.confirm' || LOCAL_TEST_COMMANDS.has(String(message.type)))
+    if ((COMMAND_TYPES.has(String(message.type)) || message.type === 'exit.confirm' || String(message.type).startsWith('test.'))
       && message.command_id === undefined) message.command_id = this.options.uuid();
     ws.send(JSON.stringify(message));
     return true;
@@ -239,17 +237,17 @@ export class ConnectionController {
     return this.send({ type: 'exit.confirm', confirm });
   }
 
-  simulateSessionExpiry() {
+  forgetResumeCredential() {
     if (!this.connected || !this.accessToken) return false;
     this.forceFresh = true;
     this.recoveryFailed = true;
     this.options.credentials.clearSession();
-    return this.send({ type: 'test.session.expire' });
+    return true;
   }
 
-  simulateSessionResume() {
+  reconnectNow() {
     if (!this.connected || !this.socketValue) return false;
-    this.socketValue.close(4000, 'Simulator resume test');
+    this.socketValue.close(4000, 'Reconnect requested');
     return true;
   }
 

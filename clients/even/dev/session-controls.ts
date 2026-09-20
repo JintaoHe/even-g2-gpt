@@ -54,7 +54,7 @@ export function installSessionControls(options: {
   add('expire-session-now', '立即模拟恢复窗口过期', options.expire, '当前未连接，无法模拟过期。', true);
   add('inspect-sqlite-now', '查看 SQLite 状态', () => options.command('test.storage.inspect'), '当前未连接，无法读取状态。');
   add('seed-expired-record', '写入 3 年前测试记录', () => options.command('test.storage.seed_expired'), '当前未连接，无法写入测试记录。');
-  add('preview-retention', '预览 3 年清理', () => options.command('test.storage.cleanup_preview'), '当前未连接，无法预览。');
+  add('preview-retention', '预览测试记录清理（固定三年）', () => options.command('test.storage.cleanup_preview'), '当前未连接，无法预览。');
   add('apply-retention', '清理 3 年前测试记录', () => options.command('test.storage.cleanup_apply'), '当前未连接，无法清理。', true);
   section.append(title, controls, report, hint);
   document.body.append(section);

@@ -18,7 +18,9 @@ const developmentOnlyPatterns = [
   /开发测试\s*·\s*模拟定位/,
   /Des Moines\s*·\s*Downtown/,
   /41\.5868/,
-  /developmentLocationPanel/
+  /developmentLocationPanel/,
+  /test\.storage\.(?:seed_expired|cleanup_apply)/,
+  /test\.session\.expire/
 ];
 
 async function files(directory) {

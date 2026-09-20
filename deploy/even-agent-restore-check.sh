@@ -6,6 +6,8 @@ umask 077
 readonly BACKUP_ROOT='/var/backups/even-agent'
 readonly CHECK_ROOT='/var/backups/even-agent/.restore-check'
 readonly VERIFY_SCRIPT='/usr/local/lib/even-agent/verify-backup.mjs'
+readonly STORE_VERIFY_SCRIPT='/opt/even-agent/current/src/conversation-restore-verify-cli.js'
+readonly APPLICATION_ENV='/etc/even-agent.env'
 readonly KEEP_BACKUPS=7
 
 log() {
@@ -48,7 +50,12 @@ safe_remove_check_root
 install -d -o root -g root -m 0700 "${CHECK_ROOT}"
 trap safe_remove_check_root EXIT
 tar --extract --gzip --file "${resolved}" --directory "${CHECK_ROOT}" --no-same-owner --no-same-permissions
-/usr/local/bin/node "${VERIFY_SCRIPT}" "${CHECK_ROOT}"
+calendar_enabled=false
+if [[ -f "${APPLICATION_ENV}" ]] && grep -Eq '^GOOGLE_CALENDAR_ENABLED=true[[:space:]]*$' "${APPLICATION_ENV}"; then
+  calendar_enabled=true
+fi
+GOOGLE_CALENDAR_ENABLED="${calendar_enabled}" /usr/local/bin/node "${VERIFY_SCRIPT}" "${CHECK_ROOT}"
+/usr/local/bin/node "${STORE_VERIFY_SCRIPT}" "${CHECK_ROOT}"
 safe_remove_check_root
 trap - EXIT
 

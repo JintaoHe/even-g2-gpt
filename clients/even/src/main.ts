@@ -351,8 +351,8 @@ document.addEventListener('visibilitychange', () => { void audioController?.setV
 if (import.meta.env.DEV) {
   void import('../dev/session-controls').then(({ installSessionControls }) => { developmentSessionControls = installSessionControls({
     backendUrl: conversationWebSocketUrl(location, packagedBackendOrigin),
-    resume: () => connection.simulateSessionResume(),
-    expire: () => connection.simulateSessionExpiry(),
+    resume: () => connection.reconnectNow(),
+    expire: () => connection.forgetResumeCredential() && connection.send({ type: 'test.session.expire' }),
     command: type => connection.send({ type }),
   }); });
   void import('../dev/location-presets').then(({ installLocationPresets }) => installLocationPresets(location => {

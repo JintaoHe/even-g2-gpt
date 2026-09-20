@@ -236,3 +236,27 @@ Phase 6 与 Phase 7.1/7.2：**PASS**。Phase 7.3 用户本地 simulator 验收�
 - 状态报告只包含 schema/WAL/foreign-key、session/message 数、数据库与可用磁盘字节、警告、当前会话状态和 retention 计数，不包含正文、数据库路径、session ID 或 credential。
 - simulator 清理固定使用 `local-retention-test` owner scope；测试证明真实三年前历史不会被该按钮删除。
 - 补充后 root regression 为 `340 passed / 0 failed / 2 Windows platform skips`，Even client 为 `50 passed / 0 failed`；root/client typecheck、server/client build 与 public audit 通过。
+
+## 2026-09-20 — Recovery hardening Rev 6 · PR 1 working tree
+
+### 当前边界
+
+- 每条 WebSocket 连接由应用层 heartbeat 探测：默认 20 秒发出 ping，10 秒内没有 pong 就终止连接，最坏约 30 秒释放 lease，不依赖 Linux 两小时级 TCP keepalive。
+- 未认证连接使用有界集合；新的合法连接不会因为四条未完成认证的 socket 被静态拒绝。
+- 普通 socket close 或 heartbeat detach 只撤销连接级 capture、location request、Calendar／Email approval，并移除 event sink；已经提交给模型的回答允许继续完成并写入 SQLite。明确结束、session expiry 和 service shutdown 仍执行完整 interrupt。
+- capture stop hook 绑定 `connection_id`；被抢占的旧连接迟到 close 时不能清掉新连接刚安装的 hook。
+- simulator 的 SQLite 读控件与写控件拆成两个显式、默认关闭的开关；写开关必须依赖读开关，且任一开关都不能在 public host 配置下启动。生产 Even client bundle 不含 test command literal。
+- backup verifier 同时检查 conversation/jobs owner 已释放；Calendar 启用时强制要求 ledger 与两份 OAuth JSON，并使用当前代码重新打开恢复副本。
+- 自动更新在切换 release 前创建 root-only 数据快照；新 release health gate 失败时同时恢复代码和数据。archive 拒绝链接／目录穿越，只保留最近两份，不代替每日备份或 Lightsail snapshot。
+
+### 自动化结果
+
+1. Root full regression：`350 passed / 0 failed / 2 Windows platform skips`，共 352 tests。两个 skip 仍是当前 Windows 权限不允许创建测试用 file symlink；Linux gate 必须重跑。
+2. Even client：`50 passed / 0 failed`；client TypeScript 与 production Vite build 通过。
+3. Client release verifier 检查 2 个构建文件，未发现 debug fixture、test command、source map、private key 或明显 credential。
+4. Server-only build 通过；不包含 browser lab、SDK、simulator、tests、credentials 或 local data。
+5. 三个修改过的 shell script 通过 Git Bash `bash -n`；public audit 扫描 277 个 working-tree source/document files，未发现禁止路径或 credential pattern。
+
+### Gate
+
+Recovery hardening PR 1 自动化与构建：**PASS**。尚未部署 Linux、没有调用真实 provider、没有构建新的 `.ehpk`；scoped device credential、host storage、ACK rotation、同 client 抢占和 durable drafts 仍属于后续独立 PR。

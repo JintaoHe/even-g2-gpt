@@ -21,14 +21,19 @@ function verifySqlite(database, label) {
   if (foreignKeys.length) throw new Error(`${label} SQLite foreign key check failed`);
 }
 
+function verifyReleasedOwner(database, label) {
+  const tables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => String(row.name)));
+  if (tables.has('service_owner') && scalar(database, 'SELECT COUNT(*) AS count FROM service_owner', 'count') !== 0) {
+    throw new Error(`${label} was backed up before the service released ownership`);
+  }
+}
+
 function verifyConversation(database) {
   const tables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => String(row.name)));
   for (const table of REQUIRED_CONVERSATION_TABLES) {
     if (!tables.has(table)) throw new Error(`Conversation database is missing required table ${table}`);
   }
-  if (scalar(database, 'SELECT COUNT(*) AS count FROM service_owner', 'count') !== 0) {
-    throw new Error('Conversation database was backed up before the service released ownership');
-  }
+  verifyReleasedOwner(database, 'Conversation database');
   const crossSession = database.prepare(`SELECT 1 FROM messages m JOIN turns t ON t.id=m.turn_id
     WHERE m.session_id<>t.session_id LIMIT 1`).get()
     || database.prepare(`SELECT 1 FROM turns t JOIN messages m ON m.id=t.input_message_id
@@ -79,7 +84,8 @@ export async function verifyBackupRoot(rootInput, options = {}) {
   const rootInfo = await lstat(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('Backup root is unsafe');
 
-  let databases = 0, jsonFiles = 0, foundJobs = false, foundConversation = false;
+  let databases = 0, jsonFiles = 0, foundJobs = false, foundConversation = false, foundCalendar = false;
+  let foundOAuthClient = false, foundCalendarAuth = false;
   let conversation = { sessions: 0, messages: 0, latestSequence: 0, summaryThroughSequence: 0 };
   const files = new Set();
   async function inspect(directory) {
@@ -94,18 +100,22 @@ export async function verifyBackupRoot(rootInput, options = {}) {
         if (metadata.size > 16 * 1024 * 1024) throw new Error('JSON file is unexpectedly large');
         JSON.parse(await readFile(path, 'utf8'));
         jsonFiles++;
+        if (path === join(root, 'google-oauth-client.json')) foundOAuthClient = true;
+        if (path === join(root, 'google-calendar-auth.json')) foundCalendarAuth = true;
       }
       if (path.endsWith('.sqlite')) {
         const database = new DatabaseSync(path, { readOnly: true });
         try {
           verifySqlite(database, basename(path));
-          if (basename(path) === 'assistant-memory.sqlite') {
+          if (path === join(root, 'assistant-memory.sqlite')) {
             conversation = verifyConversation(database);
             foundConversation = true;
           }
+          if (path === join(root, 'jobs.sqlite')) verifyReleasedOwner(database, 'Jobs database');
+          if (path === join(root, 'google-calendar.sqlite')) foundCalendar = true;
         } finally { database.close(); }
         databases++;
-        if (basename(path) === 'jobs.sqlite') foundJobs = true;
+        if (path === join(root, 'jobs.sqlite')) foundJobs = true;
       }
     }
   }
@@ -117,10 +127,13 @@ export async function verifyBackupRoot(rootInput, options = {}) {
   }
   if (!foundJobs) throw new Error('Required jobs.sqlite is missing');
   if (!foundConversation) throw new Error('Required assistant-memory.sqlite is missing');
-  return { databases, jsonFiles, foundJobs, foundConversation, conversation };
+  if (options.calendarEnabled && (!foundCalendar || !foundOAuthClient || !foundCalendarAuth)) {
+    throw new Error('Calendar-enabled backup is missing its ledger or OAuth files');
+  }
+  return { databases, jsonFiles, foundJobs, foundConversation, foundCalendar, foundOAuthClient, foundCalendarAuth, conversation };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const report = await verifyBackupRoot(process.argv[2]);
+  const report = await verifyBackupRoot(process.argv[2], { calendarEnabled: process.env.GOOGLE_CALENDAR_ENABLED === 'true' });
   console.log(`Backup restore drill passed: ${report.databases} SQLite database(s), ${report.jsonFiles} JSON file(s), ${report.conversation.sessions} conversation session(s), ${report.conversation.messages} message(s).`);
 }

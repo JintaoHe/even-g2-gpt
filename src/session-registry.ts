@@ -4,12 +4,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 
 export type SessionDisposeReason = 'ended' | 'expired' | 'shutdown';
 export type SessionInterruptReason = 'connection_detached' | 'service_shutdown';
+export type SessionDetachReason = 'connection_detached';
 export type SessionEventSink<Event> = (event: Event) => void;
 
 /** Runtime contract intentionally contains no WebSocket or platform types. */
 export interface ManagedSessionRuntime<Event = unknown> {
   readonly id: string;
   replaceEventSink(sink: SessionEventSink<Event> | undefined): void;
+  detach(reason: SessionDetachReason): void | Promise<void>;
   interrupt(reason: SessionInterruptReason): void | Promise<void>;
   dispose(reason: SessionDisposeReason): void | Promise<void>;
 }
@@ -135,7 +137,7 @@ export class SessionRegistry<Event = unknown> {
       entry.connectionId = undefined;
       entry.detachedAt = this.now();
       entry.runtime.replaceEventSink(undefined);
-      await entry.runtime.interrupt('connection_detached');
+      await entry.runtime.detach('connection_detached');
       return sessionId;
     });
   }

@@ -9,6 +9,7 @@
 - 仓库代码和 npm 命令以无登录权限的 `even-deploy` 用户运行。root updater 只负责完成这次 UID/GID 下降；`setpriv --no-new-privs` 在 Git/npm 执行前恢复不可提权边界。该用户不能读取 `/etc/even-agent.env`、日历 OAuth 文件、对话或生成文档。
 - `npm ci` 使用 lockfile、`--ignore-scripts`、`--no-audit` 和 `--no-fund`。生产 Secret 不进入构建环境。
 - root 只负责把已验证的发布包复制到 root-owned release 目录、切换 symlink、重启服务和失败回滚；unit 只保留 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETUID`、`SETGID` 五项 capability，并禁止创建 namespaces。
+- 切换 release 前，updater 会先停止服务并把 `/var/lib/even-agent` 建成 root-only 的一致性 rollback archive；新 release 健康检查失败时，应用版本和该次更新前的数据会一起恢复。archive 会拒绝链接与目录穿越，且只保留最近两份。
 - timer 每 6 小时检查一次，并加入最多 30 分钟随机延迟；无新 commit 时不重启。
 
 这降低了风险，但不等于供应链绝对安全。GitHub 账号、branch protection、依赖 lockfile 或服务器 root 被攻陷仍可能影响生产。保留 MFA、快照和上一版本，不要给外部贡献者绕过 main 保护的权限。
@@ -102,6 +103,8 @@ sudo systemctl restart even-agent
 ```
 
 确认稳定后再调查，不要强行重新运行失败 commit。release 目录暂不自动删除；定期人工保留最近几个已验证版本，删除前必须确认它不是 `current` 或计划回滚的目标。
+
+自动 health gate 失败时，脚本会使用 `/var/lib/even-agent-updater/rollback-data/` 中与该 commit 对应的 pre-update archive 恢复数据；这个路径及 archive 均为 root-only。它只保护自动部署窗口，不代替每日备份或 Lightsail snapshot。若服务已经通过自动 gate、之后才发现业务问题，不要直接套用未知时间点的 archive；先停止 timer，核对 release、数据时间点和最近备份，再按恢复文档操作。
 
 ## 运维文件不会自动自我替换
 

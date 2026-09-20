@@ -17,6 +17,7 @@ function runtime(id: string) {
     id,
     calls,
     replaceEventSink(next) { sink = next; calls.push(next ? 'attach' : 'detach'); },
+    async detach(reason) { calls.push(`detach-runtime:${reason}`); },
     async interrupt(reason) { calls.push(`interrupt:${reason}`); },
     async dispose(reason) { calls.push(`dispose:${reason}`); },
     emit(text) { sink?.({ text }); },
@@ -46,7 +47,7 @@ test('detach keeps a logical session resumable and replaces the old event sink',
 
   assert.deepEqual(oldEvents, [{ text: 'before' }]);
   assert.deepEqual(newEvents, [{ text: 'after' }]);
-  assert.deepEqual(created.calls, ['attach', 'detach', 'interrupt:connection_detached', 'attach']);
+  assert.deepEqual(created.calls, ['attach', 'detach', 'detach-runtime:connection_detached', 'attach']);
   assert.equal(registry.connectionFor(sessionId), second);
 });
 
@@ -78,7 +79,7 @@ test('detached session expires at the injected-clock boundary and cannot resume'
   assert.deepEqual(await registry.sweepExpired(), [sessionId]);
   await assert.rejects(() => registry.resume(sessionId, second, () => {}), SessionUnavailableError);
   assert.deepEqual(created.calls, [
-    'attach', 'detach', 'interrupt:connection_detached', 'dispose:expired',
+    'attach', 'detach', 'detach-runtime:connection_detached', 'dispose:expired',
   ]);
 });
 
@@ -123,7 +124,7 @@ test('development expiry refuses an attached session and expires it immediately 
   await registry.detach(connectionId);
   assert.equal(await registry.expireDetached(sessionId), true);
   assert.equal(registry.has(sessionId), false);
-  assert.deepEqual(created.calls, ['attach', 'detach', 'interrupt:connection_detached', 'dispose:expired']);
+  assert.deepEqual(created.calls, ['attach', 'detach', 'detach-runtime:connection_detached', 'dispose:expired']);
 });
 
 test('explicit end disposes immediately while shutdown does not mislabel sessions expired', async () => {
