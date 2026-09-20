@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
 const SCHEMA_VERSION = 1;
+const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type ConversationStoreHealth = {
@@ -27,6 +28,24 @@ export type SessionRecord = {
   endReason?: string;
   latestSequence: number;
   summaryThroughSequence: number;
+};
+
+export type TopicRecord = {
+  id: string;
+  sessionId: string;
+  label: string;
+  status: 'active' | 'paused' | 'completed';
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ResumeCredential = {
+  id: string;
+  clientId: string;
+  sessionId: string;
+  secret: string;
+  createdAt: number;
+  expiresAt: number;
 };
 
 export type CreateSession = {
@@ -101,9 +120,20 @@ export type StoredTurn = {
   errorCode?: string;
 };
 
+export type RecoverableTurn = {
+  turn: StoredTurn;
+  input: StoredMessage;
+  output?: StoredMessage;
+};
+
 export class ConversationStoreConflictError extends Error {
   readonly code = 'MESSAGE_ID_CONFLICT';
   constructor() { super('Conversation message id conflicts with an existing message'); this.name = 'ConversationStoreConflictError'; }
+}
+
+export class ResumeCredentialError extends Error {
+  readonly code = 'RESUME_CREDENTIAL_INVALID';
+  constructor() { super('Resume credential is invalid or expired'); this.name = 'ResumeCredentialError'; }
 }
 
 function processIsAlive(pid: number) {
@@ -116,6 +146,18 @@ function processIsAlive(pid: number) {
 }
 
 function validUuid(value: string) { return UUID.test(value); }
+
+function credentialHash(secret: string) { return createHash('sha256').update(secret).digest('hex'); }
+
+function safeHashEqual(left: string, right: string) {
+  const a = Buffer.from(left, 'hex'), b = Buffer.from(right, 'hex');
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function newCredentialSecret() {
+  const id = randomUUID();
+  return { id, secret: `${id}.${randomBytes(32).toString('base64url')}` };
+}
 
 function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec('BEGIN IMMEDIATE');
@@ -155,6 +197,17 @@ function messageRecord(row: any): StoredMessage {
     status: row.status,
     content: row.content,
     ...(row.citations_json === null ? {} : { citations: JSON.parse(row.citations_json) }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function topicRecord(row: any): TopicRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    label: row.label,
+    status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -378,6 +431,150 @@ export class ConversationStore {
     return row ? sessionRecord(row) : undefined;
   }
 
+  ensureTopic(input: { sessionId: string; id: string; label: string; at: number }): TopicRecord {
+    this.ensureOpen();
+    const label = input.label.trim();
+    if (!validUuid(input.sessionId) || !validUuid(input.id) || !label || label.length > 80
+      || !Number.isSafeInteger(input.at) || input.at < 0) throw new Error('Invalid conversation topic');
+    return transaction(this.db, () => {
+      const existing = this.db.prepare('SELECT * FROM topics WHERE id=?').get(input.id) as any;
+      if (existing) {
+        if (existing.session_id !== input.sessionId || existing.label !== label) throw new ConversationStoreConflictError();
+        this.db.prepare('UPDATE topics SET updated_at=MAX(updated_at,?) WHERE id=?').run(input.at, input.id);
+      } else {
+        const session = this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND status IN ('active','idle')")
+          .get(input.sessionId);
+        if (!session) throw new Error('Conversation session is unavailable');
+        this.db.prepare(`INSERT INTO topics(id,session_id,label,status,created_at,updated_at)
+          VALUES (?,?,?,'active',?,?)`).run(input.id, input.sessionId, label, input.at, input.at);
+      }
+      return topicRecord(this.db.prepare('SELECT * FROM topics WHERE id=?').get(input.id));
+    });
+  }
+
+  listTopics(sessionId: string): TopicRecord[] {
+    this.ensureOpen();
+    if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
+    return (this.db.prepare('SELECT * FROM topics WHERE session_id=? ORDER BY created_at,id')
+      .all(sessionId) as any[]).map(topicRecord);
+  }
+
+  registerClient(input: { id: string; at: number; label?: string }): void {
+    this.ensureOpen();
+    const label = input.label?.trim();
+    if (!validUuid(input.id) || !Number.isSafeInteger(input.at) || input.at < 0
+      || (input.label !== undefined && (!label || label.length > 80))) throw new Error('Invalid conversation client');
+    this.db.prepare(`INSERT INTO clients(id,created_at,last_seen_at,label) VALUES (?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET last_seen_at=MAX(last_seen_at,excluded.last_seen_at),
+      label=COALESCE(clients.label,excluded.label)`).run(input.id, input.at, input.at, label ?? null);
+  }
+
+  issueResumeCredential(input: {
+    clientId: string; sessionId: string; createdAt: number; expiresAt: number;
+  }): ResumeCredential {
+    this.ensureOpen();
+    this.validateCredentialTimes(input.createdAt, input.expiresAt);
+    if (!validUuid(input.clientId) || !validUuid(input.sessionId)) throw new ResumeCredentialError();
+    const generated = newCredentialSecret();
+    return transaction(this.db, () => {
+      const client = this.db.prepare('SELECT 1 FROM clients WHERE id=?').get(input.clientId);
+      const session = this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND status IN ('active','idle')")
+        .get(input.sessionId);
+      if (!client || !session) throw new ResumeCredentialError();
+      this.db.prepare('DELETE FROM resume_credentials WHERE expires_at<=?').run(input.createdAt);
+      this.db.prepare(`INSERT INTO resume_credentials(id,client_id,session_id,secret_hash,created_at,expires_at)
+        VALUES (?,?,?,?,?,?)`).run(generated.id, input.clientId, input.sessionId, credentialHash(generated.secret),
+        input.createdAt, input.expiresAt);
+      this.db.prepare('UPDATE clients SET last_seen_at=MAX(last_seen_at,?) WHERE id=?').run(input.createdAt, input.clientId);
+      return { ...generated, clientId: input.clientId, sessionId: input.sessionId,
+        createdAt: input.createdAt, expiresAt: input.expiresAt };
+    });
+  }
+
+  rotateResumeCredential(input: {
+    secret: string; clientId: string; sessionId: string; at: number; expiresAt: number;
+  }): ResumeCredential {
+    this.ensureOpen();
+    this.validateCredentialTimes(input.at, input.expiresAt);
+    if (!validUuid(input.clientId) || !validUuid(input.sessionId)) throw new ResumeCredentialError();
+    const match = /^([0-9a-f-]{36})\.([A-Za-z0-9_-]{43})$/.exec(input.secret);
+    if (!match || !validUuid(match[1])) throw new ResumeCredentialError();
+    const generated = newCredentialSecret();
+    return transaction(this.db, () => {
+      const row = this.db.prepare(`SELECT r.*,s.status AS session_status FROM resume_credentials r
+        JOIN sessions s ON s.id=r.session_id WHERE r.id=?`).get(match[1]) as any;
+      if (!row || row.client_id !== input.clientId || row.session_id !== input.sessionId
+        || row.revoked_at !== null || row.expires_at <= input.at
+        || !['active', 'idle'].includes(row.session_status)
+        || !safeHashEqual(row.secret_hash, credentialHash(input.secret))) throw new ResumeCredentialError();
+      // Successful use consumes every credential issued for this client and
+      // session. Periodic refresh may briefly leave an older credential valid
+      // to avoid a disconnect-during-delivery lockout, but the first resume
+      // atomically invalidates all siblings before issuing the replacement.
+      const revoked = this.db.prepare(`UPDATE resume_credentials SET revoked_at=?
+        WHERE client_id=? AND session_id=? AND revoked_at IS NULL`).run(input.at, input.clientId, input.sessionId);
+      if (revoked.changes < 1) throw new ResumeCredentialError();
+      this.db.prepare('DELETE FROM resume_credentials WHERE expires_at<=?').run(input.at);
+      this.db.prepare(`INSERT INTO resume_credentials(id,client_id,session_id,secret_hash,created_at,expires_at)
+        VALUES (?,?,?,?,?,?)`).run(generated.id, input.clientId, input.sessionId, credentialHash(generated.secret),
+        input.at, input.expiresAt);
+      this.db.prepare('UPDATE clients SET last_seen_at=MAX(last_seen_at,?) WHERE id=?').run(input.at, input.clientId);
+      return { ...generated, clientId: input.clientId, sessionId: input.sessionId,
+        createdAt: input.at, expiresAt: input.expiresAt };
+    });
+  }
+
+  revokeSessionCredentials(sessionId: string, at: number): number {
+    this.ensureOpen();
+    if (!validUuid(sessionId) || !Number.isSafeInteger(at) || at < 0) throw new Error('Invalid credential revocation');
+    return Number(this.db.prepare(`UPDATE resume_credentials SET revoked_at=?
+      WHERE session_id=? AND revoked_at IS NULL`).run(at, sessionId).changes);
+  }
+
+  markSessionAttached(sessionId: string, at: number): SessionRecord {
+    return this.transitionLiveSession(sessionId, 'active', at);
+  }
+
+  markSessionDetached(sessionId: string, at: number): SessionRecord {
+    return this.transitionLiveSession(sessionId, 'idle', at);
+  }
+
+  endSession(sessionId: string, at: number, reason: string): SessionRecord {
+    return this.finishSession(sessionId, 'ended', at, reason);
+  }
+
+  expireSession(sessionId: string, at: number, reason = 'resume_window_expired'): SessionRecord {
+    return this.finishSession(sessionId, 'expired', at, reason);
+  }
+
+  private transitionLiveSession(sessionId: string, status: 'active' | 'idle', at: number): SessionRecord {
+    this.ensureOpen();
+    if (!validUuid(sessionId) || !Number.isSafeInteger(at) || at < 0) throw new Error('Invalid conversation session transition');
+    const result = this.db.prepare(`UPDATE sessions SET status=?,updated_at=MAX(updated_at,?)
+      WHERE id=? AND status IN ('active','idle')`).run(status, at, sessionId);
+    if (result.changes !== 1) throw new Error('Conversation session is unavailable');
+    return this.getSession(sessionId)!;
+  }
+
+  private finishSession(sessionId: string, status: 'ended' | 'expired', at: number, reason: string): SessionRecord {
+    this.ensureOpen();
+    if (!validUuid(sessionId) || !Number.isSafeInteger(at) || at < 0
+      || !/^[a-z][a-z0-9_]{1,63}$/.test(reason)) throw new Error('Invalid conversation session transition');
+    return transaction(this.db, () => {
+      const result = this.db.prepare(`UPDATE sessions SET status=?,updated_at=MAX(updated_at,?),ended_at=?,end_reason=?
+        WHERE id=? AND status IN ('active','idle')`).run(status, at, at, reason, sessionId);
+      if (result.changes !== 1) throw new Error('Conversation session is unavailable');
+      this.db.prepare(`UPDATE resume_credentials SET revoked_at=?
+        WHERE session_id=? AND revoked_at IS NULL`).run(at, sessionId);
+      return sessionRecord(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId));
+    });
+  }
+
+  private validateCredentialTimes(createdAt: number, expiresAt: number) {
+    if (!Number.isSafeInteger(createdAt) || createdAt < 0 || !Number.isSafeInteger(expiresAt)
+      || expiresAt <= createdAt || expiresAt - createdAt > MAX_RESUME_CREDENTIAL_MS) throw new ResumeCredentialError();
+  }
+
   commitUserTurn(input: CommitUserTurn): CommitAcknowledgement {
     this.ensureOpen();
     const content = input.content.trim();
@@ -442,6 +639,19 @@ export class ConversationStore {
     if (!validUuid(id)) return undefined;
     const row = this.db.prepare('SELECT * FROM turns WHERE id=?').get(id);
     return row ? turnRecord(row) : undefined;
+  }
+
+  latestRecoverableTurn(sessionId: string): RecoverableTurn | undefined {
+    this.ensureOpen();
+    if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
+    const row = this.db.prepare(`SELECT * FROM turns WHERE session_id=? AND input_message_id IS NOT NULL
+      ORDER BY created_at DESC,rowid DESC LIMIT 1`).get(sessionId) as any;
+    if (!row) return undefined;
+    const input = this.db.prepare('SELECT * FROM messages WHERE id=?').get(row.input_message_id) as any;
+    const output = row.output_message_id
+      ? this.db.prepare('SELECT * FROM messages WHERE id=?').get(row.output_message_id) as any : undefined;
+    if (!input || input.role !== 'user' || input.status !== 'committed') return undefined;
+    return { turn: turnRecord(row), input: messageRecord(input), ...(output ? { output: messageRecord(output) } : {}) };
   }
 
   listMessages(sessionId: string, afterSequence = 0, limit = 100): StoredMessage[] {

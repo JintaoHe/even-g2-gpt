@@ -107,6 +107,19 @@ test('answer completion is emitted only after durable save and save failure neve
   assert.equal(broken.state, 'paused');
 });
 
+test('event sink can be detached and replaced without replaying events to the old connection', async () => {
+  const first: Event[] = [], second: Event[] = [];
+  const c = new Conversation(immediate, event => first.push(event));
+  c.replaceEventSink(undefined);
+  await c.submit('detached answer');
+  assert.deepEqual(first, []);
+
+  c.replaceEventSink(event => second.push(event));
+  await c.submit('resumed answer');
+  assert.ok(second.some(event => event.type === 'answer.done'));
+  assert.equal(first.length, 0);
+});
+
 test('interrupting during durable commit cancels display completion without duplicating final history', async () => {
   const gate = deferred<void>(), events: Event[] = [];
   const c = new Conversation(immediate, event => events.push(event), async () => { await gate.promise; });

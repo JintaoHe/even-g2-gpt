@@ -32,7 +32,20 @@ export class CalendarControl {
         if (epoch !== this.epoch) { this.service.dismiss(result.id); return; }
         this.pending = result.id; this.send({ type: 'calendar.preview', ...result });
       } else {
-        if (!this.pending || msg.id !== this.pending || typeof msg.phrase !== 'string') throw Error('Invalid confirmation');
+        if (!this.pending || msg.id !== this.pending || typeof msg.phrase !== 'string') {
+          if (typeof msg.id !== 'string') throw Error('Invalid confirmation');
+          const recovered = await this.service.reconcile(msg.id);
+          if (recovered.state === 'succeeded') {
+            this.send({ type: 'calendar.result', id: recovered.eventId, state: recovered.state, recovered: true });
+            this.send({ type: 'calendar.list', ...this.service.list() });
+            return;
+          }
+          if (recovered.state === 'unknown' || recovered.state === 'sending') {
+            this.send({ type: 'calendar.error', code: 'CALENDAR_RECONCILIATION_REQUIRED' });
+            return;
+          }
+          throw Error('Invalid confirmation');
+        }
         const id = this.pending; this.pending = undefined;
         this.send({ type: 'calendar.working' });
         try {

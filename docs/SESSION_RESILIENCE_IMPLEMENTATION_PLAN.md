@@ -273,9 +273,9 @@ npm run audit:public
 
 #### 1.2 实现稳定 ID 和原子写入
 
-- [ ] server 生成 session、turn、assistant message 和 topic UUID。（server integration 待 Phase 2）
+- [x] server 生成 session、turn、assistant message 和 topic UUID。
 - [ ] typed input 的 `message_id` 由客户端生成，服务端验证并去重。（client/server integration 待 Phase 2/4）
-- [ ] STT final 的 user message ID 由服务端根据稳定 audio segment ID 生成或分配。（server integration 待 Phase 2）
+- [x] STT final 的 user message ID 由服务端分配并持久化。
 - [x] 在一个 transaction 中写入 user message、turn 和 sequence。
 - [x] 相同 `message_id`、相同内容重复提交返回原 ACK。
 - [x] 相同 `message_id`、不同内容返回冲突错误，不覆盖原记录。
@@ -290,13 +290,13 @@ npm run audit:public
 #### 1.3 改造回答持久化顺序
 
 - [x] 完成 SQLite 层的 streaming placeholder、checkpoint、final commit 和 interruption 原语；现有 WebSocket runtime 的正式接线仍按下列条目在 Phase 2 完成。
-- [ ] `answer.start` 时创建 `streaming` assistant message／turn 状态。
-- [ ] 流式内容按时间或字符阈值做节流 checkpoint，禁止每个 token 单独写 SQLite。
-- [ ] 最终内容、citation、message status 和 turn status 在同一 transaction commit。
-- [ ] 只有 commit 成功后才发送 `answer.committed`。
+- [x] `answer.start` 时创建 `streaming` assistant message／turn 状态。
+- [x] 流式内容按时间或字符阈值做节流 checkpoint，禁止每个 token 单独写 SQLite。
+- [x] 最终内容、citation、message status 和 turn status 在同一 transaction commit。
+- [x] 只有 commit 成功后才发送 `answer.committed`。
 - [x] 现有 JSON runtime 的 `answer.done` 已改为等待 save 成功；SQLite 接线后仍须验证它不早于 durable commit。
 - [x] SQLite store 启动时把遗留的 `streaming/planning/answering` 标记为 `interrupted`。
-- [ ] interrupted partial 不能伪装成完整回答；ContextBuilder 必须带明确中断标签。
+- [x] interrupted partial 不能伪装成完整回答；恢复上下文与 snapshot 带明确中断状态／标签。
 
 新增测试：`tests/conversation-commit-order.test.ts`、`tests/conversation-crash-recovery.test.ts`。
 
@@ -310,16 +310,16 @@ npm run audit:public
 
 #### 2.1 建立 `SessionRegistry`
 
-- [ ] `ConversationRuntime` 不再由 WebSocket connection 构造函数独占。
-- [ ] `SessionRegistry` 根据 session ID 创建、查找、绑定、解绑和过期 runtime。
-- [ ] WebSocket close 只 detach connection；不立即调用 conversation `close()`。
-- [ ] runtime 在恢复窗口内保留；过期后 flush、结束并释放模型／工具资源。
-- [ ] production 和 simulator 都使用 15 分钟恢复窗口；自动化测试通过注入 clock、人工测试通过开发控制立即触发过期。
-- [ ] 时间判断依赖可注入 clock，自动化测试不使用真实 sleep。
-- [ ] 本地开发控制可以强制当前 detached session 过期；正式 build 和公网服务器不注册该控制。
-- [ ] Linux 服务重启后按需从 SQLite hydrate 最近 session。
-- [ ] event sink 支持连接替换，不把旧 socket callback 永久捕获在 Conversation 中。
-- [ ] 当前 `owner` socket 规则改为 active input client lease。
+- [x] `ConversationRuntime` 不再由 WebSocket connection 构造函数独占。
+- [x] `SessionRegistry` 根据 session ID 创建、查找、绑定、解绑和过期 runtime。
+- [x] WebSocket close 只 detach connection；不立即调用 conversation `close()`。
+- [x] runtime 在恢复窗口内保留；过期后 flush、结束并释放模型／工具资源。
+- [ ] production 和 simulator 都使用 15 分钟恢复窗口；server 侧配置与受限测试控制已完成，simulator 按钮留到 Phase 4。
+- [x] 时间判断依赖可注入 clock，自动化测试不使用真实 sleep。
+- [x] 本地开发控制可以强制当前 detached session 过期；正式 build 和公网服务器拒绝注册该控制。
+- [x] Linux 服务重启后按需从 SQLite hydrate 最近 session。
+- [x] event sink 支持连接替换，不把旧 socket callback 永久捕获在 Conversation 中。
+- [x] 当前 `owner` socket 规则改为 active input client lease。
 
 新增测试：`tests/session-registry.test.ts`。
 
@@ -329,13 +329,13 @@ npm run audit:public
 
 #### 2.2 实现 resume credential
 
-- [ ] 初始主 token 认证成功后签发随机 scoped resume credential。
-- [ ] 数据库只保存 hash，客户端只保存明文凭证。
-- [ ] 凭证绑定 `client_id + session_id + owner_scope` 并设置到期时间。
-- [ ] 默认到期时间不超过 15 分钟恢复窗口加短暂网络宽限；它不是长期设备登录凭证。
-- [ ] 成功使用后轮换；旧凭证在宽限窗口后失效。
-- [ ] 明确退出、管理员吊销或 owner token 轮换时撤销凭证。
-- [ ] 日志只记录 credential ID 的安全短前缀，不记录 secret。
+- [x] 初始主 token 认证成功后签发随机 scoped resume credential。
+- [x] 数据库只保存 hash，客户端只接收明文凭证。
+- [x] 凭证绑定 `client_id + session_id`，并通过 session 绑定 `owner_scope` 和到期时间。
+- [x] 默认到期时间不超过 15 分钟恢复窗口加 1 分钟网络宽限；它不是长期设备登录凭证。
+- [x] 长连接在凭证过期前收到新的短期凭证；成功恢复会轮换凭证并原子撤销同一 client/session 的全部旧凭证。
+- [ ] 明确退出会撤销凭证；管理员吊销和 owner token 轮换尚无产品入口，留作后续安全管理功能。
+- [x] 日志不记录 resume credential secret。
 
 新增测试：`tests/session-credential.test.ts`。
 
@@ -345,12 +345,12 @@ npm run audit:public
 
 #### 2.3 实现 reconnect handshake 与增量补发
 
-- [ ] `hello` 增加 `protocol_version`、`client_id`、`resume_session_id`、`last_seen_sequence` 和 resume credential。
-- [ ] `ready` 返回 `connection_id`、`session_id`、`resumed`、`latest_sequence` 和恢复快照。
-- [ ] 服务端只补发客户端缺少的 committed events／messages。
+- [x] `hello` 增加 `protocol_version`、`client_id`、`resume_session_id`、`last_seen_sequence` 和 resume credential。
+- [x] `ready` 返回 `connection_id`、`session_id`、`resumed`、`latest_sequence` 和恢复快照。
+- [x] 服务端只补发客户端缺少的 committed／interrupted messages。
 - [ ] 超出恢复窗口时明确返回新 session，不把旧历史误接到新会话。
-- [ ] 快照包含显示所需的最后 user message、assistant answer、conversation state 和 interrupted 提示。
-- [ ] snapshot 不包含精确位置、API credential、审批 token 或邮件正文附件。
+- [x] 快照包含显示所需的 user/assistant messages、conversation state 和 interrupted turn 提示。
+- [x] snapshot 不包含精确位置、API credential、审批 token 或邮件附件内容。
 
 新增测试：`tests/conversation-reconnect.test.ts`。
 
@@ -360,13 +360,13 @@ npm run audit:public
 
 #### 2.4 显式恢复上一轮回答
 
-- [ ] 识别“刚才没看到／再说一次／重新回答／回顾刚才对话”等恢复请求，但普通重连不自动触发模型。
-- [ ] 查询当前 session 最近一个相关 turn，而不是依赖进程内变量。
-- [ ] 如果 assistant message 已经 `committed`，优先原样补发已存回答，不重新调用模型、不重复计费。
-- [ ] 如果 turn 是 `interrupted`，把原 user message、中断状态和受控 session context 交给 LLM，创建新的 turn 回答。
-- [ ] 新 turn 使用新的 message/turn ID，并通过 `retry_of_turn_id` 指向原 turn；不覆盖或伪造旧回答。
+- [x] 识别明确的“刚才没看到／再说一次／重新回答”等恢复请求，但普通重连不自动触发模型；宽泛 recap 留给 ContextBuilder。
+- [x] 查询当前 session 最近一个相关 turn，而不是依赖进程内变量。
+- [x] 如果 assistant message 已经 `committed`，`answer.retry` 原样补发已存回答，不重新调用模型、不重复计费。
+- [x] 如果 turn 是 `interrupted`，只有显式 `answer.retry` 才把带中断标签的 session context 交给 LLM，创建新的 turn 回答。
+- [x] 新 turn 使用新的 message/turn ID，并通过 `retry_of_turn_id` 指向原 turn；不覆盖或伪造旧回答。
 - [ ] 用户要求 recap 时，可以使用 ContextBuilder 总结相关 committed conversation；不得把中断 partial 当成已确认结论。
-- [ ] 没有可恢复 turn 或指代不清时只追问一个简短问题。
+- [x] 没有可恢复 turn 时只返回一个简短说明，不调用模型。
 
 新增测试：`tests/conversation-turn-recovery.test.ts`。
 
@@ -380,16 +380,16 @@ npm run audit:public
 
 #### 3.1 把草稿内容和执行授权彻底分开
 
-- [ ] 断线、暂停、连接替换时立即使 Calendar／Email approval token 失效。
-- [ ] 对话历史可以保留预览内容，但不得保留可直接执行的授权。
-- [ ] 恢复后用户说“确认”时，如果授权已失效，系统重新读取 provider 状态并生成简短新预览。
-- [ ] provider 请求已经发送时，不因为 socket 断线而重复发送。
-- [ ] provider 返回成功、失败或不确定状态后，都写入现有 job／calendar audit store。
-- [ ] 恢复后的 receipt 使用权威 store 查询，不依赖 LLM 回忆。
-- [ ] Calendar 已提交时使用 event ID／idempotency key 重新读取 Google Calendar：存在且内容匹配则报告已保存；不存在则回到预览，不直接重提请求。
-- [ ] Email 已获得明确 SMTP/provider receipt 时报告已发送，不再次发送。
-- [ ] Email 在 provider 已接收请求但本地没有确定 receipt 时保持 `unknown`；SMTP 通常无法证明最终收件，因此先提示用户检查收件箱，只有用户明确要求重发后才生成新预览和新确认。
-- [ ] 用户要求修改已经成功提交的 Calendar／Email 内容时，把它视为新操作，重新预览和确认。
+- [x] 断线、暂停、连接替换时立即使 Calendar／Email approval token 失效。
+- [x] 对话历史和 Calendar 草稿可以保留预览内容，但不得保留可直接执行的授权。
+- [x] 恢复后用户再次确认时，如果授权已失效，Calendar 重新读取 provider 后生成新预览；未发送的 Email 自动签发全新的预览／确认 token。
+- [x] provider 请求已经发送时，不因为 socket 断线而重复发送。
+- [x] provider 返回成功、失败或不确定状态后，都写入现有 job／calendar audit store。
+- [x] 恢复后的 receipt 使用权威 store 查询，不依赖 LLM 回忆。
+- [x] Calendar 已提交或结果未知时使用原 operation/event ID 只读核对 Google Calendar：内容匹配才报告已保存；无法证明时保持 unknown，绝不重放写入。
+- [x] Email 已获得明确 SMTP/provider receipt 时报告已发送，不再次发送。
+- [x] Email 在 provider 已接收请求但本地没有确定 receipt 时保持 `unknown`；SMTP 通常无法证明最终收件，因此先提示用户检查收件箱，只有用户明确要求重发后才生成新预览和新确认。
+- [x] 用户要求修改已经成功提交的 Calendar／Email 内容时，把它视为新操作，重新预览和确认。
 
 新增测试：`tests/conversation-write-recovery.test.ts`。
 
@@ -399,10 +399,10 @@ npm run audit:public
 
 #### 3.2 保护批量 Calendar loop
 
-- [ ] 正在逐项删除／修改多个 event 时，把“已选择哪些项目”和“处理到第几项”视为会话内容状态。
-- [ ] 每个实际写操作仍拥有独立 idempotency key 和独立 receipt。
-- [ ] 断线恢复后从权威 Calendar 状态重新读取，不能直接假设上一项成功。
-- [ ] 继续下一项前给出简短反馈，不一次要求用户记住多个确认问题。
+- [x] 正在逐项删除／修改多个 event 时，把“已选择哪些项目”和“处理到第几项”视为会话内容状态。
+- [x] 每个实际写操作仍拥有独立 idempotency key 和独立 receipt。
+- [x] 断线恢复后从权威 Calendar 状态重新读取，不能直接假设上一项成功。
+- [x] 继续下一项前给出简短反馈，不一次要求用户记住多个确认问题；恢复预览继续显示第 n/总数项。
 
 新增测试：在现有 Calendar choice/dialogue/recurrence tests 上增加断线和重复确认场景。
 

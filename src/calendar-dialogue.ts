@@ -225,7 +225,9 @@ export class CalendarDialogue implements DialogueModel {
       pending = await this.service.preview(draft.kind, event, draft.eventId, before, true, draft.scope); signal.throwIfAborted();
       this.draft = { ...draft, event, before };
       this.context = { ...draft.context, draft: event }; this.contextAt = this.now();
-      const prompt = pending.preview;
+      const prompt = this.cancelBatch
+        ? `第${this.cancelBatch.index + 1}/${this.cancelBatch.items.length}项\n${pending.preview}`
+        : this.batch ? `第${this.batch.index + 1}/${this.batch.events.length}项\n${pending.preview}` : pending.preview;
       this.approval = { ...pending, prompt }; delta(prompt);
     } catch (error) {
       if (pending) this.service.dismiss(pending.id);

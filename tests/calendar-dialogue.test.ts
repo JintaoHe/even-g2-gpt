@@ -78,6 +78,34 @@ test('one request can cancel two listed events through sequential previews and c
   assert.match(conversation.history.at(-1)!.content, /已删除“测试 B”（2\/2）[\s\S]*2项都已删除/);
 });
 
+test('disconnect-style invalidation retains a cancel batch but requires a fresh preview for each remaining write', async t => {
+  const f = await fixture(t); let action: TurnPlan['calendarAction'] = 'query';
+  const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: action }; },
+    async decide() { return 'respond' as const; }, async reply() {} };
+  const planner = async (): Promise<CalendarRequest> => action === 'query' ? query : { ...query, action: 'cancel' };
+  const dialog = new CalendarDialogue(base, f.service, planner);
+  const conversation = new Conversation(dialog, () => {});
+  await conversation.submit('查看十月一日的两个日程', true);
+  action = 'cancel';
+  await conversation.submit('两个都删除', true);
+  dialog.invalidate();
+
+  await conversation.submit('确认取消', true);
+  assert.equal(f.records.size, 2);
+  assert.match(conversation.history.at(-1)!.content, /第1\/2项[\s\S]*确认取消/);
+  await conversation.submit('确认', true);
+  assert.equal(f.records.size, 1);
+  assert.match(conversation.history.at(-1)!.content, /已删除“测试 A”[\s\S]*第2\/2项/);
+
+  dialog.invalidate();
+  await conversation.submit('确认取消', true);
+  assert.equal(f.records.size, 1);
+  assert.match(conversation.history.at(-1)!.content, /第2\/2项[\s\S]*取消·芝加哥时间[\s\S]*测试 B/);
+  await conversation.submit('确认取消', true);
+  assert.equal(f.records.size, 0);
+  assert.match(conversation.history.at(-1)!.content, /2项都已删除/);
+});
+
 test('praise after a completed calendar batch gets a warm acknowledgement, not another operation prompt', async t => {
   const f = await fixture(t); let plannerCalls = 0, baseReplies = 0;
   const base = {
