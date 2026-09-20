@@ -10,6 +10,7 @@
     "timezone:fallback:check": "tsx scripts/timezone-fallback-smoke.ts",
     "environment:check": "tsx scripts/environment-smoke.ts",
     "conditional:planner:check": "tsx scripts/conditional-planner-smoke.ts",
+    "acceptance:preflight": "node scripts/physical-acceptance-preflight.mjs",
     "stt:soniox:check": "tsx scripts/soniox-smoke.ts",
     "route:clarifier:check": "tsx scripts/route-clarifier-smoke.ts",
     "route:venue:check": "tsx scripts/route-clarifier-smoke.ts --venue-resolution",
