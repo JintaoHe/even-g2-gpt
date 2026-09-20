@@ -418,6 +418,26 @@ test('confirmation without a pending preview cannot write', async t => {
   assert.equal(f.writes(), 2);
 });
 
+test('calendar confirmation is bound to the exact immediately preceding preview', async t => {
+  const f = await fixture(t);
+  const request: CalendarRequest = { ...query, action: 'create', changes: { ...original, title: '预览绑定测试' } };
+  const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'create' }; },
+    async decide() { return 'respond' as const; }, async reply() {} };
+  const conversation = new Conversation(new CalendarDialogue(base, f.service, async () => request), () => {});
+
+  await conversation.submit('创建预览绑定测试', true);
+  const pending = f.service.list().operations.find(operation => operation.state === 'pending');
+  assert.ok(pending);
+  conversation.history.push({ role: 'assistant', content: '这不是获批的日历预览。' });
+
+  await conversation.submit('确认', true);
+  assert.equal(f.writes(), 2, 'a confirmation after another assistant message must not write');
+  const operations = f.service.list().operations;
+  assert.equal(operations.find(operation => operation.id === pending.id)?.state, 'dismissed');
+  assert.ok(operations.some(operation => operation.id !== pending.id && operation.state === 'pending'),
+    'the retained draft must receive a new independently confirmable preview');
+});
+
 test('pending preview rejects misleading confirmations and invalidation blocks short confirmation', async t => {
   const f = await fixture(t);
   for (const phrase of ['不要确认', '他说确认', '确认？', '确认，但改成十点', '确认取消', '确认']) {

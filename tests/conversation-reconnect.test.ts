@@ -325,7 +325,7 @@ test('a replaced connection close cannot erase the new owner capture cancellatio
   } finally { first.terminate(); replacement.terminate(); await app.close(); await store.close(); }
 });
 
-test('a forged same-client takeover cannot evict the current owner', { timeout: 10_000 }, async () => {
+test('an invalid same-client credential cannot evict the current owner', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-takeover-invalid-'));
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('owner answer') };
@@ -347,16 +347,44 @@ test('a forged same-client takeover cannot evict the current owner', { timeout: 
   } finally { owner.terminate(); forged.terminate(); await server.app.close(); await store.close(); }
 });
 
-test('four unauthenticated sockets cannot prevent the owner from authenticating', { timeout: 10_000 }, async () => {
+test('a foreign client id cannot attempt takeover with the owner genuine credential', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-reconnect-takeover-foreign-client-'));
+  const store = await ConversationStore.create(root);
+  const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('owner retained') };
+  const server = await listen(store, model), ownerClientId = randomUUID();
+  const owner = new WebSocket(server.url); await once(owner, 'open');
+  const ownerReady = waitFor(owner, 'ready');
+  owner.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: ownerClientId, token }));
+  const initial = await ownerReady;
+  const foreign = new WebSocket(server.url); await once(foreign, 'open');
+  try {
+    const rejected = waitFor(foreign, 'error');
+    foreign.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: randomUUID(),
+      resume_session_id: initial.session_id, resume_credential: initial.resume_credential, last_seen_sequence: 0 }));
+    assert.equal((await rejected).code, 'BUSY', 'the public client-id gate must reject before credential rotation');
+    const answer = waitFor(owner, 'answer.done');
+    owner.send(JSON.stringify({ type: 'text.submit', message_id: randomUUID(), text: 'owner still owns input' }));
+    await answer;
+    assert.equal(store.latestRecoverableTurn(initial.session_id)?.output?.content, 'owner retained');
+  } finally { owner.terminate(); foreign.terminate(); await server.app.close(); await store.close(); }
+});
+
+test('unauthenticated sockets are evicted to the fixed bound without blocking authentication', { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-auth-capacity-'));
   const store = await ConversationStore.create(root);
   const model: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('ok') };
   const server = await listen(store, model);
   const anonymous: WebSocket[] = [];
   try {
-    for (let index = 0; index < 4; index++) {
+    for (let index = 0; index < 12; index++) {
       const socket = new WebSocket(server.url); anonymous.push(socket); await once(socket, 'open');
     }
+    for (let attempt = 0; attempt < 100
+      && anonymous.filter(socket => socket.readyState === WebSocket.OPEN).length > 4; attempt++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(anonymous.filter(socket => socket.readyState === WebSocket.OPEN).length, 4,
+      'pre-auth eviction must bound otherwise-idle sockets');
     const owner = new WebSocket(server.url); await once(owner, 'open');
     anonymous.push(owner);
     const ready = waitFor(owner, 'ready');

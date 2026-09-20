@@ -55,6 +55,35 @@ test('successful resume rotates the credential and rejects replay of the previou
   } finally { await store.close(); }
 });
 
+test('credential identifiers never authorize a forged or mismatched secret body', async () => {
+  const { store, sessionId, clientId } = await fixture();
+  try {
+    const resume = store.issueResumeCredential({ clientId, sessionId, createdAt: 110, expiresAt: 1_000 });
+    const otherResume = store.issueResumeCredential({ clientId, sessionId, createdAt: 111, expiresAt: 1_001 });
+    const otherResumeBody = otherResume.secret.split('.')[1];
+    assert.throws(() => store.rotateResumeCredential({
+      secret: `${resume.id}.${'A'.repeat(43)}`, clientId, sessionId, at: 200, expiresAt: 1_100,
+    }), ResumeCredentialError);
+    assert.throws(() => store.rotateResumeCredential({
+      secret: `${resume.id}.${otherResumeBody}`, clientId, sessionId, at: 201, expiresAt: 1_101,
+    }), ResumeCredentialError);
+
+    const device = store.issueDeviceCredential({
+      clientId, createdAt: 210, expiresAt: 20_000, persistDeadlineAt: 500,
+    });
+    const otherDevice = store.issueDeviceCredential({
+      clientId, createdAt: 211, expiresAt: 20_001, persistDeadlineAt: 500,
+    });
+    const otherDeviceBody = otherDevice.secret.split('.')[1];
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: `${device.id}.${'B'.repeat(43)}`, clientId, at: 250, expiresAt: 20_050, persistDeadlineAt: 550,
+    }), DeviceCredentialError);
+    assert.throws(() => store.rotateDeviceCredential({
+      secret: `${device.id}.${otherDeviceBody}`, clientId, at: 251, expiresAt: 20_051, persistDeadlineAt: 551,
+    }), DeviceCredentialError);
+  } finally { await store.close(); }
+});
+
 test('one successful resume revokes all refreshed sibling credentials', async () => {
   const root = await mkdtemp(join(tmpdir(), 'even-session-credential-siblings-'));
   const store = await ConversationStore.create(root);
@@ -221,4 +250,44 @@ test('device credentials reject wrong clients, excessive lifetimes and explicit 
       secret: issued.secret, clientId, at: 270, expiresAt: 20_070, persistDeadlineAt: 570,
     }), DeviceCredentialError);
   } finally { await store.close(); }
+});
+
+test('device credential rotation prunes revoked and expired generations', async () => {
+  const { root, store, clientId } = await fixture();
+  const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
+  try {
+    let current = store.issueDeviceCredential({
+      clientId, createdAt: 200, expiresAt: 20_000, persistDeadlineAt: 500,
+    });
+    store.acknowledgeDeviceCredential({ id: current.id, clientId, at: 210 });
+
+    for (let i = 0; i < 20; i++) {
+      const at = 300 + i * 10;
+      current = store.rotateDeviceCredential({
+        secret: current.secret, clientId, at, expiresAt: at + 10_000, persistDeadlineAt: at + 100,
+      });
+      store.acknowledgeDeviceCredential({ id: current.id, clientId, at: at + 1 });
+    }
+
+    // A normal subsequent provisioning pass runs settlement before inserting
+    // the new pending generation. Old revoked rows must not accumulate.
+    store.issueDeviceCredential({
+      clientId, createdAt: 600, expiresAt: 20_600, persistDeadlineAt: 700,
+    });
+    const states = db.prepare(`SELECT state,COUNT(*) AS count FROM device_credentials
+      GROUP BY state ORDER BY state`).all().map((row: any) => ({ state: row.state, count: row.count }));
+    assert.deepEqual(states, [
+      { state: 'active', count: 1 },
+      { state: 'pending', count: 1 },
+    ]);
+
+    store.issueDeviceCredential({
+      clientId, createdAt: 30_000, expiresAt: 40_000, persistDeadlineAt: 30_100,
+    });
+    const expiredStates = db.prepare('SELECT state,COUNT(*) AS count FROM device_credentials GROUP BY state')
+      .all().map((row: any) => ({ state: row.state, count: row.count }));
+    assert.deepEqual(expiredStates, [
+      { state: 'pending', count: 1 },
+    ]);
+  } finally { db.close(); await store.close(); }
 });

@@ -111,3 +111,31 @@ test('snapshot restore replaces an empty UI and deduplicates later replayed even
   h.restoreSnapshot([{ id: 'a2', sequence: 3, role: 'assistant', status: 'committed', content: '补发回答' }]);
   assert.equal(h.entries.length, 3); assert.equal(h.current, '补发回答');
 });
+
+test('recovery ledger is visible on glasses, bounded, and never exposes operation details', () => {
+  const h = new ReadingHistory(); h.reset('已连接');
+  h.event({ type: 'ready', recovery: { uncertainMail: 1, uncertainCalendar: 1 } });
+  assert.match(h.current, /邮件待核实：1/); assert.match(h.current, /日历待核实：1/);
+
+  h.event({ type: 'jobs.list', jobs: [
+    { id: 'private-mail-id', mail_state: 'accepted', subject: 'private subject' },
+    { id: 'uncertain-mail-id', mail_state: 'unknown', recipient: 'private@example.com' },
+    { id: 'sending-mail-id', mail_state: 'sending' },
+  ] });
+  h.event({ type: 'calendar.list', operations: [
+    { id: 'completed-calendar-id', state: 'completed' },
+    { id: 'uncertain-calendar-id', state: 'unknown', eventId: 'private-event-id' },
+  ] });
+  assert.match(h.current, /邮件待核实：2/); assert.match(h.current, /发送中 1/); assert.match(h.current, /结果不确定 1/);
+  assert.match(h.current, /日历待核实：1/); assert.match(h.current, /不会自动重发或重放/);
+  assert.doesNotMatch(h.current, /private|uncertain-mail-id|event-id/);
+  assert.equal(h.entries.filter(entry => entry.raw.startsWith('恢复检查')).length, 1);
+});
+
+test('normal side-effect ledgers do not add a recovery warning', () => {
+  const h = new ReadingHistory(); h.reset('已连接');
+  h.event({ type: 'ready', recovery: { uncertainMail: 0, uncertainCalendar: 0 } });
+  h.event({ type: 'jobs.list', jobs: [{ mail_state: 'accepted' }, { mail_state: 'received' }] });
+  h.event({ type: 'calendar.list', operations: [{ state: 'completed' }, { state: 'cancelled' }] });
+  assert.equal(h.entries.length, 1); assert.equal(h.current, '已连接');
+});

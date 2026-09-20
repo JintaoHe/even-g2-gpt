@@ -81,7 +81,7 @@ async function fixture(startupResult = 0) {
   });
   const flush = () => new Promise<void>(resolve => setImmediate(resolve));
   await flush();
-  async function connect() {
+  async function connect(capabilities: Record<string, unknown> = { provider: 'api', speech: true }) {
     element('token').value = 'synthetic-test-token-not-a-secret-12345';
     await element('connect').onclick();
     const ws = sockets.at(-1); ws.readyState = 1; ws.onopen();
@@ -90,7 +90,7 @@ async function fixture(startupResult = 0) {
       connection_id: '33333333-3333-4333-8333-333333333333', session_id: '22222222-2222-4222-8222-222222222222',
       resumed: false, latest_sequence: 0, resume_window_minutes: 15,
       resume_credential: 'r'.repeat(32), resume_expires_at: Date.now() + 60_000,
-      snapshot: { state: 'listening', messages: [] }, capabilities: { provider: 'api', speech: true } }) });
+      snapshot: { state: 'listening', messages: [] }, capabilities }) });
     ws.onmessage({ data: JSON.stringify({ type: 'state', state: 'listening' }) });
     await flush(); await tick(); return ws;
   }
@@ -115,6 +115,20 @@ test('hot reload adopts an existing glasses container instead of splitting the d
 test('server-confirmed recovery window is visible after connection', async () => {
   const f = await fixture(); await f.connect();
   assert.equal(f.element('recovery-window').textContent, '会话恢复窗口：15 分钟');
+});
+
+test('cold start reconciles side effects and renders uncertain server state on glasses', async () => {
+  const f = await fixture();
+  const ws = await f.connect({ provider: 'api', speech: true, email: true, calendar: true });
+  assert.ok(ws.sent.some((event: any) => event.type === 'jobs.list'));
+  assert.ok(ws.sent.some((event: any) => event.type === 'calendar.list'));
+
+  ws.onmessage({ data: JSON.stringify({ type: 'jobs.list', jobs: [{ id: 'secret-job', mail_state: 'unknown' }] }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'calendar.list', events: [], operations: [{ id: 'secret-op', state: 'sending' }] }) });
+  await f.flush(); await f.tick();
+  assert.match(f.writes.at(-1)!, /邮件待核实：1/);
+  assert.match(f.writes.at(-1)!, /日历待核实：1/);
+  assert.doesNotMatch(f.writes.at(-1)!, /secret-job|secret-op/);
 });
 
 for (const systemEvent of [false, true]) test(`exit then reconnect redraws with system exit event=${systemEvent}`, async () => {

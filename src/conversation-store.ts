@@ -1072,15 +1072,23 @@ export class ConversationStore {
 
   private settleDeviceCredentialRotations(at: number) {
     const clients = this.db.prepare(`SELECT DISTINCT client_id FROM device_credentials
-      WHERE state='pending' AND revoked_at IS NULL AND persist_deadline_at<=?`).all(at) as Array<{ client_id: string }>;
+      WHERE state='pending' AND revoked_at IS NULL AND persist_deadline_at<=? AND expires_at>?`)
+      .all(at, at) as Array<{ client_id: string }>;
     for (const client of clients) {
       const winner = this.db.prepare(`SELECT id FROM device_credentials
-        WHERE client_id=? AND state='pending' AND revoked_at IS NULL AND persist_deadline_at<=?
-        ORDER BY created_at DESC,id DESC LIMIT 1`).get(client.client_id, at) as { id: string } | undefined;
+        WHERE client_id=? AND state='pending' AND revoked_at IS NULL AND persist_deadline_at<=? AND expires_at>?
+        ORDER BY created_at DESC,id DESC LIMIT 1`).get(client.client_id, at, at) as { id: string } | undefined;
       if (winner) this.promoteDeviceCredential(winner.id, client.client_id, at);
     }
     this.db.prepare(`UPDATE device_credentials SET state='revoked',revoked_at=COALESCE(revoked_at,?)
       WHERE expires_at<=? AND revoked_at IS NULL`).run(at, at);
+    // Device credentials are short-lived authentication material, not audit
+    // records. Keeping revoked generations forever makes normal WebView
+    // recovery grow this table without bound. Foreign keys use SET NULL for
+    // predecessors, so removing an unusable generation cannot invalidate a
+    // live successor.
+    this.db.prepare(`DELETE FROM device_credentials
+      WHERE revoked_at IS NOT NULL OR expires_at<=?`).run(at);
   }
 
   markSessionAttached(sessionId: string, at: number): SessionRecord {
