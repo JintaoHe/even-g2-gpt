@@ -290,6 +290,27 @@ test('draft API has no tools or mail access, preserves standalone content and fa
   assert.ok('clarification' in await generate([], 'calendar', undefined, new AbortController().signal));
 });
 
+test('partial metadata survives storage and requires its own visible preview before send', async () => {
+  const partial = structuredClone(draft);
+  partial.document.presentation.partial = true;
+  partial.document.presentation.incompleteSections = [2, 4];
+  partial.document.markdown = '> 未完成草稿：第 2、4 章不完整。\n\n' + partial.document.markdown;
+  await fixture(async ({ conversation, store, route, sent, model }) => {
+    await conversation.submit('生成文件并发给我', true);
+    assert.equal(sent.length, 0);
+    assert.match(conversation.history.at(-1)!.content, /未完成草稿：第 2、4 章不完整/);
+    const id=store.list()[0].id;
+    assert.equal(store.metadata(id)?.partial,true);
+    assert.match((await store.download(id)).toString(), /未完成草稿/);
+    model.invalidate(); route('confirm');
+    await conversation.submit('确认发送',true);
+    assert.equal(sent.length,0); // stale approval cannot be reused
+    assert.match(conversation.history.at(-1)!.content,/未完成草稿/);
+    await conversation.submit('确认发送',true);
+    assert.equal(sent.length,1); assert.equal(sent[0].document.presentation.partial,true);
+  },async()=>structuredClone(partial));
+});
+
 test('calendar attachment planning repairs a missed Chinese ICS object and never asks for an email address', async () => {
   const completed = (text: string) => ({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] });
   const plan = { clarification: '', title: '架构评审资料', summary: '会议资料与日历附件。',
@@ -307,7 +328,7 @@ test('calendar attachment planning repairs a missed Chinese ICS object and never
   assert.match(requests[1].instructions, /never ask for an email address/);
 });
 
-test('section generation uses one bounded continuation and never publishes a second incomplete response', async () => {
+test('section generation uses one bounded continuation then rewrites double truncation', async () => {
   const completed = (text: string) => ({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] });
   const plan = completed(JSON.stringify({ clarification: '', title: '长文', summary: '结构化长文。',
     sections: [{ heading: '风险', brief: '分析风险和缓解措施。' }], calendar: null }));
@@ -323,9 +344,10 @@ test('section generation uses one bounded continuation and never publishes a sec
 
   replies = [plan, { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
     output: [{ type: 'message', content: [{ type: 'output_text', text: '片段' }] }] },
-    { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }];
-  await assert.rejects(generate([{ role: 'user', content: '再写一份长文' }], 'document', undefined, new AbortController().signal),
-    /DRAFT_CONTINUATION_INCOMPLETE/);
+    { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }, completed('根据原始要求重写的完整章节。')];
+  const recovered = await generate([{ role: 'user', content: '再写一份长文' }], 'document', undefined, new AbortController().signal);
+  assert.ok('document' in recovered); assert.equal(recovered.document.presentation.partial, undefined);
+  assert.deepEqual(recovered.document.presentation.compressedSections, [1]);
 });
 
 test('multi-section generation shares the document byte budget instead of giving every section the full token ceiling', async () => {
