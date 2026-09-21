@@ -321,7 +321,7 @@ export function createConversationServer(options: {
       options.capabilities?.location === true ? resolveCalendarTimezone : undefined, recoveryPersistence('calendar')) : undefined;
     const locationDialogue = options.routeProvider && options.capabilities?.location === true
       ? new LocationDialogue(calendarDialogue ?? delivery ?? options.model, locationBroker, options.routeProvider,
-        process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', Date.now, options.model) : undefined;
+        process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', Date.now, options.model, runtimeMetrics.observeNearby) : undefined;
     const planningEvidenceDialogue = options.environmentProvider && options.planningEvidenceSelector
       ? new PlanningEvidenceDialogue(locationDialogue ?? calendarDialogue ?? delivery ?? options.model,
         options.planningEvidenceSelector, locationBroker, options.environmentProvider) : undefined;
@@ -926,7 +926,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const openaiFetch = createMeteredOpenAIFetch(costs, process.env, fetch, runtimeMetrics.observeProvider);
   const hybrid = createDialogueProvider(process.env, { fetcher: openaiFetch });
   const stt = createSttProvider(process.env, costs, runtimeMetrics.observeProvider);
-  const routeProvider = createRouteProvider(process.env, costs, runtimeMetrics.observeProvider);
+  const routeProvider = createRouteProvider(process.env, costs, runtimeMetrics.observeProvider, runtimeMetrics.observeNearby);
   const timezoneProvider = createTimezoneProvider(process.env, costs, runtimeMetrics.observeProvider);
   const environmentProvider = createEnvironmentProvider(process.env, costs, runtimeMetrics.observeProvider);
   const jobs = await JobStore.create(dataDirectory, createDocumentRenderer(process.env, openaiFetch));

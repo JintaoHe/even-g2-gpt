@@ -27,7 +27,7 @@ export type CognitiveMode = 'casual' | 'explain' | 'research' | 'brainstorm' | '
   | 'deep_reasoning' | 'compose' | 'coaching';
 /** @deprecated Compatibility alias for older clients and saved sessions. */
 export type AssistantMode = CognitiveMode;
-export type LocationAction = 'none' | 'route_eta' | 'nearby_search' | 'recompare' | 'cancel';
+export type LocationAction = 'none' | 'route_eta' | 'nearby_search' | 'recompare' | 'analyze_places' | 'cancel';
 export type TaskKind = 'outdoor_activity';
 export type TaskAction = 'none' | 'conditional_task' | 'confirm_conditional' | 'cancel_conditional';
 export type WorkflowKind = 'search' | 'navigation' | 'environment' | 'calendar' | 'document' | 'email' | 'memory' | 'list' | 'conditional_task';
@@ -36,7 +36,9 @@ export type SearchAction = 'none' | 'search';
 export type RouteTravelMode = 'drive' | 'walk' | 'bicycle';
 export type RoutePlaceOption = { name: string; address?: string; primaryType?: string; types?: string[] };
 export type RouteClarification = { action: 'proceed'; selectedIndices: number[] }
+  | { action: 'assume'; selectedIndices: number[]; assumptionNote: string }
   | { action: 'ask'; selectedIndices: []; question: string };
+export type RouteClarificationPolicy = { allowAsk: boolean; mode: 'specific' | 'recommend' };
 export type RouteResolution = { action: 'resolved'; destination: string }
   | { action: 'ask'; question: string }
   | { action: 'not_found' };
@@ -45,7 +47,8 @@ export type TurnPlan = { decision: Decision; cognitiveMode?: CognitiveMode; assi
   deliveryAction?: import('./delivery-intent.js').DeliveryAction;
   calendarAction?: import('./calendar-planner.js').CalendarAction; locationAction?: LocationAction;
   searchAction?: SearchAction; taskAction?: TaskAction; taskKind?: TaskKind | null; workflows?: WorkflowSelection[];
-  routeDestination?: string | null; routeOrigin?: string | null; routeMode?: RouteTravelMode; routeModeExplicit?: boolean };
+  routeDestination?: string | null; routeOrigin?: string | null; routeMode?: RouteTravelMode; routeModeExplicit?: boolean;
+  nearby?: import('./nearby-intent.js').NearbyIntent };
 
 /** Normalize one model classification into the backend-owned routing vocabulary. */
 export function normalizeTurnPlan(plan: TurnPlan): TurnPlan {
@@ -71,7 +74,8 @@ export interface DialogueModel {
   endSession?(): void;
   plan?(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan>;
   decide(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<Decision>;
-  clarifyRoute?(query: string, options: RoutePlaceOption[], history: Message[], signal: AbortSignal): Promise<RouteClarification>;
+  clarifyRoute?(query: string, options: RoutePlaceOption[], history: Message[], signal: AbortSignal,
+    policy?: RouteClarificationPolicy): Promise<RouteClarification>;
   resolveRoute?(query: string, history: Message[], signal: AbortSignal,
     update?: (event: ReplyUpdate) => void): Promise<RouteResolution>;
   reply(history: Message[], signal: AbortSignal, delta: (text: string) => void, update?: (event: ReplyUpdate) => void,

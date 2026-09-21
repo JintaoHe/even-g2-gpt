@@ -1,9 +1,13 @@
 import type { Message } from './conversation.js';
 
 export type Presentation = { title: string; summary: string; kind: 'summary' | 'excerpt'; filename: string;
-  partial?: boolean; incompleteSections?: number[]; compressedSections?: number[] };
+  partial?: boolean; incompleteSections?: number[]; compressedSections?: number[]; lengthMismatch?: boolean };
 export function documentWarning(value?: Presentation): string {
-  return value?.partial ? `未完成草稿：第 ${(value.incompleteSections ?? []).join('、')} 章不完整，代码不可视为可运行。` : '';
+  if (value?.partial) {
+    const sections = (value.incompleteSections ?? []).join('、');
+    return sections ? `第 ${sections} 章还有部分内容待补充，发送前请留意。` : '还有部分内容待补充，发送前请留意。';
+  }
+  return value?.lengthMismatch ? '文档已整理好，篇幅与原定目标有所不同。' : '';
 }
 export type Document = { markdown: string; presentation: Presentation };
 const limit = (text: string, length: number) => Array.from(text).slice(0, length).join('');
@@ -72,9 +76,9 @@ const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': 
 export function mailPresentation(value?: Presentation, attachmentNames?: string[]) {
   const metadata = value ? presentation(value.title, value.summary, value.kind) : presentation('谈话笔记', '这是一份已保存的谈话记录，完整内容和来源链接见附件。', 'excerpt');
   if (value?.partial) {
-    metadata.title = `未完成草稿 · ${metadata.title}`;
-    metadata.summary = documentWarning(value) + '\n' + metadata.summary;
+    metadata.title = `待补充 · ${metadata.title}`;
   }
+  if (documentWarning(value)) metadata.summary = documentWarning(value) + '\n' + metadata.summary;
   const label = metadata.kind === 'summary' ? '内容摘要' : '内容摘录（非 AI 总结）';
   const attachments = (attachmentNames ?? [metadata.filename]).join('、');
   const footer = '这是你通过 Even 私人助理主动生成或导出的文件。摘要仅供快速回顾，请以附件中的完整文档及来源为准。无需登录或提供密码。';

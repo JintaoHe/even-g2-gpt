@@ -45,7 +45,8 @@ for (const entry of entries) {
     || /(^|\/)\.env(?:\.|$)/.test(path) && path !== '.env.example'
     || path === 'tests/recording-regression.md') report('Private/generated path');
   if (!/\.(?:ts|js|mjs|sh|json|md|html|css|conf|service|timer|yml|yaml)$/.test(path)
-    && !['.gitattributes', '.gitignore', '.env.example', '.github/CODEOWNERS', 'deploy/Caddyfile'].includes(path)) report('Not an allowed source/document file');
+    && !['.gitattributes', '.gitignore', '.env.example', '.github/CODEOWNERS', 'deploy/Caddyfile',
+      'scripts/restart-simulator.ps1', 'scripts/restart-simulator.cmd'].includes(path)) report('Not an allowed source/document file');
   if (working) {
     let stat;
     try { stat = lstatSync(path); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }

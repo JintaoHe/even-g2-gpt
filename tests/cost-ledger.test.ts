@@ -7,6 +7,19 @@ import { CostBudgetExceeded, CostLedger, type CostAlert } from '../src/cost-ledg
 import { createMeteredOpenAIFetch } from '../src/metered-openai.js';
 
 const path = async () => join(await mkdtemp(join(tmpdir(), 'even-cost-')), 'cost-ledger.json');
+
+test('a failed durable write prevents this and subsequent provider calls until restart', async () => {
+  const file = await path(), ledger = await CostLedger.create(file, env());
+  const before = await readFile(file, 'utf8');
+  // Inject at the durable boundary, not at the provider, to exercise fail-closed queuing.
+  (ledger as any).persist = async () => { throw Object.assign(new Error(), { code: 'EPERM' }); };
+  let calls = 0;
+  const fetcher = createMeteredOpenAIFetch(ledger, env(), async () => { calls++; return new Response('{}'); });
+  const request = { method: 'POST', body: JSON.stringify({ model: 'gpt-4.1-mini', input: 'test', max_output_tokens: 100 }) };
+  await assert.rejects(fetcher('https://api.openai.com/v1/responses', request), /COST_LEDGER_UNAVAILABLE/);
+  await assert.rejects(ledger.reserve('google', 0.01), /COST_LEDGER_UNAVAILABLE/);
+  assert.equal(calls, 0); assert.equal(await readFile(file, 'utf8'), before);
+});
 const env = (values: Record<string, string> = {}) => ({
   COST_TOTAL_MONTHLY_USD: '80', COST_OPENAI_MONTHLY_USD: '50', COST_SONIOX_MONTHLY_USD: '20', COST_GOOGLE_MONTHLY_USD: '10', ...values
 }) as NodeJS.ProcessEnv;

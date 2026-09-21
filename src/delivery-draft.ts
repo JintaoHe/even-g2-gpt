@@ -1,5 +1,5 @@
 import type { Message } from './conversation.js';
-import { presentation, type Document } from './document-presentation.js';
+import { presentation, documentWarning, type Document } from './document-presentation.js';
 import { validateCalendar, calendarDetails, type CalendarEvent } from './calendar.js';
 
 export type Draft = { document: Document; calendar?: CalendarEvent };
@@ -226,7 +226,7 @@ The previous structured plan failed to provide one valid calendar object even th
     if (targets.some(n => !Number.isInteger(n) || n < 1) || targets.reduce((a,b)=>a+b,0) > length.maximum
       || targets.reduce((a,b)=>a+b,0) < length.minimum) throw Error('DRAFT_INVALID');
     const plan = { title: raw.title, summary: raw.summary, sections, length };
-    const incompleteSections: number[] = [], compressedSections: number[] = [], lengthExceptions: number[] = [];
+    const incompleteSections: number[] = [], compressedSections: number[] = [];
     const totalBodyBudget = options.conciseRetry ? RETRY_BODY_BUDGET_BYTES : DOCUMENT_BODY_BUDGET_BYTES;
     const sectionByteBudget = Math.max(4_000, Math.floor(totalBodyBudget / sections.length));
     // UTF-8 bytes per token vary by language. Four bytes/token is a conservative
@@ -294,14 +294,13 @@ Continue ONLY the current Markdown section from the exact end of alreadyWritten.
         if (calendar) throw new DraftGenerationError('DRAFT_LENGTH_MISMATCH', 'compression');
         // Section allocations guide generation; the user's TOTAL range is the
         // acceptance contract. Keep complete repairs instead of discarding them.
-        lengthExceptions.push(index + 1);
       }
       compressedSections.push(index + 1); return result;
       } catch (error) {
         childSignal.throwIfAborted();
         if (calendar) throw error; // Calendar-bearing artifacts remain fail closed.
         incompleteSections.push(index + 1);
-        return safePartialBody(body, sectionByteBudget - 500) + '\n\n> 本节未完成：篇幅要求未满足或重写失败；代码片段已移除，不可视为完整实施方案。';
+        return safePartialBody(body, sectionByteBudget - 500) + '\n\n> 本节仅保留已整理的内容，尚有部分内容待补充。';
       }
     };
     const sectionAbort = new AbortController();
@@ -318,16 +317,15 @@ Continue ONLY the current Markdown section from the exact end of alreadyWritten.
     catch (error) { sectionAbort.abort(); signal.throwIfAborted(); throw error; }
     signal.throwIfAborted();
     const totalUnits = bodies.reduce((sum, body) => sum + proseUnits(body, length.unit), 0);
-    if (raw.length && (totalUnits < length.minimum || totalUnits > length.maximum)) {
+    const lengthMismatch = !!raw.length && (totalUnits < length.minimum || totalUnits > length.maximum);
+    if (lengthMismatch) {
       if (calendar) throw new DraftGenerationError('DRAFT_LENGTH_MISMATCH', 'compression');
-      for (const index of lengthExceptions.length ? lengthExceptions : sections.map((_,i)=>i+1)) {
-        if (!incompleteSections.includes(index)) incompleteSections.push(index);
-      }
     }
     const metadata = presentation(raw.title, raw.summary, 'summary');
     metadata.compressedSections = compressedSections.sort((a,b)=>a-b);
+    if (lengthMismatch) metadata.lengthMismatch = true;
     if (incompleteSections.length) { metadata.partial = true; metadata.incompleteSections = incompleteSections.sort((a,b)=>a-b); }
-    const warning = metadata.partial ? `> 未完成草稿：第 ${metadata.incompleteSections!.join('、')} 章不完整；请审阅后再决定是否发送。\n\n` : '';
+    const warning = documentWarning(metadata) ? `> ${documentWarning(metadata)}\n\n` : '';
     const markdown = `# ${metadata.title}\n\n${warning}` + bodies.map((body, index) => `## ${sections[index].heading}\n\n${body}`).join('\n\n')
       + (calendar ? '\n\n## 已核对的日程信息\n\n' + calendarDetails(calendar) + '\n' : '');
     const documentBytes = Buffer.byteLength(markdown), sectionBytes = bodies.map(body => Buffer.byteLength(body));

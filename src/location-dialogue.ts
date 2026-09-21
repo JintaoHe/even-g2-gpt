@@ -1,10 +1,17 @@
 import type { AssistantMode, DialogueModel, Message, ReplyUpdate, ReasoningEffort, RouteTravelMode, TurnPlan, WorkflowSelection } from './conversation.js';
+import { randomUUID } from 'node:crypto';
+import { applyNearbyIntent, type NearbyPreferences } from './nearby-intent.js';
+import type { NearbyMetricObserver } from './runtime-metrics.js';
 import { LocationRequestBroker, LocationUnavailableError } from './location.js';
 import { RouteError, recommendCandidates, type PlaceCandidate, type RouteComparisonResult, type RouteOrigin, type RouteProvider, type RouteRequestKind } from './routes.js';
 
 type PendingRoute = { destination: string; mode: RouteTravelMode; modeExplicit: boolean; kind: RouteRequestKind; candidates?: PlaceCandidate[]; expires: number; prompt: string };
-type RecentComparison = { query: string; kind: RouteRequestKind; candidates: PlaceCandidate[]; recommendedPlaceId?: string };
-type PendingPlaceClarification = { destination: string; mode: RouteTravelMode; modeExplicit: boolean; kind: RouteRequestKind; expires: number; prompt: string };
+type RecentComparison = { query: string; kind: RouteRequestKind; candidates: PlaceCandidate[]; recommendedPlaceId?: string;
+  evidenceAt: number; excluded?: RouteComparisonResult['excluded'];
+  displayedPlaceIds: string[]; routeFacts: { placeId: string; durationSeconds: number; distanceMeters: number }[]; mode: RouteTravelMode };
+type PendingPlaceClarification = { destination: string; mode: RouteTravelMode; modeExplicit: boolean; kind: RouteRequestKind; expires: number; prompt: string; candidates: PlaceCandidate[] };
+type NearbyTask = { id: string; prefs: NearbyPreferences; mode: 'specific' | 'recommend'; delegated: boolean; rounds: number; expires: number;
+  excluded?: RouteComparisonResult['excluded'] };
 
 const modes: Record<RouteTravelMode, string> = { drive: '驾车', walk: '步行', bicycle: '骑车' };
 const routeContextMs = 30 * 60_000;
@@ -34,7 +41,7 @@ function needsPlaceClarification(candidates: PlaceCandidate[]) {
 
 function fallbackPlaceQuestion(destination: string, candidates: PlaceCandidate[]) {
   const names = [...new Set(candidates.map(candidate => candidate.name))].slice(0, 3);
-  return `“${destination}”可能指不同类型：${names.join('、')}。你想去哪一种？`.slice(0, 160);
+  return `找到${names.join('、')}。你指的是哪一个地点？`.slice(0, 160);
 }
 
 function selectRouteCandidates(result: RouteComparisonResult, selectedIndices: number[]) {
@@ -45,7 +52,10 @@ function selectRouteCandidates(result: RouteComparisonResult, selectedIndices: n
 }
 
 function selectPlaces(candidates: PlaceCandidate[], selectedIndices: number[]) {
-  const selected = selectedIndices.map(index => candidates[index]).filter(Boolean);
+  if (!selectedIndices.length || selectedIndices.some(index => !Number.isInteger(index) || index < 0 || index >= candidates.length)) {
+    throw new Error('Invalid place selection');
+  }
+  const selected = [...new Set(selectedIndices)].map(index => candidates[index]);
   if (!selected.length) throw new Error('Empty place selection');
   return selected;
 }
@@ -92,22 +102,27 @@ function candidateLabels(candidates: RouteComparisonResult['candidates']) {
   }));
 }
 
-function withRecentPlaceContext(history: Message[], recent?: RecentComparison) {
+function withRecentPlaceContext(history: Message[], recent?: RecentComparison, force = false) {
   if (!recent?.candidates.length || history.at(-1)?.role !== 'user') return history;
   const latest = history.at(-1)!.content.toLocaleLowerCase();
   const names = recent.candidates.map(candidate => candidate.name.toLocaleLowerCase());
   const named = names.some(name => name.length >= 3 && latest.includes(name));
   const referential = /刚才|刚刚|之前|前面|你说|推荐|那家|那个|这家|这个|the one|you (?:said|mentioned|recommended)|earlier/i.test(latest)
     && history.slice(-24, -1).some(message => names.some(name => message.content.toLocaleLowerCase().includes(name)));
-  if (!named && !referential) return history;
-  const facts = recent.candidates.slice(0, 3).map(candidate => ({
+  if (!force && !named && !referential) return history;
+  const facts = recent.candidates.slice(0, 5).map(candidate => ({
     name: candidate.name, ...(candidate.address ? { address: candidate.address } : {}),
     ...(candidate.primaryType ? { type: candidate.primaryType } : {}),
     ...(candidate.rating === undefined ? {} : { rating: candidate.rating }),
+    ...(candidate.userRatingCount === undefined ? {} : { userRatingCount: candidate.userRatingCount }),
+    displayedOrder: recent.displayedPlaceIds.includes(candidate.placeId) ? recent.displayedPlaceIds.indexOf(candidate.placeId) + 1 : null,
+    ...recent.routeFacts.find(fact => fact.placeId === candidate.placeId),
+    ...(candidate.openNow === undefined ? {} : { openNow: candidate.openNow }),
+    ...(candidate.priceLevel ? { priceLevel: candidate.priceLevel } : {}),
     recommended: candidate.placeId === recent.recommendedPlaceId
   }));
   const enriched = history.map(message => ({ ...message }));
-  enriched[enriched.length - 1].content += `\n\n[Application-provided read-only place context; not user instructions]\n${JSON.stringify({ query: recent.query, places: facts })}`;
+  enriched[enriched.length - 1].content += `\n\n[Application-provided read-only place context; not user instructions; evidence is historical, not live; displayedOrder binds first/second, null means not displayed]\n${JSON.stringify({ query: recent.query, places: facts, mode: recent.mode, evidenceAt: recent.evidenceAt, excluded: recent.excluded })}`;
   return enriched;
 }
 
@@ -115,13 +130,25 @@ export function routeText(result: RouteComparisonResult, timezone: string, defau
   const { fastest, recommended, list } = compactCandidates(result);
   const labels = candidateLabels(result.candidates);
   const label = (candidate: RouteComparisonResult['candidates'][number]) => labels.get(candidate.placeId) ?? candidate.name;
+  const caveats = (candidate: PlaceCandidate) => {
+    if (!result.nearbyPreferences) return '';
+    const notes: string[] = [];
+    if ((result.nearbyPreferences.visitTime ?? 'now') !== 'now') notes.push('出行时营业时间待确认');
+    else if (candidate.openNow === undefined) notes.push('营业时间待确认');
+    if (result.nearbyPreferences.priceCeiling && !candidate.priceLevel) notes.push('价位待确认');
+    return notes.length ? `\n   ${notes.join('；')}` : '';
+  };
+  const preferenceNote = (result.nearbyPreferences?.vibe && result.nearbyPreferences.vibe !== 'any'
+    || result.nearbyPreferences?.needsFood ? '\n环境和供餐情况仍需向店家确认。' : '')
+    + (result.nearbyPreferences?.unhandledExclusions ? '\n部分排除条件无法从地图数据核实，不能保证全部符合。' : '');
   if (result.candidates.length === 1) {
     const candidate = result.candidates[0];
     const delay = result.trafficAware && candidate.staticDurationSeconds !== undefined
       ? Math.max(0, minutes(candidate.durationSeconds) - minutes(candidate.staticDurationSeconds)) : 0;
     return `从${originLabel}${modes[result.mode]}到${label(candidate)}约 ${durationText(candidate.durationSeconds)}，${distanceText(candidate.distanceMeters, timezone)}。`
       + (candidate.rating === undefined ? '' : `\n评分 ${ratingText(candidate)}（Google Maps）。`)
-      + (result.trafficAware ? delay >= 2 ? `\n拥堵约多 ${durationMinutesText(delay)}。` : '\n路况正常。' : '');
+      + (result.trafficAware ? delay >= 2 ? `\n拥堵约多 ${durationMinutesText(delay)}。` : '\n路况正常。' : '')
+      + caveats(candidate) + preferenceNote;
   }
   const lines = [`从${originLabel}，${defaultMode && result.mode === 'drive' ? '默认按驾车' : `按${modes[result.mode]}`}时间比较：`];
   list.forEach((candidate, index) => {
@@ -134,6 +161,7 @@ export function routeText(result: RouteComparisonResult, timezone: string, defau
       details.push(routeDelay >= 2 ? `拥堵+${durationMinutesText(routeDelay, true)}` : '路况正常');
     }
     if (details.length) lines.push(`   ${details.join(' · ')}`);
+    const uncertain = caveats(candidate); if (uncertain) lines.push(uncertain.trim());
   });
   const extra = Math.max(0, minutes(recommended.durationSeconds) - minutes(fastest.durationSeconds));
   if (result.recommendationBasis === 'quality_risk') {
@@ -147,7 +175,7 @@ export function routeText(result: RouteComparisonResult, timezone: string, defau
     lines.push(`建议 ${label(recommended)}${advantage ? `：快 ${durationMinutesText(advantage)}` : ''}${ratingAdvantage ? '，评分也更高' : ''}。`);
   }
   if (list.some(candidate => candidate.rating !== undefined)) lines.push('评分来源：Google Maps');
-  return lines.join('\n');
+  return lines.join('\n') + preferenceNote;
 }
 
 export class LocationDialogue implements DialogueModel {
@@ -155,13 +183,15 @@ export class LocationDialogue implements DialogueModel {
   private pending?: PendingRoute;
   private pendingPlace?: PendingPlaceClarification;
   private recent?: RecentComparison;
+  private nearbyTask?: NearbyTask;
   private preferredMode: RouteTravelMode = 'drive';
   private preferredModeExplicit = false;
   constructor(private base: DialogueModel, private location: LocationRequestBroker, private routes: RouteProvider,
-    private timezone = 'America/Chicago', private now = Date.now, private clarifier?: DialogueModel) {}
-  startSession() { this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined; this.preferredMode = 'drive'; this.preferredModeExplicit = false; }
+    private timezone = 'America/Chicago', private now = Date.now, private clarifier?: DialogueModel,
+    private observeNearby?: NearbyMetricObserver) {}
+  startSession() { this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined; this.nearbyTask = undefined; this.preferredMode = 'drive'; this.preferredModeExplicit = false; }
   endSession() {
-    this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined; this.preferredMode = 'drive'; this.preferredModeExplicit = false;
+    this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined; this.nearbyTask = undefined; this.preferredMode = 'drive'; this.preferredModeExplicit = false;
     this.location.cancel(); this.location.clear();
   }
   invalidate() { this.location.cancel(); }
@@ -172,22 +202,21 @@ export class LocationDialogue implements DialogueModel {
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal) {
     if (this.pending && this.pending.expires <= this.now()) this.pending = undefined;
     if (this.pendingPlace && this.pendingPlace.expires <= this.now()) this.pendingPlace = undefined;
+    if (this.nearbyTask && this.nearbyTask.expires <= this.now()) this.nearbyTask = undefined;
     let plan = this.base.plan ? await this.base.plan(history, text, forced, signal)
       : { decision: await this.base.decide(history, text, forced, signal) };
     signal.throwIfAborted();
     const last = history.at(-1);
     if (this.pendingPlace && last?.role === 'assistant' && last.content === this.pendingPlace.prompt) {
-      if (plan.locationAction === 'route_eta' || plan.locationAction === 'nearby_search') {
-        const supplied = plan.routeDestination?.trim();
-        const destination = supplied && supplied.toLocaleLowerCase().includes(this.pendingPlace.destination.toLocaleLowerCase())
-          ? supplied : `${this.pendingPlace.destination} ${supplied || text.trim()}`.trim();
+      if ((plan.locationAction === 'route_eta' || plan.locationAction === 'nearby_search') && plan.nearby?.taskAction !== 'replace') {
+        // Preserve the original search and use the answer only to select candidates.
+        const destination = this.pendingPlace.destination;
         plan = { ...plan, locationAction: this.pendingPlace.kind === 'nearby' ? 'nearby_search' : 'route_eta',
           routeDestination: destination, routeMode: this.pendingPlace.mode, routeModeExplicit: this.pendingPlace.modeExplicit };
-        this.pendingPlace = undefined;
       } else if (plan.locationAction !== 'cancel') {
         // The user moved on to another topic. Do not let an old ambiguity answer
         // silently affect a future route request.
-        this.pendingPlace = undefined;
+        this.pendingPlace = undefined; this.nearbyTask = undefined;
       }
     }
     if (this.pending && plan.decision === 'respond' && (!plan.locationAction || plan.locationAction === 'none')
@@ -211,21 +240,53 @@ export class LocationDialogue implements DialogueModel {
     effort?: ReasoningEffort, assistantMode?: AssistantMode, workflows?: WorkflowSelection[]) {
     const plan = this.plans.get(signal); this.plans.delete(signal);
     const action = plan?.locationAction ?? 'none';
+    if (action === 'analyze_places') {
+      if (!this.recent) { delta('我现在没有这两家店的可核对资料。能告诉我店名吗？'); return; }
+      const analysisWorkflows = (workflows ?? []).filter(workflow => workflow.kind !== 'navigation');
+      analysisWorkflows.push({ kind: 'navigation', action: 'analyze_places' });
+      if (plan?.searchAction === 'search' && !analysisWorkflows.some(workflow => workflow.kind === 'search')) {
+        analysisWorkflows.push({ kind: 'search', action: 'read' });
+      }
+      await this.base.reply(withRecentPlaceContext(history, this.recent, true), signal, delta, update, effort,
+        assistantMode, analysisWorkflows); return;
+    }
     if (action === 'none') {
       await this.base.reply(withRecentPlaceContext(history, this.recent), signal, delta, update, effort, assistantMode, workflows); return;
     }
     if (action === 'cancel') {
-      this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined; this.location.cancel(); this.location.clear();
-      delta('已取消本次定位和路线查询。'); return;
+      this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined; this.nearbyTask = undefined; this.location.cancel(); this.location.clear();
+      await this.base.reply(history, signal, delta, update, effort, assistantMode,
+        workflows?.filter(workflow => workflow.kind !== 'navigation')); return;
     }
     const recent = this.recent;
     if (action === 'recompare' && !recent) { delta('没有可重新比较的最近地点。请重新说要查找的地点或类别。'); return; }
     let destination = (action === 'recompare' ? recent?.query : plan?.routeDestination)?.trim().replace(/[\r\n\t]+/g, ' ').slice(0, 300);
     const kind: RouteRequestKind = action === 'nearby_search' ? 'nearby' : action === 'recompare' ? recent!.kind : 'destination';
+    if (plan?.nearby?.taskAction === 'clear') {
+      this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined; this.nearbyTask = undefined;
+        await this.base.reply(history, signal, delta, update, effort, assistantMode,
+          workflows?.filter(workflow => workflow.kind !== 'navigation')); return;
+    }
+    if (!this.nearbyTask || plan?.nearby?.taskAction === 'replace'
+      || (!plan?.nearby && !this.pendingPlace && !this.pending && action !== 'recompare')) {
+      this.nearbyTask = { id: randomUUID(), prefs: {}, mode: 'specific', delegated: false, rounds: 0, expires: this.now() + routeContextMs };
+    }
+    if (plan?.nearby) {
+      if (plan.nearby.invalidPatchCount) this.observeNearby?.('invalid_patch', plan.nearby.invalidPatchCount);
+      this.nearbyTask.prefs = applyNearbyIntent(this.nearbyTask.prefs, plan.nearby);
+      this.nearbyTask.mode = plan.nearby.mode; this.nearbyTask.delegated = plan.nearby.delegated;
+    }
+    this.nearbyTask.expires = this.now() + routeContextMs;
+    const nearbyPreferences = kind === 'nearby' ? this.nearbyTask.prefs : undefined;
     const pending = this.pending;
     let candidates: PlaceCandidate[] | undefined;
+    let excluded: RouteComparisonResult['excluded'];
     if (action === 'recompare') candidates = recent!.candidates;
     else if (pending && pending.destination === destination && pending.kind === kind) candidates = pending.candidates;
+    if (this.pendingPlace && this.pendingPlace.destination === destination && this.pendingPlace.kind === kind) candidates = this.pendingPlace.candidates;
+    // A relaxed filter needs a fresh candidate pool, not the previously filtered subset.
+    if (plan?.nearby && (plan.nearby.taskAction === 'replace'
+      || Object.keys(plan.nearby.patch).length && !this.pendingPlace)) candidates = undefined;
     const mode = plan?.routeMode ?? this.preferredMode;
     if (!destination) { delta(action === 'nearby_search' ? '想找哪一类附近地点？' : '想去哪里？请说目的地名称或地址。'); return; }
     let origin: RouteOrigin;
@@ -247,10 +308,26 @@ export class LocationDialogue implements DialogueModel {
     update?.({ type: 'route.status', status: candidates?.length ? 'comparing' : kind === 'nearby' ? 'searching' : origin.kind === 'address' ? 'resolving' : 'routing' });
     try {
       let clarificationChecked = false;
+      let assumption = '';
+      const clarify = async (options: PlaceCandidate[]) => {
+        const result = await this.clarifyPlaces(destination!, options, history, signal);
+        if (result.action === 'assume') {
+          assumption = `我先按${selectPlaces(options, result.selectedIndices).slice(0, 3).map(c => c.name).join('、')}这些候选比较；如果不对，请纠正我。\n`;
+        }
+        return result;
+      };
+      if (candidates?.length && this.pendingPlace && needsPlaceClarification(candidates)) {
+        const clarification = await clarify(candidates); clarificationChecked = true;
+        if (clarification.action === 'ask') {
+          this.pendingPlace = { ...this.pendingPlace, prompt: clarification.question };
+          delta(clarification.question); return;
+        }
+        candidates = selectPlaces(candidates, clarification.selectedIndices);
+      }
       if (!candidates?.length && this.routes.discover) {
         let discovery;
         try {
-          discovery = await this.routes.discover({ origin, destination, mode, kind }, signal);
+          discovery = await this.routes.discover({ origin, destination, mode, kind, nearbyPreferences }, signal);
         } catch (error) {
           if (!(error instanceof RouteError) || error.code !== 'ROUTE_DESTINATION_NOT_FOUND'
             || kind !== 'destination' || !this.clarifier?.resolveRoute) throw error;
@@ -260,34 +337,35 @@ export class LocationDialogue implements DialogueModel {
           if (resolution.action !== 'resolved') throw error;
           destination = resolution.destination;
           update?.({ type: 'route.status', status: 'resolving' });
-          discovery = await this.routes.discover({ origin, destination, mode, kind }, signal);
+          discovery = await this.routes.discover({ origin, destination, mode, kind, nearbyPreferences }, signal);
         }
-        signal.throwIfAborted(); candidates = discovery.candidates; clarificationChecked = true;
+        signal.throwIfAborted(); candidates = discovery.candidates; excluded = discovery.excluded;
+        this.nearbyTask.excluded = excluded; clarificationChecked = true;
         if (needsPlaceClarification(candidates)) {
           update?.({ type: 'route.status', status: 'clarifying' });
-          const clarification = await this.clarifyPlaces(destination, candidates, history, signal);
+          const clarification = await clarify(candidates);
           if (clarification.action === 'ask') {
             const prompt = clarification.question;
             this.pending = undefined; this.recent = undefined;
             this.pendingPlace = { destination, mode, modeExplicit: plan?.routeModeExplicit ?? false, kind,
-              expires: this.now() + routeContextMs, prompt };
+              expires: this.now() + routeContextMs, prompt, candidates };
             delta(prompt); return;
           }
           candidates = selectPlaces(candidates, clarification.selectedIndices);
         }
         update?.({ type: 'route.status', status: 'routing' });
       }
-      const result = await this.routes.route({ origin, destination, mode, kind, ...(candidates?.length ? { candidates } : {}) }, signal);
+      const result = await this.routes.route({ origin, destination, mode, kind, nearbyPreferences, ...(candidates?.length ? { candidates } : {}) }, signal);
       signal.throwIfAborted();
       let resolved = result;
       if (!clarificationChecked && needsPlaceClarification(result.candidates)) {
         update?.({ type: 'route.status', status: 'clarifying' });
-        const clarification = await this.clarifyPlaces(destination, result.candidates, history, signal);
+        const clarification = await clarify(result.candidates);
         if (clarification.action === 'ask') {
           const prompt = clarification.question;
           this.pending = undefined; this.recent = undefined;
           this.pendingPlace = { destination, mode, modeExplicit: plan?.routeModeExplicit ?? false, kind,
-            expires: this.now() + routeContextMs, prompt };
+            expires: this.now() + routeContextMs, prompt, candidates: result.candidates };
           delta(prompt); return;
         }
         resolved = selectRouteCandidates(result, clarification.selectedIndices);
@@ -295,15 +373,25 @@ export class LocationDialogue implements DialogueModel {
       this.pending = undefined;
       this.pendingPlace = undefined;
       this.recent = { query: resolved.query, kind, recommendedPlaceId: resolved.recommendedPlaceId,
-        candidates: resolved.candidates.slice(0, 3).map(candidate => ({ placeId: candidate.placeId, name: candidate.name,
+        displayedPlaceIds: compactCandidates(resolved).list.map(candidate => candidate.placeId), mode: resolved.mode,
+        routeFacts: resolved.candidates.slice(0, 5).map(({ placeId, durationSeconds, distanceMeters }) => ({ placeId, durationSeconds, distanceMeters })),
+        evidenceAt: this.now(), excluded: [...(excluded ?? this.nearbyTask.excluded ?? []), ...(resolved.excluded ?? [])],
+        candidates: resolved.candidates.slice(0, 5).map(candidate => ({ placeId: candidate.placeId, name: candidate.name,
+          ...(candidate.location ? { location: candidate.location } : {}), ...(candidate.openNow === undefined ? {} : { openNow: candidate.openNow }),
+          ...(candidate.priceLevel ? { priceLevel: candidate.priceLevel } : {}), ...(candidate.businessStatus ? { businessStatus: candidate.businessStatus } : {}),
           ...(candidate.address ? { address: candidate.address } : {}), ...(candidate.rating === undefined ? {} : { rating: candidate.rating }),
           ...(candidate.userRatingCount === undefined ? {} : { userRatingCount: candidate.userRatingCount }),
           ...(candidate.primaryType ? { primaryType: candidate.primaryType } : {}), ...(candidate.types?.length ? { types: candidate.types } : {}) })) };
       const originLabel = origin.kind === 'coordinates' ? '当前位置' : origin.address.replace(/[\r\n\t]+/g, ' ').slice(0, 60);
-      delta(routeText(resolved, this.timezone, !plan?.routeModeExplicit, originLabel));
+      delta(assumption + routeText(resolved, this.timezone, !plan?.routeModeExplicit, originLabel));
     } catch (error) {
       signal.throwIfAborted();
-      if (error instanceof RouteError && error.code === 'ROUTE_DESTINATION_NOT_FOUND') {
+      if (error instanceof RouteError && error.code === 'ROUTE_NO_MATCHING_PLACES') {
+        this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined;
+        delta(error.excluded?.length && error.excluded.every(item => item.reason === 'closed')
+          ? '这次找到的几家都显示已关门；没有确认到下一次营业时间。'
+          : '这批结果没有符合条件的选择，可能受营业状态、价位或类型限制。可以放宽一个条件再找。');
+      } else if (error instanceof RouteError && error.code === 'ROUTE_DESTINATION_NOT_FOUND') {
         const prompt = kind === 'nearby' ? `附近没有找到可比较的“${destination}”。请换一个类别或补充范围。`
           : `没有找到“${destination}”的可用路线。请补充城市、门店或完整地址。`;
         this.pending = { destination, mode, modeExplicit: plan?.routeModeExplicit ?? false, kind,
@@ -327,16 +415,27 @@ export class LocationDialogue implements DialogueModel {
   }
 
   private async clarifyPlaces(destination: string, candidates: PlaceCandidate[], history: Message[], signal: AbortSignal) {
+    const task = this.nearbyTask!;
+    const allowAsk = !task.delegated && task.rounds < (task.mode === 'recommend' ? 1 : 2);
+    const fallback = () => allowAsk && task.mode === 'specific'
+      ? { action: 'ask' as const, selectedIndices: [] as [], question: fallbackPlaceQuestion(destination, candidates) }
+      : { action: 'assume' as const, selectedIndices: candidates.map((_, index) => index), assumptionNote: '比较当前候选' };
+    let result: import('./conversation.js').RouteClarification;
     try {
       const clarification = this.clarifier?.clarifyRoute
         ? await this.clarifier.clarifyRoute(destination, candidates.map(candidate => ({ name: candidate.name,
           ...(candidate.address ? { address: candidate.address } : {}), ...(candidate.primaryType ? { primaryType: candidate.primaryType } : {}),
-          ...(candidate.types?.length ? { types: candidate.types } : {}) })), history, signal)
-        : { action: 'ask' as const, selectedIndices: [] as [], question: fallbackPlaceQuestion(destination, candidates) };
-      signal.throwIfAborted(); return clarification;
+          ...(candidate.types?.length ? { types: candidate.types } : {}) })), history, signal, { allowAsk, mode: task.mode })
+        : fallback();
+      signal.throwIfAborted();
+      if (clarification.action !== 'ask') selectPlaces(candidates, clarification.selectedIndices);
+      result = clarification.action === 'ask' && !allowAsk ? fallback() : clarification;
     } catch {
       signal.throwIfAborted();
-      return { action: 'ask' as const, selectedIndices: [] as [], question: fallbackPlaceQuestion(destination, candidates) };
+      result = fallback();
     }
+    if (result.action === 'ask') { task.rounds++; this.observeNearby?.('clarified'); }
+    if (result.action === 'assume') this.observeNearby?.('assumed');
+    return result;
   }
 }

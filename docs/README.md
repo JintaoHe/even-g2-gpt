@@ -10,6 +10,8 @@ The overview and this index are bilingual. Detailed guides below retain their ex
 
 ## Running the app and clients
 
+- [One-click simulator restart](validation/RESTART_SIMULATOR.md): Windows launcher with explicit Local / Linux backend selection.
+
 - [Conversation lab (Chinese)](CONVERSATION_LAB.md): browser startup, audio capture, follow-ups, search, and limitations.
 - [Session resilience implementation (Chinese)](SESSION_RESILIENCE_IMPLEMENTATION_PLAN.md): SQLite ownership, resume credentials, client/audio lifecycle, bounded summaries, and phased verification.
 - [Even SDK client](../clients/even/README.md): connection, pagination, transcription display, history, and exit recovery.
@@ -44,6 +46,8 @@ The overview and this index are bilingual. Detailed guides below retain their ex
 - [Security policy](../SECURITY.md) · [Contribution guidelines](../CONTRIBUTING.md).
 
 ## Design and historical evaluations
+
+- [Personal Intelligence — next-stage specification (Chinese)](PERSONAL_INTELLIGENCE_SPEC.md): accepted design direction, not yet implemented; five gated PRs for recommendations, continuity and guest isolation, recall, explicit memory, and opt-in nudges.
 
 These documents explain design evolution. They are not guarantees of current pricing, latency, or service availability.
 

@@ -16,9 +16,15 @@ For a question such as “如果我现在去 West Des Moines Costco 需要多久
 3. Before the first successful fix, the glasses warn that the phone may show a
    system permission prompt. The current SDK returns a location or `null`; it does
    not expose whether that OS dialog is visible, so the notice is pre-emptive.
-4. The backend uses Places Text Search (New) to obtain a bounded candidate set
-   together with place type, rating and rating count, then
-   sends at most three candidates to one Routes Compute Route Matrix request.
+4. The backend uses Places Text Search (New) to obtain up to ten candidates
+   together with place type, rating and rating count. Nearby requests also fetch
+   coordinates, current opening state, price level and business status. It filters
+   unsuitable candidates before sending at most five to one Routes Compute Route Matrix request.
+   Structured task-scoped preferences update one field at a time: removing a quiet
+   preference does not remove food needs or budget. Straight-line distance and weak
+   type/food priors only help coarse ranking; displayed times always come from Routes.
+   Missing hours/price remain unknown, not closed/free. Current closure does not
+   exclude a future visit; permanently closed places are excluded.
    A nearby/category search starts with a 20 km distance bias and widens once to
    50 km only when empty. A named destination uses Google's maximum legal 50 km
    **soft bias** and relevance ranking: this is not a route limit or geographic
@@ -31,9 +37,16 @@ For a question such as “如果我现在去 West Des Moines Costco 需要多久
    bounded public place metadata—never the location fix—and either selects the
    type already explicit in the user's request or asks one short clarification.
    Different branches of the same type do not trigger this question. The answer
-   is converted into a self-contained query such as `Target parking lot`, obtains
-   the newest fresh-enough session fix, and continues the route flow. If this model check fails,
-   the assistant asks a conservative bounded question rather than guessing.
+   selects from the original candidate set rather than being concatenated into the
+   Places query. Recommendation tasks allow at most one clarification, specific
+   destination tasks two; explicit delegation allows none. Once the limit is reached,
+   the assistant provides a clearly labelled, correctable assumption instead of looping.
+   Ordinary category searches use recommendation mode without requiring the word
+   "recommend"; specific mode is for named-brand/place identity ambiguity. The
+   clarification call uses low reasoning and 768 output tokens independently of
+   the normal answer effort, with incomplete responses still rejected.
+   Invalid model selections cannot introduce a new place ID. Model failure falls back
+   to a bounded question or a disclosed comparison of the current candidates.
    Conversational references follow the same rule: an explicit ordinal/name or a
    single labelled recommendation may resolve a place, while “那个 / that one”
    after multiple unselected candidates must ask and never defaults to item one.
@@ -49,6 +62,9 @@ For a question such as “如果我现在去 West Des Moines Costco 需要多久
    a confidence-adjusted rating so one five-star review cannot dominate a
    well-reviewed location; a very low rating with enough reviews is treated as an
    experience risk. It does not scrape or claim to count all negative reviews.
+   Unknown hours/prices and unverified atmosphere/food are disclosed. Displayed star
+   ratings are the original Google rating, never the internal confidence-adjusted score.
+   An empty filtered set is not sent to Routes or silently replaced with excluded places.
    When multiple candidates have the same display name, a compact address locality
    is appended (for example `Target · Waukee`) and reused in the recommendation.
    Durations below one hour use minutes; longer durations use hours plus remaining

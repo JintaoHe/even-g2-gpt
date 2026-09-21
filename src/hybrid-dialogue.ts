@@ -1,4 +1,4 @@
-import type { AssistantMode, DialogueModel, Message, ReplyUpdate, ReasoningEffort, RoutePlaceOption, TurnPlan, WorkflowSelection } from './conversation.js';
+import type { AssistantMode, DialogueModel, Message, ReplyUpdate, ReasoningEffort, RoutePlaceOption, RouteClarificationPolicy, TurnPlan, WorkflowSelection } from './conversation.js';
 import { OpenAIDialogue } from './dialogue-model.js';
 import { SearchQuota, type SearchBudget } from './search-quota.js';
 import { join } from 'node:path';
@@ -14,9 +14,9 @@ export class HybridDialogue implements DialogueModel {
   decide(history: Message[], text: string, forced: boolean, signal: AbortSignal) {
     return this.intent.decide(history, text, forced, signal);
   }
-  clarifyRoute(query: string, options: RoutePlaceOption[], history: Message[], signal: AbortSignal) {
+  clarifyRoute(query: string, options: RoutePlaceOption[], history: Message[], signal: AbortSignal, policy?: RouteClarificationPolicy) {
     if (!this.intent.clarifyRoute) throw new Error('Route clarification unavailable');
-    return this.intent.clarifyRoute(query, options, history, signal);
+    return this.intent.clarifyRoute(query, options, history, signal, policy);
   }
   resolveRoute(query: string, history: Message[], signal: AbortSignal, update?: (event: ReplyUpdate) => void) {
     if (!this.answer.resolveRoute) return Promise.resolve({ action: 'not_found' as const });

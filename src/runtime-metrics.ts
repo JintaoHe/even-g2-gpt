@@ -5,6 +5,7 @@ export type ProviderMetricName = 'openai' | 'soniox' | 'google';
 export type ProviderMetricOutcome = 'success' | 'failure' | 'cancelled';
 export type ProviderMetricObserver = (provider: ProviderMetricName, outcome: ProviderMetricOutcome,
   durationMs: number) => void;
+export type NearbyMetricObserver = (event: 'prefiltered' | 'routed' | 'assumed' | 'clarified' | 'invalid_patch', count?: number) => void;
 
 type Distribution = { count: number; p50_ms: number | null; p95_ms: number | null; max_ms: number | null };
 type ProviderBucket = { successes: number; failures: number; cancelled: number; durations: number[] };
@@ -49,8 +50,14 @@ export class RuntimeMetrics {
   private turnsFailed = 0;
   private turnsCancelled = 0;
   private readonly documentBucket: DocumentBucket = { successes: 0, failures: 0, retryFailures: 0, durations: [] };
+  private readonly nearby = { prefiltered: 0, routed: 0, assumed: 0, clarified: 0, invalid_patch: 0 };
 
   constructor(private readonly now: () => number = Date.now) {}
+
+  readonly observeNearby: NearbyMetricObserver = (event, count = 1) => {
+    if (!Object.hasOwn(this.nearby, event) || !Number.isSafeInteger(count) || count < 0) return;
+    this.nearby[event] = Math.min(Number.MAX_SAFE_INTEGER, this.nearby[event] + count);
+  };
 
   readonly observeProvider: ProviderMetricObserver = (provider, outcome, durationMs) => {
     const bucket = this.providers[provider];
@@ -149,6 +156,7 @@ export class RuntimeMetrics {
         latency: distribution(this.documentBucket.durations),
       },
       providers,
+      nearby: { ...this.nearby },
       ...(input.costs ? { costs: await input.costs() } : {}),
     };
   }

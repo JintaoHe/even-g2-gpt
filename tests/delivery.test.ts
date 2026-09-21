@@ -294,18 +294,18 @@ test('partial metadata survives storage and requires its own visible preview bef
   const partial = structuredClone(draft);
   partial.document.presentation.partial = true;
   partial.document.presentation.incompleteSections = [2, 4];
-  partial.document.markdown = '> 未完成草稿：第 2、4 章不完整。\n\n' + partial.document.markdown;
+  partial.document.markdown = '> 第 2、4 章还有部分内容待补充。\n\n' + partial.document.markdown;
   await fixture(async ({ conversation, store, route, sent, model }) => {
     await conversation.submit('生成文件并发给我', true);
     assert.equal(sent.length, 0);
-    assert.match(conversation.history.at(-1)!.content, /未完成草稿：第 2、4 章不完整/);
+    assert.match(conversation.history.at(-1)!.content, /第 2、4 章还有部分内容待补充/);
     const id=store.list()[0].id;
     assert.equal(store.metadata(id)?.partial,true);
-    assert.match((await store.download(id)).toString(), /未完成草稿/);
+    assert.match((await store.download(id)).toString(), /部分内容待补充/);
     model.invalidate(); route('confirm');
     await conversation.submit('确认发送',true);
     assert.equal(sent.length,0); // stale approval cannot be reused
-    assert.match(conversation.history.at(-1)!.content,/未完成草稿/);
+    assert.match(conversation.history.at(-1)!.content,/部分内容待补充/);
     await conversation.submit('确认发送',true);
     assert.equal(sent.length,1); assert.equal(sent[0].document.presentation.partial,true);
   },async()=>structuredClone(partial));

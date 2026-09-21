@@ -1,5 +1,7 @@
 # Even G2 Agent — Development Plan
 
+> **下一阶段重点（2026-09-21）：[Personal Intelligence 实施规格](PERSONAL_INTELLIGENCE_SPEC.md)。** 该规格优先定义接下来的开发范围、五个 PR 的依赖、安全边界与逐项验收；尚未实现，不代表生产新增功能。下文 V0–V3 与近期 MVP 表述保留为历史规划，不作为当前待办或发布版本号。
+
 > **近期交付范围已确认：** 优先完成 [Conversation MVP](./CONVERSATION_MVP.md)：手动启动、自动轮次判断、多轮文字对话、插话，以及基于意图的结束会话与系统确认退出。MD 文件生成/发送等工具在该版验收后再加入。该文优先于下文冲突的近期交互安排；[本地实验版](./CONVERSATION_LAB.md) 已实现部分能力并通过小样本真实 API 验证，G2/R1 与完整体验待验收。
 
 > **最新决策（覆盖下文旧选型内容）：** 当前默认 STT 为 Soniox `stt-rt-v5`，直接使用 G2 原生 PCM16/16 kHz，并针对中英文混说启用 `en`/`zh` hints 与自动语言识别；OpenAI `gpt-live-transcribe` adapter 仅保留为显式回退。仍须用未参与调试的新录音和真机进行准确率验收。

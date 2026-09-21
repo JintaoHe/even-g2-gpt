@@ -43,6 +43,8 @@
 
 ## 设计与历史评估
 
+- [Personal Intelligence — 下一阶段实施规格](PERSONAL_INTELLIGENCE_SPEC.md)：设计方向已确认、尚未实现；五个 PR 逐项验证附近推荐、连续性与访客隔离、检索、显式记忆和可选提示。
+
 这些文档用于理解设计演进，不是当前价格、延迟或服务可用性的保证。
 
 - [Development Plan](DEVELOPMENT_PLAN.md)：实施基线与长期方向。
