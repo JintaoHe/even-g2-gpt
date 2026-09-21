@@ -2,6 +2,8 @@
 
 本项目支持由服务器定时检查受保护的 GitHub `main`，但不会在正在运行的目录中执行 `git pull`。每次更新都在隔离目录中构建、测试并生成 server-only 发布包，通过后才原子切换 `/opt/even-agent/current`；新服务无法启动时自动切回上一版。
 
+**默认手动部署，自动更新为可选功能。** 开发及真机验收期间不要启用 timer；合并 PR 不应自动改变正在测试的服务器版本。这只控制应用 release，不关闭 Ubuntu 安全更新、健康检查或备份。
+
 ## 安全边界
 
 - 只拉取固定公开仓库的 `main`，不执行 PR 分支、fork 或任意 URL。
@@ -10,7 +12,7 @@
 - `npm ci` 使用 lockfile、`--ignore-scripts`、`--no-audit` 和 `--no-fund`。生产 Secret 不进入构建环境。
 - root 只负责把已验证的发布包复制到 root-owned release 目录、切换 symlink、重启服务和失败回滚；unit 只保留 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETUID`、`SETGID` 五项 capability，并禁止创建 namespaces。
 - 切换 release 前，updater 会先停止服务并把 `/var/lib/even-agent` 建成 root-only 的一致性 rollback archive；新 release 健康检查失败时，应用版本和该次更新前的数据会一起恢复。archive 会拒绝链接与目录穿越，且只保留最近两份。
-- timer 每 6 小时检查一次，并加入最多 30 分钟随机延迟；无新 commit 时不重启。
+- 仅在管理员显式启用后，timer 每 6 小时检查一次，并加入最多 30 分钟随机延迟；无新 commit 时不重启。timer 还要求 root 管理的 `/etc/even-agent/automatic-updates.enabled` 标记存在；手动运行 update.service 不受该标记限制。
 
 这降低了风险，但不等于供应链绝对安全。GitHub 账号、branch protection、依赖 lockfile 或服务器 root 被攻陷仍可能影响生产。保留 MFA、快照和上一版本，不要给外部贡献者绕过 main 保护的权限。
 
@@ -60,12 +62,30 @@ readlink -f /opt/even-agent/current
 sudo systemctl is-active even-agent
 ```
 
-确认成功后再启用 timer：
+默认保持 timer 关闭（包括已启用自动更新的服务器迁移）：
 
 ```bash
+sudo systemctl disable --now even-agent-update.timer
+systemctl is-enabled even-agent-update.timer
+systemctl is-active even-agent-update.timer
+```
+
+预期分别为 `disabled` 和 `inactive`（这两个检查此时会返回非零，属于预期）。安装新 timer 后需 `daemon-reload`；单纯合并 PR 或切换 release **不会**替换已安装的 systemd 文件，也不会停掉旧 timer。按上述步骤显式关闭，并运行 `sudo even-agent-drift-check`。
+
+停 timer 不会中断已经开始的 update.service。先查看 `systemctl show even-agent-update.service -p ActiveState -p SubState`；如果仍在运行，让当前部署安全结束并核对版本，不要在切换或回滚途中强杀。
+
+### 将来显式恢复自动更新
+
+仅在决定恢复定时发布后执行：
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/even-agent
+sudo install -o root -g root -m 0644 /dev/null /etc/even-agent/automatic-updates.enabled
 sudo systemctl enable --now even-agent-update.timer
 systemctl list-timers even-agent-update.timer --all
 ```
+
+标记不含密钥。只有 timer 需要它；不要给应用账号该目录的写权限。启用后可能很快开始检查，因此恢复前先确认 main 是希望部署的版本。
 
 ## 更新后的验收
 
