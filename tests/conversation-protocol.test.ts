@@ -20,8 +20,10 @@ test('protocol v2 accepts one initial credential and rejects ambiguous or unknow
   const clientId = randomUUID();
   assert.deepEqual(parseCoreClientMessage({
     type: 'hello', protocol_version: CONVERSATION_PROTOCOL_VERSION, client_id: clientId, token: secret,
+    client_capabilities: { location: false },
   }), {
     type: 'hello', protocol_version: 2, client_id: clientId, token: secret,
+    client_capabilities: { location: false },
   });
 
   for (const input of [
@@ -29,6 +31,9 @@ test('protocol v2 accepts one initial credential and rejects ambiguous or unknow
     { type: 'hello', protocol_version: 2, client_id: clientId },
     { type: 'hello', protocol_version: 2, client_id: clientId, token: secret, resume_credential: secret },
     { type: 'hello', protocol_version: 2, client_id: clientId, token: secret, debug: true },
+    { type: 'hello', protocol_version: 2, client_id: clientId, token: secret, client_capabilities: {} },
+    { type: 'hello', protocol_version: 2, client_id: clientId, token: secret, client_capabilities: { location: 'yes' } },
+    { type: 'hello', protocol_version: 2, client_id: clientId, token: secret, client_capabilities: { location: true, audio: true } },
     { type: 'hello', protocol_version: 2, client_id: 'not-a-uuid', token: secret },
   ]) assert.throws(() => parseCoreClientMessage(input), ProtocolValidationError);
 });

@@ -12,6 +12,7 @@ const healthTimer = await readFile(new URL('../deploy/even-agent-healthcheck.tim
 const backupScript = await readFile(new URL('../deploy/even-agent-backup.sh', import.meta.url), 'utf8');
 const restoreScript = await readFile(new URL('../deploy/even-agent-restore-check.sh', import.meta.url), 'utf8');
 const buildScript = await readFile(new URL('../scripts/build-server.mjs', import.meta.url), 'utf8');
+const serverConfig = await readFile(new URL('../tsconfig.server.json', import.meta.url), 'utf8');
 const conversationServer = await readFile(new URL('../src/conversation-server.ts', import.meta.url), 'utf8');
 const backupService = await readFile(new URL('../deploy/even-agent-backup.service', import.meta.url), 'utf8');
 const backupTimer = await readFile(new URL('../deploy/even-agent-backup.timer', import.meta.url), 'utf8');
@@ -127,4 +128,10 @@ test('server-only release includes the offline legacy migration command', () => 
   assert.match(buildScript, /sessions:migrate/);
   assert.match(buildScript, /conversation-maintenance-cli/);
   assert.match(buildScript, /sessions:maintain/);
+});
+
+test('server-only release includes the restore verifier used by the production restore check', () => {
+  const config = JSON.parse(serverConfig) as { files?: string[] };
+  assert.ok(config.files?.includes('src/conversation-restore-verify-cli.ts'));
+  assert.match(restoreScript, /src\/conversation-restore-verify-cli\.js/);
 });

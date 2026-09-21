@@ -109,3 +109,11 @@ sudo systemctl restart even-agent
 ## 运维文件不会自动自我替换
 
 自动更新只切换应用 release，不会自动覆盖 `/usr/local/sbin/even-agent-update`、`/etc/systemd/system/*.service`、Caddyfile、防火墙或 Secret。这样可以避免仓库一次提交自动扩大 root 权限或网络暴露。若仓库中的这些文件改变，管理员需审阅 diff、手动安装并重新运行安全检查。
+
+每次 release 更新后至少执行一次漂移检查：
+
+```bash
+sudo cmp /usr/local/sbin/even-agent-update /opt/even-agent/current/deploy/even-agent-update.sh
+```
+
+`cmp` 有输出或非零退出代表已安装脚本落后或被修改；先审阅 release 中的脚本 diff，再运行本页的 `sudo install`，随后手动触发一次 updater health gate。不要从 writable 临时目录直接安装 root 脚本。

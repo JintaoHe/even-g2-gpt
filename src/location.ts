@@ -84,12 +84,21 @@ export class LocationRequestBroker {
   private sessionLocation?: EphemeralLocation;
   private sessionTimezone?: string;
   private sessionTimezoneHint?: string;
+  private clientLocationAvailable: boolean | undefined;
   constructor(private send: LocationEventSender, private id: () => string, private timeoutMs = 22_000, private now = Date.now) {}
+  setClientLocationAvailable(value: boolean | undefined) {
+    this.clientLocationAvailable = value;
+    if (value === false) this.cancelPending();
+  }
   request(signal: AbortSignal): Promise<EphemeralLocation> {
     signal.throwIfAborted();
     const primed = this.currentLocation();
     this.cancelPending();
     if (primed) return Promise.resolve(primed);
+    // Protocol-v2 clients explicitly declare whether they can answer a
+    // location request. A text-only client must fail immediately instead of
+    // making every timezone clarification wait for the 22-second watchdog.
+    if (this.clientLocationAvailable === false) return Promise.reject(new LocationUnavailableError('unavailable'));
     const id = this.id();
     return new Promise<EphemeralLocation>((resolve, reject) => {
       const abort = () => { this.finish(); this.send({ type: 'location.cancel', request_id: id }); reject(signal.reason ?? new Error('Cancelled')); };

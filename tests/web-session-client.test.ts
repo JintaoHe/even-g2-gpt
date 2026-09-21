@@ -19,6 +19,7 @@ test('browser reference client uses v2 resume, stable message ids and duplicate-
     socket: () => { const socket = new Socket(); sockets.push(socket); return socket; }, onEvent() {}, uuid, random: () => 0.5,
     now: () => 100, setTimer: (callback: () => void) => { timers.push(callback); return timers.length; }, clearTimer() {} });
   assert.equal(client.connect('t'.repeat(32)), true); sockets[0].open(); assert.equal(sockets[0].sent[0].protocol_version, 2);
+  assert.deepEqual(sockets[0].sent[0].client_capabilities, { location: false });
   sockets[0].message({ type: 'ready', protocol_version: 2, connection_id: uuid(), session_id: uuid(), resumed: false,
     latest_sequence: 0, resume_window_minutes: 15,
     resume_credential: 'r'.repeat(32), resume_expires_at: 1_000, snapshot: { messages: [] } });

@@ -286,8 +286,25 @@ test('draft API has no tools or mail access, preserves standalone content and fa
   assert.match(bodies[0].instructions, /project codenames, ticket IDs, person names and event titles verbatim/);
   replies = [{ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }];
   await assert.rejects(generate([], 'document', undefined, new AbortController().signal), /DRAFT_INCOMPLETE/);
-  replies = [completed(JSON.stringify({ ...plan, calendar: { start: 'Friday' } }))];
+  replies = [completed(JSON.stringify({ ...plan, calendar: { start: 'Friday' } })), completed(JSON.stringify({ ...plan, calendar: null }))];
   assert.ok('clarification' in await generate([], 'calendar', undefined, new AbortController().signal));
+});
+
+test('calendar attachment planning repairs a missed Chinese ICS object and never asks for an email address', async () => {
+  const completed = (text: string) => ({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] });
+  const plan = { clarification: '', title: '架构评审资料', summary: '会议资料与日历附件。',
+    sections: [{ heading: '议程', brief: '记录评审议程。' }], calendar: null };
+  const calendar = { title: '架构评审', start: '2026-10-07T09:00-05:00', end: '2026-10-07T09:30-05:00',
+    timezone: 'America/Chicago', allDay: false, location: '', notes: '' };
+  const requests: any[] = [], replies = [completed(JSON.stringify(plan)), completed(JSON.stringify({ ...plan, calendar })), completed('核对迁移风险和回滚门槛。')];
+  const generate = createDraftGenerator({ OPENAI_API_KEY: 'fake', CONVERSATION_TIMEZONE: 'America/Chicago' }, async (_url, init) => {
+    requests.push(JSON.parse(init!.body as string)); return new Response(JSON.stringify(replies.shift()));
+  });
+  const result = await generate([{ role: 'user', content: '生成一份 MD 并附上 ICS：标题架构评审，10月7日上午9点到9点半，芝加哥时间，然后发到我的邮箱。' }],
+    'calendar', undefined, new AbortController().signal);
+  assert.ok('document' in result); assert.deepEqual(result.calendar, calendar);
+  assert.equal(requests.length, 3); assert.match(requests[0].instructions, /fixed in private server configuration/);
+  assert.match(requests[1].instructions, /never ask for an email address/);
 });
 
 test('section generation uses one bounded continuation and never publishes a second incomplete response', async () => {
@@ -309,6 +326,42 @@ test('section generation uses one bounded continuation and never publishes a sec
     { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }];
   await assert.rejects(generate([{ role: 'user', content: '再写一份长文' }], 'document', undefined, new AbortController().signal),
     /DRAFT_CONTINUATION_INCOMPLETE/);
+});
+
+test('multi-section generation shares the document byte budget instead of giving every section the full token ceiling', async () => {
+  const completed = (text: string) => ({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] });
+  const sections = Array.from({ length: 6 }, (_, index) => ({ heading: `部分 ${index + 1}`, brief: `完成第 ${index + 1} 部分。` }));
+  const requests: any[] = [];
+  const request = async (_url: any, init: any) => {
+    const body = JSON.parse(init.body); requests.push(body);
+    return new Response(JSON.stringify(requests.length === 1
+      ? completed(JSON.stringify({ clarification: '', title: '长计划', summary: '六部分计划。', sections, calendar: null }))
+      : completed('完整而简洁的章节正文。')));
+  };
+  const generate = createDraftGenerator({ OPENAI_API_KEY: 'fake', OPENAI_DOCUMENT_MAX_OUTPUT_TOKENS: '6000' }, request);
+  const result = await generate([{ role: 'user', content: '写一份六部分长计划' }], 'document', undefined, new AbortController().signal);
+  assert.ok('document' in result);
+  const sectionRequests = requests.slice(1);
+  assert.equal(sectionRequests.length, 6);
+  assert.ok(sectionRequests.every(body => body.max_output_tokens < 6000));
+  assert.ok(Buffer.byteLength(result.document.markdown) < 100_000);
+});
+
+test('an oversized section receives one bounded compression pass instead of discarding the whole document', async () => {
+  const completed = (text: string) => ({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] });
+  const requests: any[] = [];
+  const request = async (_url: any, init: any) => {
+    const body = JSON.parse(init.body); requests.push(body);
+    if (requests.length === 1) return new Response(JSON.stringify(completed(JSON.stringify({ clarification: '', title: '压缩测试', summary: '完整文档。',
+      sections: [{ heading: '正文', brief: '保留全部关键决定。' }], calendar: null }))));
+    if (/Rewrite ONLY/.test(body.instructions)) return new Response(JSON.stringify(completed('压缩后仍然完整的关键决定。')));
+    return new Response(JSON.stringify(completed('内容'.repeat(30_000))));
+  };
+  const generate = createDraftGenerator({ OPENAI_API_KEY: 'fake' }, request);
+  const result = await generate([{ role: 'user', content: '生成完整文档' }], 'document', undefined, new AbortController().signal);
+  assert.ok('document' in result); assert.match(result.document.markdown, /压缩后仍然完整/);
+  assert.equal(requests.filter(body => /Rewrite ONLY/.test(body.instructions)).length, 1);
+  assert.ok(Buffer.byteLength(result.document.markdown) < 100_000);
 });
 
 test('document generation settings are bounded and fail closed at startup', () => {

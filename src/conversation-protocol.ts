@@ -59,6 +59,7 @@ export type HelloMessageV2 = {
   device_credential?: string;
   credential_storage?: 'even_host_v1';
   last_seen_sequence?: number;
+  client_capabilities?: { location: boolean };
 };
 
 export type CredentialPersistedMessageV2 = {
@@ -235,7 +236,7 @@ export function parseCoreClientMessage(input: unknown, options: ParseOptions = {
 
   if (value.type === 'hello') {
     exactKeys(value, ['type', 'protocol_version', 'client_id', 'token', 'resume_session_id', 'resume_credential',
-      'device_credential', 'credential_storage', 'last_seen_sequence']);
+      'device_credential', 'credential_storage', 'last_seen_sequence', 'client_capabilities']);
     if (value.protocol_version !== CONVERSATION_PROTOCOL_VERSION) invalid();
     const tokenPresent = value.token !== undefined, resumePresent = value.resume_credential !== undefined;
     const devicePresent = value.device_credential !== undefined;
@@ -243,6 +244,12 @@ export function parseCoreClientMessage(input: unknown, options: ParseOptions = {
     const result: HelloMessageV2 = {
       type: 'hello', protocol_version: CONVERSATION_PROTOCOL_VERSION, client_id: uuid(value.client_id),
     };
+    if (value.client_capabilities !== undefined) {
+      const capabilities = record(value.client_capabilities);
+      exactKeys(capabilities, ['location']);
+      if (typeof capabilities.location !== 'boolean') invalid();
+      result.client_capabilities = { location: capabilities.location };
+    }
     if (value.credential_storage !== undefined) {
       if (value.credential_storage !== 'even_host_v1') invalid();
       result.credential_storage = value.credential_storage;

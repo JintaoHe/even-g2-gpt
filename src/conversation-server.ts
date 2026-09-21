@@ -229,8 +229,20 @@ export function createConversationServer(options: {
   }
   http.on('upgrade', (req, socket, head) => {
     const host = req.headers.host ?? '', origin = req.headers.origin;
-    if (req.url !== '/ws/conversation' || !hostAllowed(host)
-      || !originAllowed(host, origin)) { socket.destroy(); return; }
+    const rejectUpgrade = (status: '403 Forbidden' | '404 Not Found') => {
+      const response = `HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`;
+      // ws recommends sending the HTTP status before destroying a rejected
+      // upgrade. This lets Caddy and monitoring report the real 403 instead
+      // of translating a silent upstream reset into 502.
+      socket.write(response);
+      socket.destroy();
+    };
+    if (req.url !== '/ws/conversation') {
+      rejectUpgrade('404 Not Found'); return;
+    }
+    if (!hostAllowed(host) || !originAllowed(host, origin)) {
+      rejectUpgrade('403 Forbidden'); return;
+    }
     wss.handleUpgrade(req, socket, head, client => wss.emit('connection', client, req));
   });
   const unauthenticatedSockets = new Set<WebSocket>();
@@ -293,7 +305,7 @@ export function createConversationServer(options: {
     } : undefined;
     const delivery = options.jobs && options.draftGenerator ? new DeliveryDialogue(options.model, options.jobs, options.draftGenerator, options.mail, Date.now,
       (jobId, result) => { send({ type: 'notice', job_id: jobId, text: deliveryResult(result) }); send({ type: 'jobs.list', jobs: options.jobs!.list() }); },
-      artifactSource, recoveryPersistence('delivery')) : undefined;
+      artifactSource, recoveryPersistence('delivery'), runtimeMetrics.observeDocument) : undefined;
     const locationBroker = new LocationRequestBroker(send, randomUUID);
     const resolveCalendarTimezone = async (history: Message[], signal: AbortSignal) => {
       const cached = locationBroker.timezone();
@@ -574,6 +586,9 @@ export function createConversationServer(options: {
       if (store && !credential) credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
         createdAt: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
       session = binding.runtime as ServerSessionRuntime;
+      session.locationBroker.setClientLocationAvailable(protocolV2
+        ? msg.client_capabilities?.location === true
+        : undefined);
       authenticatedClientId = clientId;
       session.setCaptureStop(connectionId, clearCapture);
       authenticated = true; releaseAuthSlot(); clearTimeout(authTimer);

@@ -1,6 +1,7 @@
 export const deliveryActions = ['none', 'document', 'calendar', 'revise', 'confirm', 'cancel', 'review', 'received', 'not_received'] as const;
 export type DeliveryAction = typeof deliveryActions[number];
 export const DELIVERY_INSTRUCTIONS = `Also classify delivery_action by meaning, not keywords.
+Classify only a direct request made by the user in the CURRENT utterance. A document/email phrase that is merely quoted, discussed as a workload, listed as a product capability, or embedded inside comparison criteria is none. For example, “这台服务器偶尔生成长文档，比较 2GB 和 4GB” is decision support with delivery_action none; it does not ask you to generate that document now.
 document: a direct request to create/export/email a Markdown document, plan, engineering specification, instructions, steps, discussion points, selected answer or conversation record. The requested artifact is NOT necessarily a transcript. A natural request such as “把刚才这份旅行计划发到我的邮箱”, “email me the plan we just discussed”, or “把上面的回答发给我” is document even when the user never says MD/Markdown: the application must generate and preview a real artifact before any send confirmation.
 calendar: ONLY an explicit request to create/export/email an ICS or calendar FILE/attachment. A normal request to create, set or send a calendar reminder/invite belongs to the real Google Calendar workflow (calendar_action=create), not delivery. Merely discussing a date is none.
 revise: changes/corrections to a pending document or calendar draft, including providing missing event details after a clarification.

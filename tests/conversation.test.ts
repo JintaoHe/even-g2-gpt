@@ -15,11 +15,29 @@ import { SonioxTranscriber } from '../src/soniox-transcriber.js';
 import { createSttProvider } from '../src/stt-provider.js';
 import { ConversationStore } from '../src/conversation-store.js';
 import { createServer, request } from 'node:http';
+import { createConnection } from 'node:net';
 import { runInNewContext } from 'node:vm';
 
 const immediate: DialogueModel = { decide: async () => 'respond', reply: async (_h, _s, delta) => { delta('收到'); } };
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { resolve, promise }; }
+function rejectedUpgradeStatus(port: number, host: string, origin: string) {
+  return new Promise<number>((resolve, reject) => {
+    let settled = false, response = '';
+    const socket = createConnection({ host: '127.0.0.1', port }, () => socket.write(
+      `GET /ws/conversation HTTP/1.1\r\nHost: ${host}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`));
+    socket.on('data', chunk => {
+      response += chunk.toString('ascii');
+      const match = /^HTTP\/1\.1\s+(\d{3})\b/.exec(response);
+      if (!match || settled) return;
+      settled = true; resolve(Number(match[1])); socket.destroy();
+    });
+    socket.on('error', error => { if (!settled) { settled = true; reject(error); } });
+    socket.on('close', () => {
+      if (!settled) { settled = true; reject(new Error('upgrade rejection closed without an HTTP status')); }
+    });
+  });
+}
 
 test('microphone worklet outputs little-endian PCM and flushes the manual-submit tail', async () => {
   const events: any[] = []; let Processor: any;
@@ -317,7 +335,7 @@ test('Soniox transcriber keeps native 16 kHz PCM, bilingual auto-detection and f
       { key: 'topics', value: 'calendar, email, local navigation, shopping, daily life, business and data science' }
     ]);
     for (const term of ['Iowa', 'Des Moines', 'West Des Moines', 'Waukee', 'Ames', 'Target', 'Costco',
-      'Whole Foods Market', 'Hy-Vee', 'UPS', 'USPS', 'Power BI', 'SAS', 'data science']) {
+      'Whole Foods Market', 'Hy-Vee', 'UPS', 'USPS', 'Power BI', 'SAS', 'data science', '退下吧', '再见']) {
       assert.ok(config.context.terms.includes(term), `missing Soniox context term: ${term}`);
     }
     assert.equal(new Set(config.context.terms).size, config.context.terms.length);
@@ -356,7 +374,7 @@ test('fatal rejection logging exposes only fixed metadata, never error prose or 
   });
 });
 
-test('local WebSocket authenticates, runs dialogue, pauses and rejects cross-origin', { timeout: 10000 }, async () => {
+test('local WebSocket authenticates, runs dialogue and pauses safely', { timeout: 10000 }, async () => {
   const token = 't'.repeat(64), app = createConversationServer({ token, model: immediate, transcriber: () => { throw new Error('not used'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const host = `127.0.0.1:${(app.http.address() as any).port}`;
@@ -382,8 +400,6 @@ test('local WebSocket authenticates, runs dialogue, pauses and rejects cross-ori
     assert.equal(cancellation.text, '退出已取消，麦克风仍暂停；点击一次继续。');
     assert.equal(events.filter(e => e.type === 'turn.committed').length, 1);
     client.close();
-    const cross = new WebSocket(`ws://${host}/ws/conversation`, { origin: 'https://evil.example' });
-    await once(cross, 'error'); cross.terminate();
     const bad = new WebSocket(`ws://${host}/ws/conversation`); await once(bad, 'open');
     const result = once(bad, 'message'); bad.send(JSON.stringify({ type: 'hello', token: 'wrong' }));
     assert.equal(JSON.parse((await result)[0].toString()).code, 'INVALID_MESSAGE'); bad.close();
@@ -436,10 +452,8 @@ test('production ingress accepts only the configured public host and origin', { 
     assert.equal(blockedRuntime, 404);
     const trusted = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'calendar.eveng2assistant.com' } });
     await once(trusted, 'open'); trusted.close(); await once(trusted, 'close');
-    const wrongOrigin = new WebSocket(url, { origin: 'https://evil.example', headers: { host: 'calendar.eveng2assistant.com' } });
-    await once(wrongOrigin, 'error'); wrongOrigin.terminate();
-    const wrongHost = new WebSocket(url, { origin: 'https://calendar.eveng2assistant.com', headers: { host: 'other.eveng2assistant.com' } });
-    await once(wrongHost, 'error'); wrongHost.terminate();
+    assert.equal(await rejectedUpgradeStatus(address.port, 'calendar.eveng2assistant.com', 'https://evil.example'), 403);
+    assert.equal(await rejectedUpgradeStatus(address.port, 'other.eveng2assistant.com', 'https://calendar.eveng2assistant.com'), 403);
   } finally { await app.close(); await conversationStore.close(); }
 });
 

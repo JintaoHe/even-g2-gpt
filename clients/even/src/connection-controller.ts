@@ -33,6 +33,7 @@ type ControllerOptions = {
   uuid?: () => string;
   setTimer?: (callback: () => void, delay: number) => Timer;
   clearTimer?: (timer: Timer) => void;
+  clientCapabilities?: { location: boolean };
 };
 
 const OPEN = 1;
@@ -121,6 +122,7 @@ export class ConnectionController {
         type: 'hello', protocol_version: 2, client_id: credential?.clientId ?? this.options.credentials.clientId(),
         credential_storage: 'even_host_v1',
       };
+      if (this.options.clientCapabilities) hello.client_capabilities = { ...this.options.clientCapabilities };
       if (credential) {
         hello.resume_session_id = credential.sessionId;
         hello.resume_credential = credential.secret;

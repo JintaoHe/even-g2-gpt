@@ -52,7 +52,8 @@ export class BrowserSessionClient {
     const ws = this.socketFactory(this.url), generation = ++this.generation; this.socket = ws;
     this.onStatus({ state: recovering || this.attempt ? 'recovering' : 'connecting', attempt: this.attempt });
     ws.onopen = () => { if (this.socket !== ws || generation !== this.generation) return ws.close();
-      const hello = { type: 'hello', protocol_version: 2, client_id: credential?.clientId ?? this.clientId() };
+      const hello = { type: 'hello', protocol_version: 2, client_id: credential?.clientId ?? this.clientId(),
+        client_capabilities: { location: false } };
       if (credential) Object.assign(hello, { resume_session_id: credential.sessionId, resume_credential: credential.secret, last_seen_sequence: this.lastSeen });
       else hello.token = this.token; ws.send(JSON.stringify(hello)); };
     ws.onmessage = ({ data }) => { if (this.socket !== ws || generation !== this.generation || typeof data !== 'string') return;
