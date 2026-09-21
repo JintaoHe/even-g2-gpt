@@ -5,6 +5,7 @@ import { JobStore } from './job-store.js';
 import { calendarDetails, calendarConfirmationPhrase, calendarApprovalMatches } from './calendar.js';
 import { parseDeliveryRecoveryState, type DeliveryRecoveryState, type RecoveryPersistence } from './recovery-drafts.js';
 import { acceptsLongFormDocumentOffer, hasLongFormDocumentOffer } from './long-form-offer.js';
+import { documentWarning } from './document-presentation.js';
 
 type Approval = { id: string; prompt: string; expires: number; retryAttempt?: number };
 type DocumentOffer = { prompt: string; expires: number; retry: boolean };
@@ -120,7 +121,8 @@ export class DeliveryDialogue implements DialogueModel {
     const prior = this.jobs.mailState(this.jobId);
     if (prior) { delta(deliveryResult(prior)); return; }
     const metadata = this.draft.document.presentation;
-    const prompt = prefix + `文件已生成：${clipForGlasses(metadata.filename, 52)}\n摘要：${clipForGlasses(metadata.summary, 72)}` +
+    const prompt = prefix + (documentWarning(metadata) ? documentWarning(metadata) + '\n' : '') + `文件已生成：${clipForGlasses(metadata.filename, 52)}\n摘要：${clipForGlasses(metadata.summary, 72)}` +
+      (metadata.compressedSections?.length ? `\n第 ${metadata.compressedSections.join('、')} 章已按篇幅重写。` : '') +
       (this.draft.calendar ? `\n\n日历文件：\n${calendarDetails(this.draft.calendar)}\n不包含自动通知或闹钟。` : '') +
       (this.sender ? `\n\n${this.draft.calendar ? '请核对日期与主时区。' : ''}发送到固定邮箱？说“确认发送”或“取消发送”。` : '\n\n邮件发送未启用。文件已保存，可在网页下载；没有发送邮件。');
     delta(prompt);
@@ -133,7 +135,8 @@ export class DeliveryDialogue implements DialogueModel {
     }
     const calendar = this.jobs.calendar(this.jobId);
     const prompt = `${mailFallback}\n\n要将同一份文件“${this.jobs.metadata(this.jobId)?.filename ?? '谈话笔记.md'}”再发送一次到固定邮箱吗？内容不会改变；前一封可能延迟到达，因此可能收到两封。每份文件最多重发一次。${calendar ? '\n' + calendarDetails(calendar) + '\n' : ''}请说“${calendar ? calendarConfirmationPhrase(calendar, true) : '确认重发'}”，或说“取消发送”。`;
-    delta(prompt); this.approval = { id: this.jobId, prompt, expires: this.now() + 5 * 60000, retryAttempt: this.jobs.mailAttempts(this.jobId) };
+    const warnedPrompt = [documentWarning(this.jobs.metadata(this.jobId)), prompt].filter(Boolean).join('\n');
+    delta(warnedPrompt); this.approval = { id: this.jobId, prompt: warnedPrompt, expires: this.now() + 5 * 60000, retryAttempt: this.jobs.mailAttempts(this.jobId) };
   }
   async reply(history: Message[], signal: AbortSignal, delta: (text: string) => void, update?: (event: ReplyUpdate) => void,
     effort?: ReasoningEffort, mode?: AssistantMode, workflows?: WorkflowSelection[]) {
