@@ -6,6 +6,7 @@ import { boundRecurrenceRequest } from './calendar-recurrence.js';
 export const calendarActions = ['none', 'query', 'create', 'update', 'cancel', 'followup', 'confirm', 'dismiss'] as const;
 export type CalendarAction = typeof calendarActions[number];
 export const CALENDAR_INTENT = `Classify calendar_action for the dedicated Google Calendar tool.
+Classify only the action directly requested in the CURRENT utterance. Dates, milestones, schedules, cron fields, event names, or Calendar commands mentioned as quoted/project content do not authorize a Calendar workflow. “Cedar 的两个里程碑分别是什么” and “crontab 的 5 个字段是什么” are ordinary questions with calendar_action none, even when older turns contain dates.
 query: asking to read/count/list actual personal schedule (今天几个event/what's on my calendar).
 Trip/itinerary planning is NOT a Calendar operation. “怎么安排conference、住宿和拜访朋友”, “帮我规划行程” and similar requests mean give planning advice, so use none. The Chinese word 安排 by itself never proves Calendar intent. Route to Calendar only when the user asks to read an actual personal schedule or explicitly create/change/delete a real event.
 Public/community activity discovery—events, festivals, performances, movies, exhibitions, attractions or things to do in a city this weekend—is NOT the user's calendar and must be none. The word event alone never proves calendar intent. Require personal schedule/calendar context or a previously identified calendar item.

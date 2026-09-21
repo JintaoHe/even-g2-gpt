@@ -9,6 +9,7 @@ export type ProviderMetricObserver = (provider: ProviderMetricName, outcome: Pro
 type Distribution = { count: number; p50_ms: number | null; p95_ms: number | null; max_ms: number | null };
 type ProviderBucket = { successes: number; failures: number; cancelled: number; durations: number[] };
 type PendingTurn = { startedAt: number; firstVisibleAt?: number };
+type DocumentBucket = { successes: number; failures: number; retryFailures: number; durations: number[] };
 
 const SAMPLE_LIMIT = 2_048;
 const boundedDuration = (value: number) => Number.isFinite(value) && value >= 0
@@ -47,6 +48,7 @@ export class RuntimeMetrics {
   private turnsCompleted = 0;
   private turnsFailed = 0;
   private turnsCancelled = 0;
+  private readonly documentBucket: DocumentBucket = { successes: 0, failures: 0, retryFailures: 0, durations: [] };
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -56,6 +58,15 @@ export class RuntimeMetrics {
     else if (outcome === 'failure') bucket.failures++;
     else bucket.cancelled++;
     retain(bucket.durations, durationMs);
+  };
+
+  readonly observeDocument = (outcome: 'success' | 'failure', durationMs: number, retry = false) => {
+    if (outcome === 'success') this.documentBucket.successes++;
+    else {
+      this.documentBucket.failures++;
+      if (retry) this.documentBucket.retryFailures++;
+    }
+    retain(this.documentBucket.durations, durationMs);
   };
 
   beginTurn(sessionId: string) {
@@ -129,6 +140,13 @@ export class RuntimeMetrics {
         in_flight: this.pendingTurns.size,
         first_visible: distribution(this.firstVisible),
         complete: distribution(this.completed),
+      },
+      documents: {
+        attempts: this.documentBucket.successes + this.documentBucket.failures,
+        completed: this.documentBucket.successes,
+        failed: this.documentBucket.failures,
+        retry_failed: this.documentBucket.retryFailures,
+        latency: distribution(this.documentBucket.durations),
       },
       providers,
       ...(input.costs ? { costs: await input.costs() } : {}),

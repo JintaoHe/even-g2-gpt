@@ -74,6 +74,17 @@ test('manual route cache rejects low-accuracy fixes', () => {
   } }, now)), false);
 });
 
+test('a text-only v2 client fails location immediately without sending a request or waiting for timeout', async () => {
+  const events: any[] = [];
+  const broker = new LocationRequestBroker(event => events.push(event),
+    () => '123e4567-e89b-12d3-a456-426614174000', 22_000, () => now);
+  broker.setClientLocationAvailable(false);
+  const started = Date.now();
+  await assert.rejects(broker.request(new AbortController().signal), /LOCATION_UNAVAILABLE/);
+  assert.ok(Date.now() - started < 100);
+  assert.deepEqual(events, []);
+});
+
 test('cancelling a pending client request does not clear the resumable session fix', async () => {
   const broker = new LocationRequestBroker(() => {}, () => '123e4567-e89b-12d3-a456-426614174000', 1000, () => now);
   assert.equal(broker.prime(parseLocationReport({ type: 'location.report', mode: 'once', location: {

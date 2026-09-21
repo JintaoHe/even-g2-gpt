@@ -42,6 +42,18 @@ test('jitter stays within 80-120 percent and backoff caps at 30 seconds', () => 
   assert.equal(reconnectDelay(99, () => 0.5), 30_000);
 });
 
+test('Even client advertises location support on every authentication path', async () => {
+  const f = await fixture();
+  // Use a dedicated socket because the fixture controller is intentionally
+  // configured without capabilities to preserve backwards-compatibility tests.
+  const socket = new FakeSocket();
+  const capable = new ConnectionController({ url: () => 'ws://test', socket: () => socket,
+    credentials: f.credentials, onEvent: () => {}, clientCapabilities: { location: true }, uuid });
+  assert.equal(capable.connect('t'.repeat(32)), true); socket.open();
+  assert.deepEqual(socket.sent[0].client_capabilities, { location: true });
+  capable.dispose();
+});
+
 test('initial auth uses protocol v2 and reconnect resumes with the saved scoped credential', async () => {
   const f = await fixture(); assert.equal(f.controller.connect('t'.repeat(32)), true);
   const first = f.sockets[0]; first.open();

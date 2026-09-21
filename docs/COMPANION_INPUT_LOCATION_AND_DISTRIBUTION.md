@@ -79,6 +79,10 @@ The implementation is deliberately narrower than the SDK permits:
 2. the server sends a request ID for the first or stale location fix. The client tries at most
    three times (`high` 7 seconds, `high` 5 seconds, then `medium` 3 seconds) and
    accepts a fix only when reported accuracy is 100 metres or better;
+   protocol-v2 clients declare `client_capabilities.location` in `hello`. The Even
+   plugin declares `true`; the text-only browser lab declares `false`. A client
+   that cannot answer a location request fails immediately into the normal
+   city/timezone clarification instead of waiting for the 22-second watchdog;
 3. before the first successful fix, the glasses warn that the phone may show its
    system permission prompt. The SDK does not expose whether that dialog is
    currently visible, so this is a pre-emptive hint rather than dialog detection;

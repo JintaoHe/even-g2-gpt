@@ -34,7 +34,13 @@ function immediateStart(history: Message[]) {
   const anchors = history.filter(message => message.role === 'user').slice(-8).map(message => message.content)
     .filter(text => /现在|马上|即刻|此刻|今天|明天|后天|周[一二三四五六日天]|星期|\d{1,2}\s*(?:月|\/|-)\s*\d{1,2}|\b(?:now|right now|today|tomorrow|next\s+\w+)\b/i.test(text));
   const latest = anchors.at(-1) ?? '';
-  return /(?:从)?现在(?:开始|起)?|马上(?:开始)?|即刻|此刻|\b(?:now|right now)\b/i.test(latest)
+  // “现在帮我建一个 9 月 26 日上午 10 点的日程” uses 现在 as a
+  // discourse marker, not as the event start. Only override the planner when
+  // the user explicitly describes an immediate start and supplies no other
+  // absolute date/clock that must win.
+  const explicitlyImmediate = /(?:从现在(?:开始|起)|现在(?:开始|起)|马上开始|即刻开始|此刻开始|\b(?:start(?:ing)?\s+now|begin(?:ning)?\s+now|right\s+now)\b)/i.test(latest);
+  const otherAbsoluteTime = /(?:今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]|\d{1,2}\s*(?:月|\/|-)\s*\d{1,2}|(?:上午|中午|下午|晚上|凌晨)\s*\d{1,2}\s*(?:点|时)|\b\d{1,2}:\d{2}\b|\b(?:today|tomorrow|next\s+\w+)\b)/i.test(latest);
+  return explicitlyImmediate && !otherAbsoluteTime
     && !/(?:不要|别|不是|改到|改成).{0,16}(?:现在|马上|now)/i.test(latest);
 }
 
@@ -77,17 +83,42 @@ function uniquelyMentionedCandidate(value: string, candidates: CalendarItem[]) {
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+function ordinalCandidates(value: string, candidates: CalendarItem[]) {
+  const normalized = value.replace(/[\s，。！？,.!?；;：“”"‘’']/g, '');
+  const chinese = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+  const indexes = new Set<number>();
+  for (let index = 0; index < Math.min(candidates.length, 10); index++) {
+    if (new RegExp(`第(?:${index + 1}|${chinese[index]})(?:个|项)?`).test(normalized)) indexes.add(index);
+  }
+  return [...indexes].sort((a, b) => a - b).map(index => candidates[index]);
+}
+
+function ordinalCandidate(value: string, candidates: CalendarItem[]) {
+  const matches = ordinalCandidates(value, candidates);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 function multipleCancelSelection(text: string, candidates: CalendarItem[]) {
   if (candidates.length < 2 || candidates.length > 10 || !/(?:取消|删除|删掉|删了|cancel|delete|remove)/i.test(text)) return [];
   const clauses = text.replace(/[\r\n\t，。！？,.!?；;：“”"‘’']/g, ' ').replace(/\s+/g, ' ').trim();
+  const keepAfterOrdinal = /(?:留下|保留|不删|不要删|别删)\s*(第(?:\d{1,2}|[一二三四五六七八九十])(?:个|项)?)/i.exec(clauses)?.[1];
+  const keepBeforeOrdinal = /(第(?:\d{1,2}|[一二三四五六七八九十])(?:个|项)?)\s*(?:留下|保留|不删|不要删|别删)/i.exec(clauses)?.[1];
   const keepClause = /(?:除了|除去)\s*(.+?)\s*(?:那(?:一)?个)?\s*(?:留下|保留|不删|不要删|别删)/i.exec(clauses)?.[1]
-    ?? /(?:只|仅)\s*(?:留下|保留)\s*(.+?)(?=\s*(?:其他|其余|剩下).*(?:删|取消)|$)/i.exec(clauses)?.[1];
+    ?? /(?:只|仅)\s*(?:留下|保留)\s*(.+?)(?=\s*(?:其他|其余|剩下).*(?:删|取消)|$)/i.exec(clauses)?.[1]
+    ?? keepAfterOrdinal
+    ?? keepBeforeOrdinal
+    ?? /(?:留下|保留|不删|不要删|别删)\s*(.+?)(?=\s*(?:其他|其余|剩下).*(?:删|取消)|$)/i.exec(clauses)?.[1];
   if (keepClause) {
-    const kept = uniquelyMentionedCandidate(keepClause, candidates);
+    const kept = ordinalCandidate(keepClause, candidates) ?? uniquelyMentionedCandidate(keepClause, candidates);
     // An ambiguous keep instruction must never degrade into deleting all.
     if (!kept) return [];
+    // If the user names explicit cancel targets before saying what to keep,
+    // honour only those targets. Never let the kept ordinal leak into the
+    // cancellation set merely because it appears in the same sentence.
+    const explicit = ordinalCandidates(text, candidates).filter(candidate => candidate.id !== kept.id);
+    if (explicit.length) return explicit;
     const selected = candidates.filter(candidate => candidate.id !== kept.id);
-    return selected.length > 1 ? selected : [];
+    return selected;
   }
   const normalized = text.replace(/[\s，。！？,.!?]/g, '');
   if (/(?:全部|全都|都可以|都删|都取消|both|all(?:ofthem)?)/i.test(normalized)
@@ -517,7 +548,7 @@ export class CalendarDialogue implements DialogueModel {
           delta(await this.previewCancelBatch(signal)); return;
         }
         const selectedForCancel = multipleCancelSelection(latestText, this.context.candidates);
-        if (selectedForCancel.length > 1) {
+        if (selectedForCancel.length > 0) {
           if (selectedForCancel.some(item => !item.editable)) {
             delta('所选事件中有只读或非助手创建的日程，不能安全批量取消；尚未删除任何事件。'); return;
           }

@@ -323,6 +323,7 @@ void (async () => {
     url: () => conversationWebSocketUrl(location, packagedBackendOrigin),
     socket: url => new WebSocket(url) as unknown as import('./connection-controller').SocketLike,
     credentials: credentialStore,
+    clientCapabilities: { location: true },
     onEvent: handleServerEvent,
     onStatus: handleConnectionStatus,
   });

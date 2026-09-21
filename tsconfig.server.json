@@ -6,7 +6,13 @@
     "sourceMap": false,
     "declaration": false
   },
-  "files": ["src/conversation-server.ts", "src/legacy-session-import-cli.ts", "src/conversation-maintenance-cli.ts", "src/soak-monitor.ts"],
+  "files": [
+    "src/conversation-server.ts",
+    "src/conversation-restore-verify-cli.ts",
+    "src/legacy-session-import-cli.ts",
+    "src/conversation-maintenance-cli.ts",
+    "src/soak-monitor.ts"
+  ],
   "include": [],
   "exclude": ["tests", "web", "clients", "tools", "scripts"]
 }

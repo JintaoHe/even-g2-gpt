@@ -47,6 +47,29 @@ const publicActivityDiscovery = (history: Message[], text: string) => {
 };
 const personalCalendarRequest = (text: string) => /(我的|我今天|我明天|我的安排|我的日程|my\s+(?:calendar|schedule|appointments?))/i.test(text)
   && /(日历|安排|日程|会议|calendar|schedule|appointments?|meetings?)/i.test(text);
+const directCalendarAction = (text: string, action: string) => {
+  if (action === 'none' || ['followup', 'confirm', 'dismiss'].includes(action)) return true;
+  if (action === 'create') return /(?:帮我|请|麻烦|给我|替我|现在|马上)?.{0,20}(?:创建|新建|添加|加到|放到|排进|提醒我|建一个|约一个|schedule|create|add|book|remind)/i.test(text)
+    && /(?:日历|日程|事件|会议|提醒|calendar|event|meeting|appointment)|(?:创建|新建|添加|建一个|约一个).{0,30}(?:今天|明天|后天|周|星期|月|点|:\d{2})/i.test(text);
+  if (action === 'update') return /(?:修改|改到|改成|换到|挪到|延后|提前|update|change|move|reschedule)/i.test(text)
+    && /(?:日历|日程|事件|会议|安排|calendar|event|meeting|appointment|第\s*\d+\s*(?:个|项)?|刚才那个)/i.test(text);
+  if (action === 'cancel') return /(?:取消|删除|删掉|删了|cancel|delete|remove)/i.test(text)
+    && /(?:日历|日程|事件|会议|安排|calendar|event|meeting|appointment|第\s*\d+\s*(?:个|项)?|这几个|全部|都)/i.test(text);
+  if (action === 'query') return personalCalendarRequest(text)
+    || /(?:查|看|告诉我|读一下|列出|有没有|多少|什么).{0,30}(?:日历|日程|安排|会议|预约|calendar|schedule|meetings?|appointments?)/i.test(text)
+    || /(?:今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]|today|tomorrow|this\s+week).{0,30}(?:有空|空闲|忙不忙|有没有时间|安排|日程|会议|free|available|schedule|meetings?)/i.test(text);
+  return false;
+};
+const directDeliveryRequest = (text: string, action: string) => {
+  if (!['document', 'calendar'].includes(action)) return true;
+  const artifact = /(?:MD|Markdown|文档|文件|笔记|报告|计划书|方案书|邮件|邮箱|ICS|日历文件|attachment|document|file|report|notes?|email)/i;
+  const addressed = /(?:帮我|请|麻烦|给我|替我|把|将).{0,100}(?:生成|整理|写成|导出|做成|发给|发送|email|send|create|write|export)/i.test(text);
+  const imperativeStart = /^(?:好的?[，,、\s]*)?(?:请|麻烦)?(?:生成|整理|写成|导出|做成|创建|发给我|发送到|email\s+me|send\s+me|create|write|export|turn\b)/i.test(text.trim());
+  const fixedRecipient = /(?:发给我|发到(?:我|我的)?邮箱|发送到(?:我|我的)?邮箱|email\s+(?:it\s+)?to\s+me|email\s+me|send\s+(?:it\s+)?to\s+(?:me|my\s+email))/i.test(text);
+  const descriptiveMention = /(?:偶尔|有时|平时|通常|主要|可能|支持|场景|需求).{0,16}(?:生成|整理|导出|发送).{0,20}(?:MD|Markdown|文档|文件|报告|邮件)/i.test(text);
+  if (descriptiveMention && !imperativeStart && !fixedRecipient) return false;
+  return artifact.test(text) && (addressed || imperativeStart || fixedRecipient);
+};
 const nonRouteHotelResearch = (text: string) => !routeMetricRequest(text)
   && /(酒店|旅馆|住宿|hotel|lodging)/i.test(text) && /(推荐|找一家|哪一家|recommend|find)/i.test(text);
 const itineraryPlanningRequest = (text: string) => {
@@ -194,8 +217,9 @@ Return respond for a complete question, correction or instruction. Return wait o
 Return exit ONLY for a clear direct request to end this assistant conversation, including 再见 or 退下吧 addressed to the assistant.
 Quoted/reported speech, negation (不要退出/不要说再见), hypothetical discussion and text editing (把备注改成再见) are NOT exit requests.
 Ambiguous farewell or ambiguous assent to an earlier exit question: clarify_exit. Never infer exit merely from silence.
+A lone 推下吧 may be an STT homophone for 退下吧, but it is ambiguous: use clarify_exit rather than exit. If 推下/往下推 means continue advancing a plan, move to the next point, scroll/push something, or appears in a quotation, explanation, hypothetical or negation, use respond. Never turn a homophone into an unconditional exit.
 A direct yes to the immediately preceding explicit exit clarification can mean exit. A no means respond.
-Examples: 退下吧 => exit; 不要退出 => respond; 他说了再见 => respond; 把备注改成再见 => respond;
+Examples: 退下吧 => exit; 推下吧 => clarify_exit; 继续把方案往下推吧 => respond; 如果识别成“推下吧”怎么办 => respond; 不要退出 => respond; 他说了再见 => respond; 把备注改成再见 => respond;
 帮我把日期改到 => wait; 下周五，不要删除原备注 => respond (combine with pending context).
 Do not execute tools. Do not classify keywords without considering meaning.`;
 
@@ -203,6 +227,27 @@ export function parseDecision(value: unknown): Decision {
   if (!value || typeof value !== 'object' || !('decision' in value)
     || !['respond', 'wait', 'exit', 'clarify_exit'].includes(String(value.decision))) throw new Error('Invalid decision');
   return value.decision as Decision;
+}
+
+function contextualExitDecision(history: Message[], text: string, decision: Decision): Decision {
+  const normalized = text.trim().replace(/[。！.!]+$/g, '');
+  const previousAssistant = [...history].reverse().find(message => message.role === 'assistant')?.content ?? '';
+  const discussed = /[“”"「」『』]|(?:如果|假如|比如|例如|听成|识别成|说成|他说|她说|这句话|这几个字|意思|意味着|怎么办|when\s+I\s+say|if\s+I\s+say|quoted?)/i.test(normalized);
+  const negated = /(?:不要|别|不是|不代表|并非|不能).{0,20}(?:退出|结束|退下|推下)|(?:退出|结束|退下|推下).{0,12}(?:不要|别|不是|不代表|并非)/i.test(normalized);
+  const continueMeaning = /(?:继续|接着|往下|向下|下一步|下面|推进|进度|方案|项目|讨论|话题|页面|屏幕|按钮|滑块|把.{0,30}推下|push\s+(?:it|this|the).{0,20}(?:down|forward)|move\s+(?:on|forward)|next\s+(?:step|point))/i.test(normalized);
+  if ((discussed || negated || continueMeaning) && /(?:退下|推下|往下推|向下推|退出|结束|再见|bye|exit)/i.test(normalized)) return 'respond';
+  const minimalHomophone = /^(?:(?:好|好的|行|可以|那就|谢谢你?|ok(?:ay)?)[，,、\s]*)*推下吧(?:[，,、\s]*(?:谢谢你?|thanks))?$/i.test(normalized);
+  const precedingContinueContext = /(?:继续|接着|往下|下一步|下一个|推进|进度|方案|讨论|页面|后面的内容|move\s+on|continue|next\s+(?:step|point))/i.test(previousAssistant)
+    && !/(?:退出|结束|关闭|退下|exit|quit|close)/i.test(previousAssistant);
+  if (minimalHomophone && precedingContinueContext) return 'respond';
+  // A minimal homophone-shaped utterance is not authoritative enough to stop
+  // capture. Ask one semantic clarification; a later affirmative still enters
+  // the normal OS-confirmed exit flow.
+  if (minimalHomophone) return 'clarify_exit';
+  // A direct, unquoted command is deterministic even if the classifier has a
+  // transient miss. Conversation still requires the platform exit confirmation.
+  if (/^(?:(?:好|好的|行|可以|那就|谢谢你?|ok(?:ay)?)[，,、\s]*)*退下吧(?:[，,、\s]*(?:谢谢你?|thanks))?$/i.test(normalized)) return 'exit';
+  return decision;
 }
 
 /** Handles SSE framing across arbitrary UTF-8/network chunk boundaries. */
@@ -385,7 +430,7 @@ If two or more plausible physical venues remain, return ask with one concise ato
     const result: any = await response.json();
     if (result.status !== 'completed') throw new Error('Incomplete decision');
     const output = result.output?.flatMap((item: any) => item.content ?? []).filter((item: any) => item.type === 'output_text').map((item: any) => item.text).join('');
-    const parsed = JSON.parse(output), decision = parseDecision(parsed);
+    const parsed = JSON.parse(output), decision = contextualExitDecision(history, text, parseDecision(parsed));
     if (delivery && !deliveryActions.includes(parsed.delivery_action)) throw new Error('Invalid delivery intent');
     if (calendar && !calendarActions.includes(parsed.calendar_action)) throw new Error('Invalid calendar intent');
     if (web && !['none', 'search'].includes(parsed.search_action)) throw new Error('Invalid search intent');
@@ -399,7 +444,8 @@ If two or more plausible physical venues remain, return ask with one concise ato
     const publicDiscovery = publicActivityDiscovery(history, text) && !routeMetricRequest(text) && !personalCalendarRequest(text);
     const itineraryPlanning = itineraryPlanningRequest(text);
     const outdoorInformation = conditionalOutdoorInformationFollowup(history, text);
-    const calendarAction = calendar && (publicDiscovery || itineraryPlanning) && parsed.calendar_action !== 'none' ? 'none' : parsed.calendar_action;
+    const calendarAction = calendar && ((publicDiscovery || itineraryPlanning) && parsed.calendar_action !== 'none'
+      || !directCalendarAction(text, parsed.calendar_action)) ? 'none' : parsed.calendar_action;
     const locationAction = location && (publicDiscovery || nonRouteHotelResearch(text)) ? 'none' : parsed.location_action;
     // Cognitive strategy is model-selected from the current meaning/context. Backend guards below may suppress an
     // unsafe or irrelevant workflow, but must not collapse flexible thinking styles into one tool-shaped label.
@@ -423,7 +469,8 @@ If two or more plausible physical venues remain, return ask with one concise ato
       ...(location ? { locationAction: 'none', routeDestination: null, routeOrigin: null, routeMode: 'drive', routeModeExplicit: false } : {}) };
     if (calendar && decision === 'respond' && calendarAction !== 'none') return { decision, cognitiveMode, assistantMode: cognitiveMode,
       ...topic, calendarAction, deliveryAction: 'none', searchAction: 'none', taskAction, taskKind, reasoningEffort: 'low' };
-    const deliveryAction = delivery && decision === 'respond' ? parsed.delivery_action : 'none';
+    const deliveryAction = delivery && decision === 'respond' && directDeliveryRequest(text, parsed.delivery_action)
+      ? parsed.delivery_action : 'none';
     const effectiveSearchAction = deliveryAction !== 'none' || (locationAction && locationAction !== 'none') ? 'none' : searchAction;
     return { decision, ...(delivery ? { deliveryAction } : {}),
       ...(calendar ? { calendarAction: decision === 'respond' ? calendarAction : 'none' } : {}),

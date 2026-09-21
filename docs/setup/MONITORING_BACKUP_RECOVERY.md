@@ -20,6 +20,14 @@
 运维文件不会由应用自动更新器自我替换。管理员必须先核对当前 release 的 diff，再手动安装：
 
 ```bash
+sudo cmp /usr/local/sbin/even-agent-healthcheck /opt/even-agent/current/deploy/even-agent-healthcheck.sh
+sudo cmp /usr/local/sbin/even-agent-restore-check /opt/even-agent/current/deploy/even-agent-restore-check.sh
+test -r /opt/even-agent/current/src/conversation-restore-verify-cli.js
+```
+
+两条 `cmp` 无输出且退出码为 `0`，并且最后的 `test` 也返回 `0`，才表示增强恢复校验器和运维脚本完整一致。发现漂移不是应用 updater 失败，而是需要执行下面受审阅的 root 安装步骤；如果 release 缺少校验器，不要安装增强版 restore-check。
+
+```bash
 sudo install -o root -g root -m 0755 /opt/even-agent/current/deploy/even-agent-healthcheck.sh /usr/local/sbin/even-agent-healthcheck
 sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent-healthcheck.service /etc/systemd/system/even-agent-healthcheck.service
 sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent-healthcheck.timer /etc/systemd/system/even-agent-healthcheck.timer

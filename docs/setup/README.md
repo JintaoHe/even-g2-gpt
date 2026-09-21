@@ -37,6 +37,7 @@
 - 未带应用令牌下载附件得到 `401`；应用令牌不出现在 URL、日志或截图中。
 - `/etc/even-agent.env`、Google OAuth 文件为 `0600`，数据目录为 `0700`。
 - Google 只读连接检查成功；SMTP 只做 `verify()` 时不会发送邮件。
+- `/usr/local/sbin/even-agent-update`、`even-agent-healthcheck`、`even-agent-restore-check` 与 `/opt/even-agent/current/deploy/` 中对应脚本字节一致；若有差异，先审阅，再按各自文档手动安装，不能把“release 已更新”等同于“root-owned 运维脚本已更新”。
 
 ## 相关文档
 

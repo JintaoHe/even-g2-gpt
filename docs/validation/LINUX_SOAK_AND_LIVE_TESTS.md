@@ -13,6 +13,8 @@
 | 60-message 生产摘要边界 | `tests/session-summary.test.ts` | 58 条不提前摘要；60 条保留最近 24 条 |
 | 跨 session 边界 | reconnect／session tests | 当前只承诺同一 durable session；新 session 不伪装拥有 profile memory |
 
+回归语料不能只反复运行曾经暴露 bug 的原句。每次改动应同时保留固定 regression case，并另外创建不含私人数据的新自然口语场景，例如：不同月份／时段的显式日程、3–4 个事件的混合“删除＋保留”、以及退出同音词在“继续推进／页面向下／明确退出／引用讨论”里的正反例。新的 Calendar 场景必须使用合成标题和未来日期，不得读取、修改或删除用户真实事件。
+
 ## 真实 API 验收（逐项、可清理）
 
 在独立测试内容上执行；每项完成后删除测试 Calendar event 和临时生成文件。不要借此消耗到真实搜索配额上限。
@@ -34,6 +36,7 @@ Calendar／Email 是不可由 Luna 替代的写操作：任何真实写入仍须
 - first-visible 与 complete p50/p95；
 - OpenAI／Soniox／Google attempts、failure rate、p50/p95；
 - provider 总成本起止与 delta；
+- document attempts/completed/failed/retry-failed 与生成延迟；
 - process restart、采样失败、storage warning；
 - 测试期间是否使用 simulator、Even Hub Beta 或真机。
 

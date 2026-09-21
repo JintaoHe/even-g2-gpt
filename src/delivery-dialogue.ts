@@ -60,7 +60,8 @@ export class DeliveryDialogue implements DialogueModel {
     private sender?: MailSender, private now: () => number = Date.now,
     private notifyResult?: (id: string, result: string) => void,
     private artifactSource?: () => Message[],
-    private recovery?: RecoveryPersistence<DeliveryRecoveryState>) {}
+    private recovery?: RecoveryPersistence<DeliveryRecoveryState>,
+    private observeDocument?: (outcome: 'success' | 'failure', durationMs: number, retry: boolean) => void) {}
   invalidate() { this.approval = undefined; this.documentOffer = undefined; }
   private persistDraft() {
     if (!this.jobId) { this.recovery?.clear(); return; }
@@ -189,6 +190,7 @@ export class DeliveryDialogue implements DialogueModel {
     if (this.jobId) this.jobs.supersede(this.jobId);
     this.invalidate(); this.draft = undefined; this.jobId = undefined; this.recovery?.clear();
     update?.({ type: 'artifact.status', status: 'generating' });
+    const generationStarted = this.now();
     let newJob: string | undefined;
     try {
       // Normal Luna replies receive the whole session as short-term memory. A
@@ -197,7 +199,8 @@ export class DeliveryDialogue implements DialogueModel {
       const source = this.artifactSource?.() ?? history;
       const selection = activeTopicHistory(source).map(message => ({ ...message,
         citations: message.citations?.map(citation => ({ ...citation })) }));
-      const generated = await this.generate(selection, action, action === 'revise' ? previousDraft : undefined, signal);
+      const generated = await this.generate(selection, action, action === 'revise' ? previousDraft : undefined, signal,
+        { conciseRetry: context?.documentRetry === true });
       signal.throwIfAborted();
       if ('clarification' in generated) { delta(generated.clarification + '\n尚未发送邮件。'); return; }
       const job = this.jobs.enqueueDocument(generated.document, generated.calendar); newJob = job.id;
@@ -210,12 +213,14 @@ export class DeliveryDialogue implements DialogueModel {
       signal.throwIfAborted();
       if (this.jobs.get(job.id)?.state !== 'completed') throw Error('DRAFT_SAVE_FAILED');
       this.draft = generated; this.jobId = job.id; this.persistDraft();
+      this.observeDocument?.('success', this.now() - generationStarted, context?.documentRetry === true);
       this.preview(delta);
     } catch (error) {
       if (newJob) { this.jobs.cancel(newJob); this.jobs.supersede(newJob); }
       this.draft = undefined; this.jobId = undefined; this.recovery?.clear();
       signal.throwIfAborted();
       const failure = draftFailureDetails(error);
+      this.observeDocument?.('failure', this.now() - generationStarted, context?.documentRetry === true);
       console.warn(JSON.stringify({ event: 'delivery_draft_failed', ...failure }));
       if (!context?.documentRetry && !['DRAFT_UNAVAILABLE', 'DRAFT_INPUT_LIMIT'].includes(failure.code)) {
         const prompt = '文件没有完整生成，也没有保存或发送。需要我重试生成 Markdown 文件吗？';

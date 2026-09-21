@@ -28,6 +28,7 @@ export const STT_VOCABULARY = {
   ],
   assistantAndDailyLife: [
     'Hi, Even', 'Even G2', 'ChatGPT', 'OpenAI', 'Claude', 'Codex',
+    '退下吧', '再见',
     'Google Calendar', 'Apple Calendar', 'Google Maps', 'Google Routes',
     'calendar invite', 'meeting invite', 'appointment', 'reminder',
     'schedule', 'reschedule', 'cancel the event', 'send the email',

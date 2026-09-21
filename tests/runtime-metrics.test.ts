@@ -13,6 +13,8 @@ test('runtime metrics retain metadata-only turn and provider distributions', asy
   metrics.observeProvider('openai', 'success', 40);
   metrics.observeProvider('openai', 'failure', 60);
   metrics.observeProvider('soniox', 'cancelled', 5);
+  metrics.observeDocument('success', 120);
+  metrics.observeDocument('failure', 180, true);
 
   const snapshot = await metrics.snapshot({
     connections: { authenticated: 1, unauthenticated: 2, total: 3 },
@@ -23,6 +25,8 @@ test('runtime metrics retain metadata-only turn and provider distributions', asy
   assert.deepEqual(snapshot.turns.complete, { count: 1, p50_ms: 100, p95_ms: 100, max_ms: 100 });
   assert.equal(snapshot.turns.failed, 1);
   assert.equal(snapshot.providers.openai.error_rate, 0.5);
+  assert.deepEqual(snapshot.documents, { attempts: 2, completed: 1, failed: 1, retry_failed: 1,
+    latency: { count: 2, p50_ms: 120, p95_ms: 180, max_ms: 180 } });
   assert.deepEqual(snapshot.connections, { authenticated: 1, unauthenticated: 2, total: 3 });
   assert.equal(snapshot.costs?.totalUsd, 6);
   const serialized = JSON.stringify(snapshot);

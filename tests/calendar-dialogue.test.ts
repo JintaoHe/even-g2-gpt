@@ -79,6 +79,37 @@ test('one request can cancel two listed events through sequential previews and c
   assert.match(conversation.history.at(-1)!.content, /已删除“测试 B”（2\/2）[\s\S]*2项都已删除/);
 });
 
+test('explicit calendar date wins when 现在 is only a conversational discourse marker', async t => {
+  const now = () => Date.parse('2026-09-20T20:39:00-05:00');
+  const f = await fixture(t, now);
+  const request: CalendarRequest = { ...query, action: 'create', changes: { ...original, title: '显式日期测试',
+    start: '2026-09-26T10:00-05:00', end: '2026-09-26T10:30-05:00' } };
+  const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: 'create' }; },
+    async decide() { return 'respond' as const; }, async reply() {} };
+  const conversation = new Conversation(new CalendarDialogue(base, f.service, async () => request, undefined, now), () => {});
+  await conversation.submit('现在帮我建一个 9 月 26 日上午 10 点的日程', true);
+  assert.match(conversation.history.at(-1)!.content, /2026-09-26 10:00–10:30/);
+  assert.doesNotMatch(conversation.history.at(-1)!.content, /2026-09-20 20:39/);
+  assert.equal(f.writes(), 2);
+});
+
+test('cancel one and retain another never puts the retained ordinal into the batch', async t => {
+  const f = await fixture(t); let action: TurnPlan['calendarAction'] = 'query';
+  const base = { async plan(): Promise<TurnPlan> { return { decision: 'respond', calendarAction: action }; },
+    async decide() { return 'respond' as const; }, async reply() {} };
+  const planner = async (): Promise<CalendarRequest> => action === 'query' ? query : { ...query, action: 'cancel', targetIndex: 0 };
+  const conversation = new Conversation(new CalendarDialogue(base, f.service, planner), () => {});
+  await conversation.submit('查看十月一日的两个日程', true);
+  action = 'cancel';
+  await conversation.submit('只取消第一个，保留第二个', true);
+  assert.match(conversation.history.at(-1)!.content, /第1\/1项[\s\S]*测试 A/);
+  assert.doesNotMatch(conversation.history.at(-1)!.content, /测试 B/);
+  await conversation.submit('确认取消', true);
+  assert.equal(f.records.size, 1);
+  assert.equal([...f.records.values()][0].summary, '测试 B');
+  assert.match(conversation.history.at(-1)!.content, /已保留“测试 B”/);
+});
+
 test('cold-started Calendar draft reconciles the ledger, re-previews and never reuses old approval', async t => {
   const f = await fixture(t); let saved: CalendarRecoveryState | undefined;
   const persistence = { save(value: CalendarRecoveryState) { saved = structuredClone(value); }, clear() { saved = undefined; } };
