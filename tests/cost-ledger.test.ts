@@ -8,6 +8,22 @@ import { createMeteredOpenAIFetch } from '../src/metered-openai.js';
 
 const path = async () => join(await mkdtemp(join(tmpdir(), 'even-cost-')), 'cost-ledger.json');
 
+test('recovery affordability is read-only and still enforced by the real reservation', async () => {
+  const file = await path(), ledger = await CostLedger.create(file, env());
+  const before = await readFile(file, 'utf8');
+  assert.equal(ledger.canReserve('openai', 1), true);
+  assert.equal(ledger.canReserve('openai', 51), false);
+  assert.equal(ledger.canReserve('openai', NaN), false);
+  assert.equal(await readFile(file, 'utf8'), before);
+  const ticket = await ledger.reserve('openai', 50);
+  assert.equal(ledger.canReserve('openai', 0.01), false);
+  await assert.rejects(ledger.reserve('openai', 0.01), CostBudgetExceeded);
+  await ticket.settle(0);
+  assert.equal(ledger.canReserve('openai', 0.01), true);
+  (ledger as any).persistenceFailed = true;
+  assert.equal(ledger.canReserve('openai', 0.01), false);
+});
+
 test('a failed durable write prevents this and subsequent provider calls until restart', async () => {
   const file = await path(), ledger = await CostLedger.create(file, env());
   const before = await readFile(file, 'utf8');

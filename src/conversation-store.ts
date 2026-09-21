@@ -4,14 +4,22 @@ import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextSummary } from './context-builder.js';
+import { validateContextSummary } from './summary-validation.js';
+import { selectSummaryBatch, mergeSummaryLosses, type SummaryLoss } from './summary-request.js';
 import { parseCalendarRecoveryState, parseDeliveryRecoveryState } from './recovery-drafts.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 9;
 const MAX_RECOVERY_DRAFT_BYTES = 256 * 1024;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const MAX_DEVICE_CREDENTIAL_MS = 366 * 24 * 60 * 60_000;
 const MAX_DEVICE_ROTATION_WINDOW_MS = 10 * 60_000;
+export const SUMMARY_RETRY_POLICY = {
+  maxBudgetDeferrals: 24,
+  maxAttempts: 3, firstDelayMs: 30_000, secondDelayMs: 120_000,
+  budgetDelayMs: 15 * 60_000, unknownDelayMs: 5 * 60_000,
+} as const;
+const SUMMARY_RETRY_CODES = "'SUMMARY_MODEL_FAILED','SUMMARY_SCHEMA_INVALID','SUMMARY_BUDGET_DEFERRED'";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type ConversationStoreHealth = {
@@ -132,6 +140,7 @@ export type RecoverableTurn = {
 };
 
 export type StoredSessionSummary = ContextSummary & {
+  sourceLosses: SummaryLoss[];
   id: string;
   sessionId: string;
   model: string;
@@ -360,6 +369,16 @@ function summaryJobRecord(row: any): SummaryJobRecord {
  * credentials, raw audio, precise location, or Calendar/Email approval token. */
 export class ConversationStore {
   private closed = false;
+  private summaryModel = 'gpt-5.6-luna';
+  private summaryRecoveryCursor = '';
+  private summaryBudgetAvailable: () => boolean = () => false;
+
+  configureSummaryRecoveryBudget(check: () => boolean) { this.summaryBudgetAvailable = check; }
+
+  configureSummaryModel(model: string) {
+    if (!model.trim() || model.length > 128) throw new Error('Invalid summary model');
+    this.summaryModel = model;
+  }
 
   private constructor(private db: DatabaseSync, private ownerToken: string,
     private directory: string, private databasePath: string) {}
@@ -558,6 +577,51 @@ export class ConversationStore {
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (5,?,?)')
           .run('durable-recovery-drafts', Date.now());
       }
+      if (latest < 6) {
+        db.exec('ALTER TABLE summary_jobs ADD COLUMN budget_deferrals INTEGER NOT NULL DEFAULT 0 CHECK(budget_deferrals>=0)');
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (6,?,?)')
+          .run('bounded-summary-budget-deferrals', Date.now());
+      }
+      if (latest < 7) {
+        db.exec("ALTER TABLE session_summaries ADD COLUMN source_losses_json TEXT NOT NULL DEFAULT '[]'");
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (7,?,?)')
+          .run('summary-source-losses', Date.now());
+      }
+      if (latest < 8) {
+        db.exec(`CREATE TABLE summary_jobs_v8 (
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          from_sequence INTEGER NOT NULL CHECK(from_sequence>=1),
+          through_sequence INTEGER NOT NULL CHECK(through_sequence>=from_sequence),
+          status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','unknown')),
+          attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0), created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL, error_code TEXT,
+          budget_deferrals INTEGER NOT NULL DEFAULT 0 CHECK(budget_deferrals>=0),
+          generation INTEGER NOT NULL DEFAULT 0 CHECK(generation>=0), terminal_sequence INTEGER,
+          UNIQUE(session_id,from_sequence,through_sequence,generation)
+        ) STRICT;
+        INSERT INTO summary_jobs_v8(id,session_id,from_sequence,through_sequence,status,attempts,created_at,updated_at,error_code,budget_deferrals)
+          SELECT id,session_id,from_sequence,through_sequence,status,attempts,created_at,updated_at,error_code,budget_deferrals FROM summary_jobs;
+        DROP TABLE summary_jobs;
+        ALTER TABLE summary_jobs_v8 RENAME TO summary_jobs;
+        CREATE INDEX summary_jobs_status_idx ON summary_jobs(status,created_at);
+        UPDATE summary_jobs SET terminal_sequence=(SELECT latest_sequence FROM sessions WHERE id=session_id)
+          WHERE status='failed' AND error_code IN ('SUMMARY_GAVE_UP','SUMMARY_BUDGET_GAVE_UP','SUMMARY_INPUT_LIMIT');
+        CREATE TRIGGER summary_terminal_anchor AFTER UPDATE OF status,error_code ON summary_jobs
+          WHEN NEW.status='failed' AND NEW.error_code IN ('SUMMARY_GAVE_UP','SUMMARY_BUDGET_GAVE_UP','SUMMARY_INPUT_LIMIT')
+            AND NEW.terminal_sequence IS NULL
+          BEGIN UPDATE summary_jobs SET terminal_sequence=(SELECT latest_sequence FROM sessions WHERE id=NEW.session_id)
+            WHERE id=NEW.id; END;`);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (8,?,?)')
+          .run('summary-recovery-generations', Date.now());
+      }
+      if (latest < 9) {
+        db.exec(`CREATE TABLE summary_recovery_clocks (
+          job_id TEXT PRIMARY KEY REFERENCES summary_jobs(id) ON DELETE CASCADE,
+          anchor_at INTEGER NOT NULL
+        ) STRICT;`);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (9,?,?)')
+          .run('closed-summary-recovery-clocks', Date.now());
+      }
     });
   }
 
@@ -582,7 +646,8 @@ export class ConversationStore {
         updated_at=MAX(updated_at,?) WHERE status IN ('accepted','planning','answering')`).run(now);
       db.prepare(`UPDATE sessions SET status='idle',updated_at=MAX(updated_at,?) WHERE status='active'`).run(now);
       // A provider may have accepted a running request before the process died.
-      // Keep it unresolved instead of retrying and risking a second charge.
+      // Quarantine it before a bounded, metered retry. This is read-only summary
+      // generation, never permission to retry an uncertain external write.
       db.prepare(`UPDATE summary_jobs SET status='unknown',error_code='SERVICE_RESTARTED_UNKNOWN',
         updated_at=MAX(updated_at,?) WHERE status='running'`).run(now);
     });
@@ -626,7 +691,7 @@ export class ConversationStore {
     const eligibility = `s.status IN ('ended','expired') AND s.ended_at IS NOT NULL AND s.ended_at<?
       ${input.ownerScope === undefined ? '' : 'AND s.owner_scope=?'}
       AND NOT EXISTS (SELECT 1 FROM summary_jobs j WHERE j.session_id=s.id
-        AND j.status IN ('queued','running','unknown'))`;
+        AND j.status='running')`;
     const parameters = input.ownerScope === undefined ? [cutoffAt] : [cutoffAt, input.ownerScope];
     return transaction(this.db, () => {
       const eligible = this.db.prepare(`SELECT COUNT(DISTINCT s.id) AS sessions,COUNT(m.id) AS messages
@@ -635,6 +700,9 @@ export class ConversationStore {
       const eligibleSessions = Number(eligible.sessions), eligibleMessages = Number(eligible.messages);
       let deletedSessions = 0, deletedMessages = 0;
       if (!input.dryRun && eligibleSessions > 0) {
+        // Queued/restart-unknown summaries must not retain expired personal
+        // data forever. The same transaction deletes their session and cascades
+        // its jobs; a running worker remains protected until it settles.
         const removed = this.db.prepare(`DELETE FROM sessions WHERE id IN (
           SELECT s.id FROM sessions s WHERE ${eligibility}
         )`).run(...parameters);
@@ -1127,6 +1195,7 @@ export class ConversationStore {
       this.db.prepare(`UPDATE resume_credentials SET revoked_at=?
         WHERE session_id=? AND revoked_at IS NULL`).run(at, sessionId);
       this.db.prepare('DELETE FROM recovery_drafts WHERE session_id=?').run(sessionId);
+      this.enqueueClosedSummaryInTransaction(sessionId, at);
       return sessionRecord(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId));
     });
   }
@@ -1270,10 +1339,31 @@ export class ConversationStore {
       ORDER BY through_sequence DESC LIMIT 1`).get(sessionId) as any;
     if (!row) return undefined;
     let summary: ContextSummary;
-    try { summary = JSON.parse(row.summary_json); }
-    catch { throw new Error('Invalid stored session summary'); }
+    let invalidSummary = false;
+    try { summary = validateContextSummary(JSON.parse(row.summary_json), row.through_sequence); }
+    catch {
+      invalidSummary = true;
+      summary = { version: 1, throughSequence: row.through_sequence,
+        overview: '此前摘要损坏，内容不可用；不能据此推断历史事实或已完成的操作。',
+        topics: [], confirmedDecisions: [], unresolvedItems: ['历史细节缺失，需要用户补充。'] };
+    }
+    let sourceLosses: SummaryLoss[];
+    try {
+      const parsed: unknown = JSON.parse(row.source_losses_json);
+      if (!Array.isArray(parsed) || !parsed.every(x => x && typeof x === 'object'
+        && ['message', 'prior_summary', 'metadata_unknown'].includes(x.kind)
+        && Number.isSafeInteger(x.sequence) && x.sequence >= 1 && x.sequence <= row.through_sequence
+        && Number.isSafeInteger(x.omittedBytes) && x.omittedBytes >= 0)) throw new Error('Invalid loss metadata');
+      sourceLosses = parsed;
+    } catch {
+      // Unknown is not equivalent to lossless. Keep the warning durable across
+      // the next summary without making session close depend on this column.
+      sourceLosses = [{ kind: 'metadata_unknown', sequence: row.through_sequence, omittedBytes: 0 }];
+    }
+    if (invalidSummary) sourceLosses = mergeSummaryLosses(sourceLosses,
+      [{ kind: 'metadata_unknown', sequence: row.through_sequence, omittedBytes: 0 }]);
     return { ...summary, id: row.id, sessionId: row.session_id, throughSequence: row.through_sequence,
-      model: row.model, createdAt: row.created_at };
+      model: row.model, createdAt: row.created_at, sourceLosses };
   }
 
   listSummaryJobs(sessionId: string): SummaryJobRecord[] {
@@ -1287,7 +1377,139 @@ export class ConversationStore {
     this.ensureOpen();
     if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
     return !!this.db.prepare(`SELECT 1 FROM summary_jobs WHERE session_id=?
-      AND status IN ('queued','running','unknown') LIMIT 1`).get(sessionId);
+      AND (status IN ('queued','running','unknown') OR
+        (status='failed' AND attempts<3 AND error_code IN (${SUMMARY_RETRY_CODES}))) LIMIT 1`).get(sessionId);
+  }
+
+  // Called only inside a write transaction. Coverage, not session status or a
+  // second summary flag, is the source of truth. In-flight ranges stay immutable.
+  private enqueueClosedSummaryInTransaction(sessionId: string, at: number): void {
+    const session = this.getSession(sessionId);
+    if (!session || !['ended', 'expired'].includes(session.status) || this.hasBlockingSummaryJob(sessionId)
+      || this.hasTerminalSummaryStart(sessionId, session.summaryThroughSequence + 1, at)) return;
+    const pending = this.db.prepare(`SELECT sequence FROM messages WHERE session_id=? AND sequence>?
+      AND status='committed' ORDER BY sequence LIMIT 6`).all(sessionId, session.summaryThroughSequence);
+    if (pending.length < 6) return;
+    const messages = this.summaryBatch(sessionId, session.latestSequence).messages;
+    // A failed exact range is not silently recreated. Retry policy belongs to
+    // the summary worker; INSERT OR IGNORE preserves the durable range identity.
+    this.insertSummaryJob(sessionId, session.summaryThroughSequence + 1, messages.at(-1)!.sequence, at);
+  }
+
+  summaryBatch(sessionId: string, throughSequence: number, maxMessages = 200) {
+    this.ensureOpen();
+    const session = this.getSession(sessionId);
+    if (!session || !Number.isSafeInteger(throughSequence) || throughSequence < 1
+      || !Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 500) throw new Error('SUMMARY_RANGE_INVALID');
+    const saved = this.latestSummary(sessionId);
+    const previousSummary: ContextSummary | undefined = saved ? {
+      version: saved.version, throughSequence: saved.throughSequence, overview: saved.overview,
+      topics: saved.topics, confirmedDecisions: saved.confirmedDecisions, unresolvedItems: saved.unresolvedItems,
+    } : undefined;
+    const next = this.db.prepare(`SELECT * FROM messages WHERE session_id=? AND sequence>? AND sequence<=?
+      AND status='committed' ORDER BY sequence LIMIT 1`);
+    function* source() {
+      let after = session!.summaryThroughSequence;
+      for (let count = 0; count < maxMessages; count++) {
+        const row = next.get(sessionId, after, throughSequence);
+        if (!row) return;
+        const message = messageRecord(row); after = message.sequence;
+        yield message;
+      }
+    }
+    return { ...selectSummaryBatch(this.summaryModel, source(), previousSummary, saved?.sourceLosses),
+      previousSummary, previousLosses: saved?.sourceLosses ?? [] };
+  }
+
+  scheduleActiveSummary(sessionId: string, threshold: number, keepRecent: number, maxMessages: number, at: number) {
+    return transaction(this.db, () => {
+      const session = this.getSession(sessionId);
+      if (!session || !['active', 'idle'].includes(session.status) || this.hasBlockingSummaryJob(sessionId)) return undefined;
+      if (this.hasTerminalSummaryStart(sessionId, session.summaryThroughSequence + 1, at)) return undefined;
+      // Read only sequence metadata before the byte-bounded, streaming content read.
+      const rows = this.db.prepare(`SELECT sequence FROM messages WHERE session_id=? AND sequence>?
+        AND status='committed' ORDER BY sequence LIMIT 500`).all(sessionId, session.summaryThroughSequence) as { sequence: number }[];
+      if (rows.length < threshold) return undefined;
+      const end = rows[Math.min(rows.length - keepRecent, maxMessages) - 1]?.sequence;
+      if (!end) return undefined;
+      const batch = this.summaryBatch(sessionId, end, maxMessages);
+      return this.insertSummaryJob(sessionId, session.summaryThroughSequence + 1, batch.messages.at(-1)!.sequence, at);
+    });
+  }
+
+  private hasTerminalSummaryStart(sessionId: string, from: number, at: number): boolean {
+    // Invalid/rebatched ranges may have legitimate replacements. Exhausted
+    // model/budget/input ranges must not be replanned on every user turn.
+    const terminal = this.db.prepare(`SELECT * FROM summary_jobs WHERE session_id=? AND from_sequence=?
+      AND status='failed' AND error_code IN ('SUMMARY_GAVE_UP','SUMMARY_BUDGET_GAVE_UP','SUMMARY_INPUT_LIMIT')
+      ORDER BY generation DESC,terminal_sequence DESC LIMIT 1`).get(sessionId, from) as any;
+    if (!terminal) return false;
+    if (terminal.generation >= 2) return true;
+    const session = this.getSession(sessionId)!;
+    if (['ended', 'expired'].includes(session.status)) {
+      if (terminal.error_code === 'SUMMARY_INPUT_LIMIT') return true;
+      if (terminal.error_code === 'SUMMARY_BUDGET_GAVE_UP') {
+        try { return !this.summaryBudgetAvailable(); } catch { return true; }
+      }
+      // Separate durable clock: never rewrite the terminal job's audit fields.
+      this.db.prepare('INSERT OR IGNORE INTO summary_recovery_clocks(job_id,anchor_at) VALUES (?,?)')
+        .run(terminal.id, terminal.updated_at);
+      this.db.prepare('UPDATE summary_recovery_clocks SET anchor_at=? WHERE job_id=? AND anchor_at-?>?')
+        .run(at, terminal.id, at, SUMMARY_RETRY_POLICY.budgetDelayMs);
+      const clock = this.db.prepare('SELECT anchor_at FROM summary_recovery_clocks WHERE job_id=?').get(terminal.id) as any;
+      return clock.anchor_at + 60 * 60_000 > at;
+    }
+    const count = this.db.prepare(`SELECT sequence FROM messages WHERE session_id=? AND sequence>?
+      AND status='committed' ORDER BY sequence LIMIT 60`).all(sessionId, terminal.terminal_sequence);
+    if (count.length < 60) return true;
+    if (terminal.error_code === 'SUMMARY_BUDGET_GAVE_UP') {
+      try { return !this.summaryBudgetAvailable(); } catch { return true; }
+    }
+    return false;
+  }
+
+  private insertSummaryJob(sessionId: string, from: number, through: number, at: number): SummaryJobRecord {
+    const terminal = this.db.prepare(`SELECT MAX(generation) AS generation FROM summary_jobs WHERE session_id=? AND from_sequence=?
+      AND status='failed' AND error_code IN ('SUMMARY_GAVE_UP','SUMMARY_BUDGET_GAVE_UP','SUMMARY_INPUT_LIMIT')`).get(sessionId, from) as any;
+    const generation = terminal.generation === null || this.hasTerminalSummaryStart(sessionId, from, at) ? 0 : terminal.generation + 1;
+    const existing = this.db.prepare('SELECT * FROM summary_jobs WHERE session_id=? AND from_sequence=? AND through_sequence=? AND generation=?')
+      .get(sessionId, from, through, generation);
+    if (existing) return summaryJobRecord(existing);
+    const id = randomUUID();
+    this.db.prepare(`INSERT INTO summary_jobs(id,session_id,from_sequence,through_sequence,status,created_at,updated_at,generation)
+      VALUES (?,?,?,?,'queued',?,?,?)`).run(id, sessionId, from, through, at, at, generation);
+    return summaryJobRecord(this.db.prepare('SELECT * FROM summary_jobs WHERE id=?').get(id));
+  }
+
+  recoverClosedSummaries(at: number, diagnostic: (event: Record<string, string | number>) => void = () => {}): void {
+    this.ensureOpen();
+    if (!Number.isSafeInteger(at) || at < 0) throw new Error('Invalid summary recovery time');
+    transaction(this.db, () => {
+      const rows = this.db.prepare(`SELECT DISTINCT s.id FROM sessions s JOIN summary_jobs j ON j.session_id=s.id
+        WHERE s.status IN ('ended','expired') AND s.id>? AND j.from_sequence=s.summary_through_sequence+1
+        AND j.status='failed' AND j.error_code IN ('SUMMARY_GAVE_UP','SUMMARY_BUDGET_GAVE_UP')
+        AND j.generation<2 ORDER BY s.id LIMIT 16`).all(this.summaryRecoveryCursor) as { id: string }[];
+      if (!rows.length) { this.summaryRecoveryCursor = ''; return; }
+      for (const row of rows) {
+        this.summaryRecoveryCursor = row.id;
+        if (this.hasBlockingSummaryJob(row.id)) continue;
+        const before = this.listSummaryJobs(row.id).length;
+        this.enqueueClosedSummaryInTransaction(row.id, at);
+        if (this.listSummaryJobs(row.id).length > before) {
+          try { diagnostic({ event: 'summary_recovery_queued', sessionId: row.id, code: 'SUMMARY_NEW_GENERATION' }); } catch { /* metadata only */ }
+          break; // At most one byte-planned recovery per sweep, never a busy loop.
+        }
+      }
+    });
+  }
+
+  rebatchSummaryJob(id: string, through: number, at: number) {
+    return transaction(this.db, () => {
+      const job = this.db.prepare("SELECT * FROM summary_jobs WHERE id=? AND status='running'").get(id) as any;
+      if (!job || through < job.from_sequence || through >= job.through_sequence) throw new Error('SUMMARY_RANGE_INVALID');
+      this.db.prepare("UPDATE summary_jobs SET status='failed',error_code='SUMMARY_REBATCHED',updated_at=MAX(updated_at,?) WHERE id=?").run(at, id);
+      return this.insertSummaryJob(job.session_id, job.from_sequence, through, at);
+    });
   }
 
   enqueueSummaryJob(input: { sessionId: string; fromSequence: number; throughSequence: number; createdAt: number }): SummaryJobRecord {
@@ -1297,14 +1519,13 @@ export class ConversationStore {
       || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0) throw new Error('Invalid summary job');
     return transaction(this.db, () => {
       const existing = this.db.prepare(`SELECT * FROM summary_jobs WHERE session_id=?
-        AND from_sequence=? AND through_sequence=?`).get(input.sessionId, input.fromSequence, input.throughSequence) as any;
+        AND from_sequence=? AND through_sequence=? ORDER BY generation DESC LIMIT 1`).get(input.sessionId, input.fromSequence, input.throughSequence) as any;
       if (existing) return summaryJobRecord(existing);
       const session = this.db.prepare('SELECT latest_sequence,summary_through_sequence FROM sessions WHERE id=?')
         .get(input.sessionId) as { latest_sequence: number; summary_through_sequence: number } | undefined;
       if (!session || input.fromSequence !== session.summary_through_sequence + 1
         || input.throughSequence > session.latest_sequence) throw new Error('Summary range is unavailable');
-      if (this.db.prepare(`SELECT 1 FROM summary_jobs WHERE session_id=?
-        AND status IN ('queued','running','unknown')`).get(input.sessionId)) throw new Error('Summary job already active');
+      if (this.hasBlockingSummaryJob(input.sessionId)) throw new Error('Summary job already active');
       const id = randomUUID();
       this.db.prepare(`INSERT INTO summary_jobs(id,session_id,from_sequence,through_sequence,status,created_at,updated_at)
         VALUES (?,?,?,?,'queued',?,?)`).run(id, input.sessionId, input.fromSequence, input.throughSequence,
@@ -1313,20 +1534,56 @@ export class ConversationStore {
     });
   }
 
-  claimNextSummaryJob(at: number): SummaryJobRecord | undefined {
+  claimNextSummaryJob(at: number, onDiagnostic: (event: Record<string, string | number>) => void
+    = event => console.info(JSON.stringify(event))): SummaryJobRecord | undefined {
     this.ensureOpen();
     if (!Number.isSafeInteger(at) || at < 0) throw new Error('Invalid summary job time');
     return transaction(this.db, () => {
-      const next = this.db.prepare("SELECT * FROM summary_jobs WHERE status='queued' ORDER BY created_at,id LIMIT 1").get() as any;
+      // The store has an exclusive live-process owner. Also prohibit concurrent
+      // summary claims, including a second worker accidentally sharing it.
+      if (this.db.prepare("SELECT 1 FROM summary_jobs WHERE status='running' LIMIT 1").get()) return undefined;
+      // Corrupt/stale pending ranges must neither advance coverage nor remain
+      // an invisible permanent lease. Quarantine them without changing facts.
+      const invalid = this.db.prepare(`UPDATE summary_jobs SET status='failed',error_code='SUMMARY_RANGE_INVALID',
+        updated_at=MAX(updated_at,?) WHERE
+        (status IN ('queued','unknown') OR (status='failed' AND error_code IN (${SUMMARY_RETRY_CODES})))
+        AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=summary_jobs.session_id
+          AND (summary_jobs.from_sequence<>s.summary_through_sequence+1
+            OR summary_jobs.through_sequence>s.latest_sequence)) RETURNING id,session_id,from_sequence,through_sequence,error_code`).all(at);
+      const exhausted = this.db.prepare(`UPDATE summary_jobs SET status='failed',error_code='SUMMARY_GAVE_UP'
+        WHERE status='unknown' AND attempts>=? RETURNING id,session_id,from_sequence,through_sequence,error_code`).all(SUMMARY_RETRY_POLICY.maxAttempts);
+      for (const row of [...invalid, ...exhausted] as any[]) {
+        try { onDiagnostic({ event: 'summary_failed', jobId: row.id, sessionId: row.session_id,
+          fromSequence: row.from_sequence, throughSequence: row.through_sequence, bytes: 0, code: row.error_code }); } catch { /* metadata only */ }
+      }
+      // MAX timestamps protect ordinary rollback, but a poisoned future clock
+      // must not lock a range indefinitely after NTP corrects it. Re-anchor only
+      // retryable outliers, then require their FULL delay (never immediate retry).
+      // Smaller skew is left intact and bounds extra waiting to 15 minutes.
+      this.db.prepare(`UPDATE summary_jobs SET updated_at=? WHERE updated_at-?>?
+        AND attempts<? AND (status='unknown' OR
+          (status='failed' AND error_code IN (${SUMMARY_RETRY_CODES})))`).run(
+            at, at, SUMMARY_RETRY_POLICY.budgetDelayMs, SUMMARY_RETRY_POLICY.maxAttempts);
+      const next = this.db.prepare(`SELECT j.* FROM summary_jobs j JOIN sessions s ON s.id=j.session_id
+        WHERE j.from_sequence=s.summary_through_sequence+1 AND (
+          j.status='queued' OR
+          (j.status='unknown' AND j.attempts<3 AND j.updated_at<=?) OR
+          (j.status='failed' AND j.attempts<3 AND j.error_code IN (${SUMMARY_RETRY_CODES})
+            AND j.updated_at + CASE
+              WHEN j.error_code='SUMMARY_BUDGET_DEFERRED' THEN ?
+              WHEN j.attempts<=1 THEN ? ELSE ? END <= ?))
+        ORDER BY j.created_at,j.id LIMIT 1`).get(at - SUMMARY_RETRY_POLICY.unknownDelayMs,
+          SUMMARY_RETRY_POLICY.budgetDelayMs, SUMMARY_RETRY_POLICY.firstDelayMs,
+          SUMMARY_RETRY_POLICY.secondDelayMs, at) as any;
       if (!next) return undefined;
       const claimed = this.db.prepare(`UPDATE summary_jobs SET status='running',attempts=attempts+1,
-        updated_at=?,error_code=NULL WHERE id=? AND status='queued'`).run(at, next.id);
+        updated_at=MAX(updated_at,?),error_code=NULL WHERE id=? AND status=?`).run(at, next.id, next.status);
       if (claimed.changes !== 1) return undefined;
       return summaryJobRecord(this.db.prepare('SELECT * FROM summary_jobs WHERE id=?').get(next.id));
     });
   }
 
-  completeSummaryJob(input: { id: string; summary: ContextSummary; model: string; at: number }): StoredSessionSummary {
+  completeSummaryJob(input: { id: string; summary: ContextSummary; model: string; at: number; losses?: SummaryLoss[] }): StoredSessionSummary {
     this.ensureOpen();
     if (!validUuid(input.id) || !input.model.trim() || input.model.length > 128
       || !Number.isSafeInteger(input.at) || input.at < 0) throw new Error('Invalid summary completion');
@@ -1335,14 +1592,26 @@ export class ConversationStore {
     return transaction(this.db, () => {
       const job = this.db.prepare("SELECT * FROM summary_jobs WHERE id=? AND status='running'").get(input.id) as any;
       if (!job || input.summary.throughSequence !== job.through_sequence) throw new Error('Summary job is unavailable');
+      const session = this.getSession(job.session_id);
+      const boundary = this.db.prepare(`SELECT sequence FROM messages WHERE session_id=? AND sequence=? AND status='committed'`)
+        .get(job.session_id, job.through_sequence);
+      const count = this.db.prepare(`SELECT COUNT(*) AS n FROM (SELECT sequence FROM messages
+        WHERE session_id=? AND sequence>=? AND sequence<=? AND status='committed' LIMIT 501)`)
+        .get(job.session_id, job.from_sequence, job.through_sequence) as { n: number };
+      if (!session || job.from_sequence !== session.summaryThroughSequence + 1
+        || job.through_sequence > session.latestSequence || !boundary || count.n > 500) {
+        throw new Error('SUMMARY_RANGE_INVALID');
+      }
       const id = randomUUID();
-      this.db.prepare(`INSERT INTO session_summaries(id,session_id,through_sequence,summary_json,model,created_at)
-        VALUES (?,?,?,?,?,?)`).run(id, job.session_id, job.through_sequence, json, input.model.trim(), input.at);
+      const sourceLosses = mergeSummaryLosses(this.latestSummary(job.session_id)?.sourceLosses ?? [], input.losses ?? []);
+      this.db.prepare(`INSERT INTO session_summaries(id,session_id,through_sequence,summary_json,model,created_at,source_losses_json)
+        VALUES (?,?,?,?,?,?,?)`).run(id, job.session_id, job.through_sequence, json, input.model.trim(), input.at, JSON.stringify(sourceLosses));
       this.db.prepare(`UPDATE sessions SET summary_through_sequence=?,updated_at=MAX(updated_at,?)
         WHERE id=? AND summary_through_sequence<?`).run(job.through_sequence, input.at, job.session_id, job.through_sequence);
-      this.db.prepare("UPDATE summary_jobs SET status='completed',updated_at=?,error_code=NULL WHERE id=?")
+      this.db.prepare("UPDATE summary_jobs SET status='completed',updated_at=MAX(updated_at,?),error_code=NULL WHERE id=?")
         .run(input.at, input.id);
-      return { ...input.summary, id, sessionId: job.session_id, model: input.model.trim(), createdAt: input.at };
+      this.enqueueClosedSummaryInTransaction(job.session_id, input.at);
+      return { ...input.summary, id, sessionId: job.session_id, model: input.model.trim(), createdAt: input.at, sourceLosses };
     });
   }
 
@@ -1350,10 +1619,29 @@ export class ConversationStore {
     this.ensureOpen();
     if (!validUuid(id) || !/^[A-Z][A-Z0-9_]{1,63}$/.test(errorCode)
       || !Number.isSafeInteger(at) || at < 0) throw new Error('Invalid summary failure');
-    const result = this.db.prepare(`UPDATE summary_jobs SET status='failed',error_code=?,updated_at=?
-      WHERE id=? AND status='running'`).run(errorCode, at, id);
+    const result = this.db.prepare(`UPDATE summary_jobs SET status='failed',
+      error_code=CASE WHEN attempts>=3 AND ? IN (${SUMMARY_RETRY_CODES}) THEN 'SUMMARY_GAVE_UP' ELSE ? END,
+      updated_at=MAX(updated_at,?) WHERE id=? AND status='running'`).run(errorCode, errorCode, at, id);
     if (result.changes !== 1) throw new Error('Summary job is unavailable');
     return summaryJobRecord(this.db.prepare('SELECT * FROM summary_jobs WHERE id=?').get(id));
+  }
+
+  deferSummaryJob(id: string, at: number, reason: 'budget' | 'shutdown', consumedAttempt = false): void {
+    this.ensureOpen();
+    if (!validUuid(id) || !Number.isSafeInteger(at) || at < 0
+      || !['budget', 'shutdown'].includes(reason)) throw new Error('Invalid summary deferral');
+    const budget = reason === 'budget' ? 1 : 0;
+    const result = this.db.prepare(`UPDATE summary_jobs SET status=?,
+      error_code=CASE WHEN ?=1 AND attempts>=3 THEN 'SUMMARY_GAVE_UP'
+        WHEN ?=1 AND budget_deferrals+1>=? THEN 'SUMMARY_BUDGET_GAVE_UP' ELSE ? END,
+      budget_deferrals=budget_deferrals+?,updated_at=MAX(updated_at,?),
+      attempts=MAX(0,attempts-?) WHERE id=? AND status='running'`).run(
+        reason === 'budget' ? 'failed' : 'unknown',
+        budget && consumedAttempt ? 1 : 0,
+        budget, SUMMARY_RETRY_POLICY.maxBudgetDeferrals,
+        reason === 'budget' ? 'SUMMARY_BUDGET_DEFERRED' : 'SUMMARY_SHUTDOWN_UNKNOWN',
+        budget, at, budget && !consumedAttempt ? 1 : 0, id);
+    if (result.changes !== 1) throw new Error('Summary job is unavailable');
   }
 
   startAssistantAnswer(input: StartAssistantAnswer): AnswerAcknowledgement {
