@@ -29,7 +29,7 @@ import { createTimezoneFallback } from './timezone-fallback.js';
 import { createEnvironmentProvider, type EnvironmentProvider } from './environment.js';
 import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type PlanningEvidenceSelector } from './planning-evidence-dialogue.js';
 import { CostLedger } from './cost-ledger.js';
-import { createMeteredOpenAIFetch } from './metered-openai.js';
+import { createMeteredOpenAIFetch, openAIPricing, requestMaximum } from './metered-openai.js';
 import { ConversationStore, DeviceCredentialError, ResumeCredentialError } from './conversation-store.js';
 import { runConversationMaintenance } from './conversation-maintenance.js';
 import { readConversationStartupConfig } from './conversation-startup-config.js';
@@ -417,6 +417,7 @@ export function createConversationServer(options: {
         if (reason === 'ended') store.endSession(id, Date.now(), 'user_exit');
         else if (reason === 'expired') store.expireSession(id, Date.now());
         else store.markSessionDetached(id, Date.now());
+        if (reason === 'ended' || reason === 'expired') options.sessionSummary?.consider(id);
       },
       setCaptureStop(connectionId, stop) {
         if (stop) captureStop = { connectionId, stop };
@@ -945,10 +946,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await maintain();
   const maintenanceTimer = setInterval(() => { void maintain(); }, 24 * 60 * 60 * 1000);
   maintenanceTimer.unref();
+  const summaryRecoveryMaximum = requestMaximum(JSON.stringify({
+    model: process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply,
+    max_output_tokens: 2000, input: 'x'.repeat(180000),
+  }), openAIPricing(process.env));
   const sessionSummary = hybrid.provider === 'api' && key
     ? new SessionSummaryService(conversationStore,
       new OpenAISessionSummaryGenerator(key, process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply,
-        'https://api.openai.com/v1/responses', openaiFetch))
+        'https://api.openai.com/v1/responses', openaiFetch), {
+          recoveryBudgetAvailable: () => costs.canReserve('openai', summaryRecoveryMaximum),
+        })
     : undefined;
   let calendar: GoogleCalendarService | undefined;
   if (process.env.GOOGLE_CALENDAR_ENABLED === 'true') {

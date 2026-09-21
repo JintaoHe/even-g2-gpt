@@ -40,7 +40,7 @@ function actualCost(response: any, pricing: Pricing) {
     + webCalls * pricing.webSearchPerCall;
 }
 
-function requestMaximum(bodyText: string, pricing: Pricing) {
+export function requestMaximum(bodyText: string, pricing: Pricing) {
   let body: any = {};
   try { body = JSON.parse(bodyText); } catch { /* Reserve from the raw request even if OpenAI later rejects it. */ }
   // UTF-8 bytes are a conservative upper bound for tokenizer tokens for supported text inputs.

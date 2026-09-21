@@ -32,6 +32,7 @@ test('retention is dry-run capable, disabled by zero, and deletes only safely el
   const active = createSession(store, cutoff - 8_000, 'active');
   const blocked = createSession(store, cutoff - 7_000, 'ended');
   store.enqueueSummaryJob({ sessionId: blocked.sessionId, fromSequence: 1, throughSequence: 1, createdAt: cutoff - 6_000 });
+  store.claimNextSummaryJob(cutoff - 5_000);
 
   try {
     const disabled = store.cleanupExpiredSessions({ retentionDays: 0, now, dryRun: false });

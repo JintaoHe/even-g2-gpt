@@ -166,6 +166,14 @@ export class CostLedger {
     } };
   }
 
+  canReserve(provider: CostProvider, maximumUsd: number): boolean {
+    if (this.persistenceFailed || !Number.isFinite(maximumUsd) || maximumUsd <= 0) return false;
+    const nano = Math.max(1, dollarsToNano(maximumUsd));
+    const month = this.data.months[this.period()] ?? blankMonth();
+    return month.providerNanoUsd[provider] + nano <= this.limitsNano[provider]
+      && this.total(month) + nano <= this.limitsNano.total;
+  }
+
   async reserveGoogle(sku: GoogleSku, units: number): Promise<GoogleReservation> {
     if (!Number.isSafeInteger(units) || units < 1) throw new Error('GOOGLE_UNITS_INVALID');
     const definition = GOOGLE_SKUS[sku];

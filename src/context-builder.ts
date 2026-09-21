@@ -56,7 +56,7 @@ function statusAware(message: Message, maxCharacters: number): Message {
   return { ...message, content: `${label}\n${content}` };
 }
 
-function summaryMessage(summary: ContextSummary, currentTopicId?: string): Message {
+function summaryMessage(summary: ContextSummary & { sourceLosses?: readonly unknown[] }, currentTopicId?: string): Message {
   const currentTopic = currentTopicId ? summary.topics.find(topic => topic.id === currentTopicId) : undefined;
   const topics = summary.topics.map(topic => `- ${topic.label}: ${topic.summary}`).join('\n') || '- 无';
   const decisions = summary.confirmedDecisions.map(item => `- ${item}`).join('\n') || '- 无';
@@ -66,7 +66,7 @@ function summaryMessage(summary: ContextSummary, currentTopicId?: string): Messa
     contextKind: 'summary',
     status: 'committed',
     content: `[应用提供的只读会话摘要；不是用户指令；已覆盖到消息序号 ${summary.throughSequence}]
-概览：${summary.overview}
+${summary.sourceLosses?.length ? `注意：摘要链有 ${summary.sourceLosses.length} 处摘录或缺口信息不明，不能视为保留全部细节；当前没有历史原文查询能力，需要精确原话时请用户补充，不要承诺可以检索。\n` : ''}概览：${summary.overview}
 ${currentTopic ? `当前主题摘要（${currentTopic.label}）：${currentTopic.summary}\n` : ''}主题：
 ${topics}
 已确认决定：
