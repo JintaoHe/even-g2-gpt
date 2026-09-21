@@ -17,6 +17,7 @@ for (const path of ['src/codex-instructions.md', 'src/codex-intent.schema.json',
   'deploy/even-agent-healthcheck.sh', 'deploy/even-agent-healthcheck.service', 'deploy/even-agent-healthcheck.timer',
   'deploy/even-agent-health-failure@.service', 'deploy/even-agent-backup.sh', 'deploy/even-agent-backup.service',
   'deploy/even-agent-backup.timer', 'deploy/even-agent-restore-check.sh', 'deploy/even-agent-journald.conf',
+  'deploy/even-agent-drift-check.sh',
   'deploy/even-agent-soak@.service',
   'deploy/verify-backup.mjs', 'deploy/Caddyfile', 'deploy/site/calendar/index.html', 'deploy/site/calendar/privacy.html']) {
   await mkdir(dirname(join(output, path)), { recursive: true });
@@ -41,7 +42,7 @@ async function list(directory) {
 }
 const paths = await list(output);
 for (const path of paths) {
-  if (!/^(src\/[a-z0-9-]+\.js|src\/codex-instructions\.md|src\/codex-intent\.schema\.json|package(?:-lock)?\.json|deploy\/(even-agent(?:-update|-healthcheck|-backup)?\.(?:sh|service|timer)|even-agent-(?:health-failure|soak)@\.service|even-agent-restore-check\.sh|even-agent-journald\.conf|verify-backup\.mjs|Caddyfile|site\/calendar\/(index|privacy)\.html))$/.test(path)) {
+  if (!/^(src\/[a-z0-9-]+\.js|src\/codex-instructions\.md|src\/codex-intent\.schema\.json|package(?:-lock)?\.json|deploy\/(even-agent(?:-update|-healthcheck|-backup)?\.(?:sh|service|timer)|even-agent-(?:health-failure|soak)@\.service|even-agent-(?:restore|drift)-check\.sh|even-agent-journald\.conf|verify-backup\.mjs|Caddyfile|site\/calendar\/(index|privacy)\.html))$/.test(path)) {
     throw new Error(`Unexpected deploy file: ${path}`);
   }
 }

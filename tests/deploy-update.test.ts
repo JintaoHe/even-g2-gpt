@@ -7,6 +7,7 @@ const updateService = await readFile(new URL('../deploy/even-agent-update.servic
 const updateTimer = await readFile(new URL('../deploy/even-agent-update.timer', import.meta.url), 'utf8');
 const runtimeService = await readFile(new URL('../deploy/even-agent.service', import.meta.url), 'utf8');
 const healthScript = await readFile(new URL('../deploy/even-agent-healthcheck.sh', import.meta.url), 'utf8');
+const driftScript = await readFile(new URL('../deploy/even-agent-drift-check.sh', import.meta.url), 'utf8');
 const healthService = await readFile(new URL('../deploy/even-agent-healthcheck.service', import.meta.url), 'utf8');
 const healthTimer = await readFile(new URL('../deploy/even-agent-healthcheck.timer', import.meta.url), 'utf8');
 const backupScript = await readFile(new URL('../deploy/even-agent-backup.sh', import.meta.url), 'utf8');
@@ -92,6 +93,11 @@ test('production health monitoring exposes only a minimal public check and keeps
   assert.match(healthScript, /storage_report=.*curl[\s\S]*--retry 5 --retry-delay 1 --retry-all-errors/);
   assert.match(healthScript, /report\.warnings\.join/);
   assert.match(healthScript, /storage capacity warning/);
+  assert.match(healthScript, /\/usr\/local\/sbin\/even-agent-drift-check/);
+  assert.match(healthScript, /operational file drift detected/);
+  assert.match(healthScript, /operational drift map references a source missing/);
+  assert.match(healthScript, /Operational file drift check failed with exit/);
+  assert.match(driftScript, /EVEN_AGENT_DRIFT_CURRENT_ROOT:-\/opt\/even-agent\/current/);
   assert.match(healthService, /DynamicUser=true/);
   assert.match(healthService, /CapabilityBoundingSet=\s*$/m);
   assert.match(healthService, /ProtectSystem=strict/);
@@ -134,4 +140,5 @@ test('server-only release includes the restore verifier used by the production r
   const config = JSON.parse(serverConfig) as { files?: string[] };
   assert.ok(config.files?.includes('src/conversation-restore-verify-cli.ts'));
   assert.match(restoreScript, /src\/conversation-restore-verify-cli\.js/);
+  assert.match(buildScript, /deploy\/even-agent-drift-check\.sh/);
 });

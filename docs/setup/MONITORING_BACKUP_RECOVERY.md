@@ -7,27 +7,20 @@
 | 层级 | 检查或保护 | 不会做什么 |
 | --- | --- | --- |
 | GitHub Actions | 每小时访问公开的 `/healthz` | 不持有应用令牌，不访问对话、邮件或日历 |
-| 服务器 health timer | 检查本机 Node、Caddy TLS 和 Calendar 只读 API | 不调用 OpenAI，不发送邮件，不写日历 |
+| 服务器 health timer | 检查本机 Node、Caddy TLS、Calendar 只读 API 和运维文件漂移 | 不调用 OpenAI，不发送邮件，不写日历，不自动覆盖系统文件 |
 | 手动 soak monitor | 连续记录资源、连接、聚合延迟、provider 结果与成本变化 | 不读取正文、不制造会话、不调用 provider |
 | journald | 持久化、压缩并限制系统日志占用 | 不把日志上传到第三方 |
 | backup timer | 短暂停止应用，归档整个私有数据目录并校验恢复副本 | 不上传备份，不覆盖生产数据 |
 | Lightsail snapshot | 主机级灾难恢复 | 不代替应用数据一致性检查 |
 
-公开 `/healthz` 只返回 `{"status":"ok"}`。Calendar、storage 与 runtime 聚合指标分别只存在于回环地址 `/internal/health/calendar`、`/internal/health/storage` 与 `/internal/health/runtime`，Caddy 不代理这些路径。它们不包含正文、session ID、地址、坐标、凭证或 provider 错误正文。health timer 会对短暂 storage 读取失败进行最多五次有界重试；响应格式无效或出现容量 warning 时仍会失败并触发告警，而不是把 warning 当作健康。
+公开 `/healthz` 只返回 `{"status":"ok"}`。Calendar、storage 与 runtime 聚合指标分别只存在于回环地址 `/internal/health/calendar`、`/internal/health/storage` 与 `/internal/health/runtime`，Caddy 不代理这些路径。它们不包含正文、session ID、地址、坐标、凭证或 provider 错误正文。health timer 会对短暂 storage 读取失败进行最多五次有界重试；响应格式无效、出现容量 warning 或发现运维文件漂移时仍会失败并触发告警，而不是把异常当作健康。
 
 ## 安装监控文件
 
 运维文件不会由应用自动更新器自我替换。管理员必须先核对当前 release 的 diff，再手动安装：
 
 ```bash
-sudo cmp /usr/local/sbin/even-agent-healthcheck /opt/even-agent/current/deploy/even-agent-healthcheck.sh
-sudo cmp /usr/local/sbin/even-agent-restore-check /opt/even-agent/current/deploy/even-agent-restore-check.sh
-test -r /opt/even-agent/current/src/conversation-restore-verify-cli.js
-```
-
-两条 `cmp` 无输出且退出码为 `0`，并且最后的 `test` 也返回 `0`，才表示增强恢复校验器和运维脚本完整一致。发现漂移不是应用 updater 失败，而是需要执行下面受审阅的 root 安装步骤；如果 release 缺少校验器，不要安装增强版 restore-check。
-
-```bash
+sudo install -o root -g root -m 0755 /opt/even-agent/current/deploy/even-agent-drift-check.sh /usr/local/sbin/even-agent-drift-check
 sudo install -o root -g root -m 0755 /opt/even-agent/current/deploy/even-agent-healthcheck.sh /usr/local/sbin/even-agent-healthcheck
 sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent-healthcheck.service /etc/systemd/system/even-agent-healthcheck.service
 sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent-healthcheck.timer /etc/systemd/system/even-agent-healthcheck.timer
@@ -38,7 +31,16 @@ sudo systemctl start even-agent-healthcheck.service
 sudo systemctl enable --now even-agent-healthcheck.timer
 ```
 
-timer 每小时执行，最多随机延迟 5 分钟，重启或离线后补跑。失败会成为明确的 systemd failed unit，并额外写入 `daemon.err`。查看结果：
+首次安装完全部 updater、监控、备份、systemd、Caddy 和 journald 文件后运行：
+
+```bash
+test -r /opt/even-agent/current/src/conversation-restore-verify-cli.js
+sudo even-agent-drift-check
+```
+
+`test` 和 drift-check 都返回 `0` 才表示增强恢复校验器存在且运维副本与当前 release 一致。drift-check 返回 `1` 表示 installed/source 不一致，返回 `2` 表示映射引用的 release 源文件不存在。必须先审阅 diff，再从 `/opt/even-agent/current/deploy/` 安装；不要通过 `/dev/stdin` 或临时目录写入 root-owned 脚本。
+
+timer 每小时执行，最多随机延迟 5 分钟，重启或离线后补跑。服务探测失败与运维漂移都会成为明确的 systemd failed unit；漂移会额外写入带有 `Operational file drift check failed` 的 `daemon.err`，避免被误认为普通服务故障。查看结果：
 
 ```bash
 systemctl list-timers even-agent-healthcheck.timer --all

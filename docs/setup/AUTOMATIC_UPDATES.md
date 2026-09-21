@@ -43,6 +43,7 @@ sudo ln -s /opt/even-agent/releases/<full-commit-sha> /opt/even-agent/current
 
 ```bash
 sudo install -o root -g root -m 0755 /opt/even-agent/current/deploy/even-agent-update.sh /usr/local/sbin/even-agent-update
+sudo install -o root -g root -m 0755 /opt/even-agent/current/deploy/even-agent-drift-check.sh /usr/local/sbin/even-agent-drift-check
 sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent-update.service /etc/systemd/system/even-agent-update.service
 sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent-update.timer /etc/systemd/system/even-agent-update.timer
 sudo systemd-analyze verify /etc/systemd/system/even-agent-update.service /etc/systemd/system/even-agent-update.timer
@@ -113,7 +114,9 @@ sudo systemctl restart even-agent
 每次 release 更新后至少执行一次漂移检查：
 
 ```bash
-sudo cmp /usr/local/sbin/even-agent-update /opt/even-agent/current/deploy/even-agent-update.sh
+sudo even-agent-drift-check
 ```
 
-`cmp` 有输出或非零退出代表已安装脚本落后或被修改；先审阅 release 中的脚本 diff，再运行本页的 `sudo install`，随后手动触发一次 updater health gate。不要从 writable 临时目录直接安装 root 脚本。
+返回 `0` 且输出 `OK ... operational files match the current release` 表示映射内文件全部一致。返回 `1` 时逐项输出 `DRIFT <installed> != <source>`；返回 `2` 时输出 `SOURCE_MISSING <source>`，说明 release 删除或改名了受管源文件但映射未更新。任何非零结果都应触发现有 health failure 告警；先审阅 release 中的 diff，再运行相应的 `sudo install`，随后手动触发 healthcheck。不要从 writable 临时目录、`/dev/stdin` 或 `/opt/even-agent` 顶层陈旧 bootstrap 目录直接安装 root 脚本。
+
+检查器覆盖固定安装到 `/usr/local/sbin` 的五个运维脚本、systemd services/timers、Caddyfile 和 journald drop-in。它只读且不会自动修复漂移。更新器仍不自动改写自身、systemd 或 Caddy，从而不扩大 root 写入边界，也避免自动回滚形成“旧 release + 新运维脚本”的反向漂移。

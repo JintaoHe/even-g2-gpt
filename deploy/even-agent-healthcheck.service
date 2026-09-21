@@ -1,5 +1,5 @@
 [Unit]
-Description=Verify Even Agent app, TLS ingress, and read-only Calendar health
+Description=Verify Even Agent app, TLS ingress, read-only Calendar, storage, and operational file drift
 After=network-online.target even-agent.service caddy.service
 Wants=network-online.target
 OnFailure=even-agent-health-failure@%n.service
