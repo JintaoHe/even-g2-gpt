@@ -274,6 +274,14 @@ sudo chown root:root /etc/even-agent.env
 sudo chmod 0600 /etc/even-agent.env
 ```
 
+首次创建之后的 key／Secret 轮换不要直接从 WinSCP 覆盖 `/etc`。应使用
+[WinSCP 手册中的生产 `.env` 轮换流程](WINSCP_LIGHTSAIL.md#11-安全轮换生产-env)：
+经 Tailscale SFTP 上传到管理员的 `0700` 暂存目录，独立核验 SSH host key，
+只检查键名和格式、不打印值。若服务器含有本地文件没有的生产专用字段，必须以当前
+生产文件为基底、只按 allowlist 合并待轮换凭据，禁止整文件覆盖；随后在 `/etc` 内
+原子替换，保留短期 root-only 回滚副本，
+重启后验证权限、回环健康与公开 HTTPS，再清理临时副本。
+
 Google 私密文件放在：
 
 ```text
