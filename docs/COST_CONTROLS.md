@@ -39,6 +39,16 @@ time on the first day of each month.
 | Air Quality | 10,000 requests | $5 / 1,000 | 95% |
 | Pollen | 5,000 requests | $10 / 1,000 | 95% |
 
+PI-1 field review (2026-09-21): nearby search adds `location`, `businessStatus`,
+`currentOpeningHours.openNow`, and `priceLevel`. Hours/price remain in the same
+Text Search Enterprise tier already required by rating; location/business status
+are lower-tier fields. No reviews or Enterprise + Atmosphere fields are requested.
+See [Google's field-to-SKU table](https://developers.google.com/maps/documentation/places/web-service/data-fields).
+Nearby filtering happens before a maximum of five matrix destinations. Matrix units
+are actual origins × destinations (currently one origin), not one unit per HTTP call.
+This changes possible per-query usage, not any monthly cap. Field-tier verification
+does not constitute a fresh verification of every unit price elsewhere in this guide.
+
 Route Matrix is counted by returned route element, not by HTTP request. A
 successful retry is another billable event. An uncertain timeout keeps its
 pessimistic reservation so a provider outage cannot make the ledger

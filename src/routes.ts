@@ -1,7 +1,8 @@
 import type { RouteTravelMode } from './conversation.js';
 import type { EphemeralLocation } from './location.js';
 import type { CostLedger, GoogleSku } from './cost-ledger.js';
-import type { ProviderMetricObserver } from './runtime-metrics.js';
+import type { ProviderMetricObserver, NearbyMetricObserver } from './runtime-metrics.js';
+import type { NearbyPreferences } from './nearby-intent.js';
 
 export type RouteOrigin = { kind: 'coordinates'; location: EphemeralLocation } | { kind: 'address'; address: string };
 export type RouteRequestKind = 'destination' | 'nearby';
@@ -13,6 +14,10 @@ export type PlaceCandidate = {
   userRatingCount?: number;
   primaryType?: string;
   types?: string[];
+  location?: { latitude: number; longitude: number };
+  openNow?: boolean;
+  priceLevel?: 'free' | 'inexpensive' | 'moderate' | 'expensive' | 'very_expensive';
+  businessStatus?: 'OPERATIONAL' | 'CLOSED_TEMPORARILY' | 'CLOSED_PERMANENTLY' | 'FUTURE_OPENING';
 };
 export type CandidateQuality = { adjustedRating?: number; reliable: boolean; risk: boolean };
 export type RouteCandidate = PlaceCandidate & {
@@ -28,6 +33,8 @@ export type RouteComparisonResult = {
   recommendationBasis: 'fastest' | 'quality_risk' | 'balanced';
   mode: RouteTravelMode;
   trafficAware: boolean;
+  nearbyPreferences?: NearbyPreferences;
+  excluded?: NearbyExclusion[];
 };
 export type RouteRequest = {
   origin: RouteOrigin;
@@ -36,8 +43,10 @@ export type RouteRequest = {
   kind?: RouteRequestKind;
   /** Sanitized Place IDs from the immediately preceding comparison. Skips Places search. */
   candidates?: PlaceCandidate[];
+  nearbyPreferences?: NearbyPreferences;
 };
-export type RouteDiscovery = { query: string; candidates: PlaceCandidate[] };
+export type NearbyExclusion = { placeId: string; name: string; reason: 'closed' | 'price' | 'type' };
+export type RouteDiscovery = { query: string; candidates: PlaceCandidate[]; excluded?: NearbyExclusion[] };
 
 export interface RouteProvider {
   discover?(request: RouteRequest, signal: AbortSignal): Promise<RouteDiscovery>;
@@ -45,18 +54,19 @@ export interface RouteProvider {
 }
 
 export class RouteError extends Error {
-  constructor(public code: 'ROUTE_DESTINATION_NOT_FOUND' | 'ROUTE_INVALID' | 'ROUTE_UNAVAILABLE', message = code,
+  constructor(public code: 'ROUTE_DESTINATION_NOT_FOUND' | 'ROUTE_INVALID' | 'ROUTE_UNAVAILABLE' | 'ROUTE_NO_MATCHING_PLACES', message = code,
     public stage?: 'places' | 'routes', public providerStatus?: number, public retryable = false,
-    public providerReason?: string) { super(message); }
+    public providerReason?: string, public excluded?: NearbyExclusion[]) { super(message); }
 }
 
 type Fetch = typeof fetch;
-const MAX_CANDIDATES = 3;
+export const MAX_CANDIDATES = 5;
 const PLACE_SEARCH_CANDIDATES = 10;
 const NEARBY_RADIUS_M = 20_000;
 const MAX_TEXT_SEARCH_BIAS_RADIUS_M = 50_000;
 const RATING_PRIOR = 4;
 const RATING_PRIOR_WEIGHT = 50;
+const priceLevels = ['free', 'inexpensive', 'moderate', 'expensive', 'very_expensive'] as const;
 
 const boundedText = (value: unknown, limit: number) => typeof value === 'string'
   ? value.trim().replace(/[\r\n\t]+/g, ' ').slice(0, limit) : '';
@@ -85,9 +95,60 @@ function sanitizeCandidate(value: any): PlaceCandidate | undefined {
   const primaryType = boundedText(value?.primaryType, 80);
   const types = Array.isArray(value?.types) ? value.types.slice(0, 20)
     .map((type: unknown) => boundedText(type, 80)).filter(Boolean) : [];
+  const latitude = boundedNumber(value?.location?.latitude, -90, 90);
+  const longitude = boundedNumber(value?.location?.longitude, -180, 180);
+  const openNow = value?.openNow ?? value?.currentOpeningHours?.openNow;
+  const price = typeof value?.priceLevel === 'string' ? value.priceLevel.replace(/^PRICE_LEVEL_/, '').toLowerCase() : '';
+  const priceLevel = priceLevels.find(level => level === price);
+  const businessStatus = ['OPERATIONAL', 'CLOSED_TEMPORARILY', 'CLOSED_PERMANENTLY', 'FUTURE_OPENING'].includes(value?.businessStatus)
+    ? value.businessStatus as PlaceCandidate['businessStatus'] : undefined;
   return { placeId, name, ...(address ? { address } : {}), ...(rating === undefined ? {} : { rating }),
     ...(count === undefined ? {} : { userRatingCount: Math.round(count) }), ...(primaryType ? { primaryType } : {}),
-    ...(types.length ? { types } : {}) };
+    ...(types.length ? { types } : {}), ...(latitude === undefined || longitude === undefined ? {} : { location: { latitude, longitude } }),
+    ...(typeof openNow === 'boolean' ? { openNow } : {}), ...(priceLevel ? { priceLevel } : {}),
+    ...(businessStatus ? { businessStatus } : {}) };
+}
+
+export function prefilterNearby(candidates: PlaceCandidate[], prefs: NearbyPreferences = {}) {
+  const excluded: NearbyExclusion[] = [], kept: PlaceCandidate[] = [];
+  for (const candidate of candidates) {
+    const reason: NearbyExclusion['reason'] | undefined = candidate.businessStatus === 'CLOSED_PERMANENTLY'
+      || ((prefs.visitTime ?? 'now') === 'now' && (candidate.openNow === false
+        || candidate.businessStatus === 'CLOSED_TEMPORARILY' || candidate.businessStatus === 'FUTURE_OPENING')) ? 'closed'
+      : prefs.priceCeiling && candidate.priceLevel && priceLevels.indexOf(candidate.priceLevel) > priceLevels.indexOf(prefs.priceCeiling) ? 'price'
+      : [candidate.primaryType, ...(candidate.types ?? [])].some(type => type && prefs.excludeTypes?.includes(type)) ? 'type' : undefined;
+    if (reason) excluded.push({ placeId: candidate.placeId, name: candidate.name, reason }); else kept.push(candidate);
+  }
+  return { candidates: kept, excluded };
+}
+
+/** Coarse relevance only: distance is never a substitute for a Routes duration. */
+export function rankNearbyCoarse(candidates: PlaceCandidate[], prefs: NearbyPreferences, origin: RouteOrigin) {
+  const distance = (candidate: PlaceCandidate): number | undefined => {
+    if (origin.kind === 'coordinates' && candidate.location) {
+      const rad = (degrees: number) => degrees * Math.PI / 180;
+      const a = origin.location, b = candidate.location;
+      const h = Math.sin(rad(b.latitude - a.latitude) / 2) ** 2
+        + Math.cos(rad(a.latitude)) * Math.cos(rad(b.latitude)) * Math.sin(rad(b.longitude - a.longitude) / 2) ** 2;
+      return 6371 * 2 * Math.asin(Math.sqrt(Math.max(0, Math.min(1, h))));
+    }
+    return undefined;
+  };
+  const knownDistances = candidates.map(distance).filter((value): value is number => value !== undefined).sort((a, b) => a - b);
+  // Unknown distance is not zero: use a neutral pool median for coarse ranking only.
+  const unknownDistance = knownDistances[Math.floor(knownDistances.length / 2)] ?? 0;
+  const score = (candidate: PlaceCandidate) => {
+    const distanceKm = distance(candidate) ?? unknownDistance;
+    const quality = assessCandidate(candidate).adjustedRating;
+    const types = [candidate.primaryType, ...(candidate.types ?? [])];
+    const foodPrior = prefs.needsFood && types.some(type => type === 'restaurant' || type === 'bakery'
+      || type === 'cafe' || type?.endsWith('_restaurant')) ? -0.5 : 0;
+    const vibePrior = prefs.vibe === 'quiet' && types.some(type => ['wine_bar', 'cafe', 'coffee_shop'].includes(type ?? ''))
+      || prefs.vibe === 'lively' && types.some(type => ['bar', 'sports_bar', 'night_club', 'pub'].includes(type ?? '')) ? -0.25 : 0;
+    return distanceKm + (quality === undefined ? 0 : Math.max(0, 4.5 - quality) * 0.5) + foodPrior + vibePrior;
+  };
+  return candidates.map((candidate, index) => ({ candidate, index, score: score(candidate) }))
+    .sort((a, b) => a.score - b.score || a.index - b.index).map(item => item.candidate);
 }
 
 export function assessCandidate(candidate: PlaceCandidate): CandidateQuality {
@@ -118,7 +179,7 @@ export class GoogleRoutesProvider implements RouteProvider {
   constructor(private key: string, private fetcher: Fetch = fetch,
     private placesEndpoint = 'https://places.googleapis.com/v1/places:searchText',
     private routesEndpoint = 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
-    private costs?: CostLedger, private observe?: ProviderMetricObserver) {
+    private costs?: CostLedger, private observe?: ProviderMetricObserver, private observeNearby?: NearbyMetricObserver) {
     if (!key.trim() || key.length > 500) throw new Error('Invalid Google Maps key');
     for (const endpoint of [placesEndpoint, routesEndpoint]) if (new URL(endpoint).protocol !== 'https:'
       && !/^http:\/\/127\.0\.0\.1(?::\d+)?\//.test(endpoint)) throw new Error('Invalid Maps endpoint');
@@ -173,7 +234,7 @@ export class GoogleRoutesProvider implements RouteProvider {
 
   private async findCandidates(request: RouteRequest, destination: string, signal: AbortSignal): Promise<PlaceCandidate[]> {
     if (request.candidates?.length) {
-      return request.candidates.slice(0, MAX_CANDIDATES).map(sanitizeCandidate).filter((value): value is PlaceCandidate => !!value);
+      return request.candidates.slice(0, PLACE_SEARCH_CANDIDATES).map(sanitizeCandidate).filter((value): value is PlaceCandidate => !!value);
     }
     const nearby = request.kind === 'nearby';
     const textQuery = nearby && request.origin.kind === 'address' ? `${destination} near ${boundedText(request.origin.address, 240)}` : destination;
@@ -183,7 +244,8 @@ export class GoogleRoutesProvider implements RouteProvider {
       }, radius } } } : {};
       const places = await this.post('places', this.placesEndpoint, { textQuery, pageSize: PLACE_SEARCH_CANDIDATES,
         ...(nearby ? { rankPreference: 'DISTANCE' } : {}), ...bias },
-      'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.types', signal,
+      'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.types'
+        + (nearby ? ',places.location,places.currentOpeningHours.openNow,places.priceLevel,places.businessStatus' : ''), signal,
       'places-text-search-enterprise') as any;
       return (Array.isArray(places?.places) ? places.places : []).slice(0, PLACE_SEARCH_CANDIDATES)
         .map(sanitizeCandidate).filter((value: PlaceCandidate | undefined): value is PlaceCandidate => !!value);
@@ -198,22 +260,35 @@ export class GoogleRoutesProvider implements RouteProvider {
     // Parking, transit stops, departments, pharmacies, and similarly specific
     // places can all be intentional destinations. Preserve them; the dialogue
     // model resolves semantic ambiguity with the user instead of deleting data.
-    return candidates.slice(0, MAX_CANDIDATES);
+    return candidates;
+  }
+
+  private prepareCandidates(request: RouteRequest, candidates: PlaceCandidate[]) {
+    // A repeated Place ID must never spend two matrix elements or appear as two branches.
+    candidates = candidates.filter((candidate, index) => candidates.findIndex(other => other.placeId === candidate.placeId) === index);
+    if (request.kind !== 'nearby') return { candidates: candidates.slice(0, MAX_CANDIDATES), excluded: [] };
+    const filtered = prefilterNearby(candidates, request.nearbyPreferences);
+    this.observeNearby?.('prefiltered', filtered.excluded.length);
+    if (!filtered.candidates.length && filtered.excluded.length) throw new RouteError('ROUTE_NO_MATCHING_PLACES',
+      'ROUTE_NO_MATCHING_PLACES', 'places', undefined, false, undefined, filtered.excluded);
+    return { candidates: (request.nearbyPreferences ? rankNearbyCoarse(filtered.candidates, request.nearbyPreferences, request.origin)
+      : filtered.candidates).slice(0, MAX_CANDIDATES), excluded: filtered.excluded };
   }
 
   async discover(request: RouteRequest, signal: AbortSignal): Promise<RouteDiscovery> {
     const destination = boundedText(request.destination, 300);
     if (!destination || !['drive', 'walk', 'bicycle'].includes(request.mode)) throw new RouteError('ROUTE_INVALID');
-    const candidates = await this.findCandidates({ ...request, candidates: undefined }, destination, signal);
+    const found = await this.findCandidates({ ...request, candidates: undefined }, destination, signal);
+    const { candidates, excluded } = this.prepareCandidates(request, found);
     if (!candidates.length) throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');
-    return { query: destination, candidates };
+    return { query: destination, candidates, ...(excluded.length ? { excluded } : {}) };
   }
 
   async route(request: RouteRequest, signal: AbortSignal): Promise<RouteComparisonResult> {
     const destination = boundedText(request.destination, 300);
     if (!destination || !['drive', 'walk', 'bicycle'].includes(request.mode)) throw new RouteError('ROUTE_INVALID');
-    const candidates = request.candidates?.length ? await this.findCandidates(request, destination, signal)
-      : (await this.discover(request, signal)).candidates;
+    const found = await this.findCandidates(request, destination, signal);
+    const { candidates, excluded } = this.prepareCandidates(request, found);
     if (!candidates.length) throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');
     const originWaypoint = request.origin.kind === 'coordinates' ? { location: { latLng: {
       latitude: request.origin.location.latitude, longitude: request.origin.location.longitude
@@ -221,6 +296,7 @@ export class GoogleRoutesProvider implements RouteProvider {
     if ('address' in originWaypoint && !originWaypoint.address) throw new RouteError('ROUTE_INVALID');
     const modes: Record<RouteTravelMode, string> = { drive: 'DRIVE', walk: 'WALK', bicycle: 'BICYCLE' };
     const trafficAware = request.mode === 'drive';
+    if (request.kind === 'nearby') this.observeNearby?.('routed', candidates.length);
     const matrix = await this.post('routes', this.routesEndpoint, {
       origins: [{ waypoint: originWaypoint }],
       destinations: candidates.map((candidate: PlaceCandidate) => ({ waypoint: { placeId: candidate.placeId } })),
@@ -244,13 +320,14 @@ export class GoogleRoutesProvider implements RouteProvider {
     if (!routes.length) throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');
     const { recommended, basis } = recommendCandidates(routes);
     return { query: destination, candidates: routes, recommendedPlaceId: recommended.placeId,
-      recommendationBasis: basis, mode: request.mode, trafficAware };
+      recommendationBasis: basis, mode: request.mode, trafficAware,
+      ...(request.kind === 'nearby' ? { nearbyPreferences: request.nearbyPreferences ?? {}, excluded } : {}) };
   }
 }
 
 export function createRouteProvider(env: NodeJS.ProcessEnv = process.env, costs?: CostLedger,
-  observe?: ProviderMetricObserver): RouteProvider | undefined {
+  observe?: ProviderMetricObserver, observeNearby?: NearbyMetricObserver): RouteProvider | undefined {
   if (env.GOOGLE_MAPS_ENABLED !== 'true') return undefined;
   if (!env.GOOGLE_MAPS_API_KEY) throw new Error('GOOGLE_MAPS_ENABLED requires GOOGLE_MAPS_API_KEY');
-  return new GoogleRoutesProvider(env.GOOGLE_MAPS_API_KEY, fetch, undefined, undefined, costs, observe);
+  return new GoogleRoutesProvider(env.GOOGLE_MAPS_API_KEY, fetch, undefined, undefined, costs, observe, observeNearby);
 }

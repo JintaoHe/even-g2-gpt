@@ -66,7 +66,7 @@ test('complete sections may trade allocation while the total range remains bindi
   assert.ok(result.document.markdown.includes('补'.repeat(20)));
 });
 
-test('a completed but still short repair remains saved and visibly partial, without more calls', async () => {
+test('a completed but short repair reports length difference, not incomplete chapters or code warnings', async () => {
   let calls=0;
   const generate=createDraftGenerator({OPENAI_API_KEY:'fake'},async()=> {
     calls++;
@@ -75,7 +75,13 @@ test('a completed but still short repair remains saved and visibly partial, with
   });
   const result=await generate([], 'document', undefined,new AbortController().signal);
   assert.ok('document' in result); assert.equal(calls,3);
-  assert.equal(result.document.presentation.partial,true); assert.match(result.document.markdown,/未完成草稿/);
+  assert.notEqual(result.document.presentation.partial,true);
+  assert.equal(result.document.presentation.lengthMismatch,true);
+  assert.equal(result.document.presentation.incompleteSections,undefined);
+  assert.match(result.document.markdown,/篇幅与原定目标有所不同/);
+  const mail=mailPresentation(result.document.presentation);
+  assert.match(mail.text,/篇幅与原定目标有所不同/);
+  assert.doesNotMatch(mail.subject+mail.text+mail.html+result.document.markdown,/未完成草稿|章不完整|代码不可|待补充/);
 });
 
 test('double truncation and failed rewrite save visibly partial text, with no raw unfinished code', async () => {
@@ -90,10 +96,11 @@ test('double truncation and failed rewrite save visibly partial text, with no ra
   assert.ok('document' in result); assert.equal(calls,4);
   assert.equal(result.document.presentation.partial,true);
   assert.deepEqual(result.document.presentation.incompleteSections,[1]);
-  assert.match(result.document.markdown,/未完成草稿/); assert.match(result.document.markdown,/LIB-7042/);
+  assert.match(result.document.markdown,/部分内容待补充/); assert.match(result.document.markdown,/LIB-7042/);
   assert.doesNotMatch(result.document.markdown,/DROP unfinished|```/);
   const mail=mailPresentation(result.document.presentation);
-  assert.match(mail.subject,/未完成草稿/); assert.match(mail.text,/第 1 章不完整/); assert.match(mail.html,/第 1 章不完整/);
+  assert.match(mail.subject,/待补充/); assert.match(mail.text,/第 1 章还有部分内容待补充/); assert.match(mail.html,/第 1 章还有部分内容待补充/);
+  assert.doesNotMatch(mail.text+mail.html,/未完成草稿|代码不可/);
 });
 
 test('cancellation during rewrite never becomes a partial artifact', async () => {

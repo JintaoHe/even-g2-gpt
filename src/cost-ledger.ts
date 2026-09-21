@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
+import { replaceLedgerFile } from './atomic-ledger-rename.js';
 import { dirname, resolve } from 'node:path';
 
 export type CostProvider = 'openai' | 'soniox' | 'google';
@@ -69,6 +70,7 @@ export class CostBudgetExceeded extends Error {
 
 export class CostLedger {
   private queue = Promise.resolve();
+  private persistenceFailed = false;
   private flushing = false;
   private alertRetry?: NodeJS.Timeout;
   private readonly limitsNano: Record<CostProvider, number> & { total: number };
@@ -127,11 +129,16 @@ export class CostLedger {
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${process.pid}.tmp`;
     await writeFile(temporary, JSON.stringify(this.data, null, 2), { mode: 0o600 });
-    await rename(temporary, this.file);
+    await replaceLedgerFile(temporary, this.file);
     try { const handle = await open(this.file, 'r+'); await handle.chmod(0o600); await handle.close(); } catch { /* Windows may not expose POSIX mode bits. */ }
   }
   private mutate<T>(operation: () => T | Promise<T>) {
-    const next = this.queue.catch(() => {}).then(async () => { const value = await operation(); await this.persist(); return value; });
+    const next = this.queue.catch(() => {}).then(async () => {
+      if (this.persistenceFailed) throw new Error('COST_LEDGER_UNAVAILABLE');
+      const value = await operation();
+      try { await this.persist(); } catch { this.persistenceFailed = true; throw new Error('COST_LEDGER_UNAVAILABLE'); }
+      return value;
+    });
     this.queue = next.then(() => {}, () => {}); return next;
   }
 

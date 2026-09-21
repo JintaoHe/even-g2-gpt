@@ -1,8 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GoogleRoutesProvider, RouteError, assessCandidate, recommendCandidates, type RouteCandidate } from '../src/routes.js';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CostLedger } from '../src/cost-ledger.js';
+import { GoogleRoutesProvider, RouteError, assessCandidate, recommendCandidates, prefilterNearby, rankNearbyCoarse, type RouteCandidate } from '../src/routes.js';
 
 const fix = { latitude: 41.58, longitude: -93.62, accuracyM: 20, observedAt: Date.now(), receivedAt: Date.now() };
+
+test('exclusions cover secondary types, never infer a type from a name', () => {
+  const result = prefilterNearby([
+    { placeId: 'hybrid', name: 'Dinner House', primaryType: 'restaurant', types: ['restaurant', 'bar'] },
+    { placeId: 'quick', name: 'Quick Kitchen', primaryType: 'fast_food_restaurant' },
+    { placeId: 'name-only', name: 'Bar None Bakery', primaryType: 'bakery' }
+  ], { excludeTypes: ['bar', 'fast_food_restaurant'] });
+  assert.deepEqual(result.candidates.map(c => c.placeId), ['name-only']);
+  assert.deepEqual(result.excluded.map(c => c.reason), ['type', 'type']);
+});
 const places = [
   { id: 'near', displayName: { text: 'Waukee Target' }, formattedAddress: '100 Near St', rating: 4.5, userRatingCount: 1800 },
   { id: 'far', displayName: { text: 'West Des Moines Target' }, formattedAddress: '200 Far St', rating: 3.8, userRatingCount: 640 }
@@ -11,6 +25,73 @@ const matrix = [
   { originIndex: 0, destinationIndex: 0, condition: 'ROUTE_EXISTS', status: {}, duration: '660s', staticDuration: '420s', distanceMeters: 8369 },
   { originIndex: 0, destinationIndex: 1, condition: 'ROUTE_EXISTS', status: {}, duration: '780s', staticDuration: '780s', distanceMeters: 12_553 }
 ];
+
+test('nearby filters ten before taking five and preserves unknown hours and prices', async () => {
+  const requests: { url: string; body: any; mask: string | null }[] = [];
+  const ten = Array.from({ length: 10 }, (_, i) => ({ id: `place-${i}`, displayName: { text: `Shop ${i}` },
+    ...(i < 3 ? { currentOpeningHours: { openNow: false } } : {}) }));
+  const result = await provider([{ places: ten }, Array.from({ length: 5 }, (_, i) => ({ ...matrix[0], destinationIndex: i }))], requests)
+    .route({ origin: { kind: 'coordinates', location: fix }, destination: 'coffee', mode: 'drive', kind: 'nearby' }, new AbortController().signal);
+  assert.deepEqual(result.candidates.map(c => c.placeId), ['place-3', 'place-4', 'place-5', 'place-6', 'place-7']);
+  assert.equal(requests[1].body.destinations.length, 5);
+  assert.equal(result.excluded?.length, 3);
+  assert.equal(result.candidates[0].openNow, undefined);
+  assert.match(requests[0].mask!, /places.currentOpeningHours.openNow/);
+  assert.doesNotMatch(requests[0].mask!, /reviews|serves|dineIn/);
+});
+
+test('future visits ignore openNow but permanently closed places stay excluded', () => {
+  const candidates = [
+    { placeId: 'a', name: 'A', openNow: false },
+    { placeId: 'b', name: 'B', businessStatus: 'CLOSED_PERMANENTLY' as const },
+    { placeId: 'c', name: 'C' }
+  ];
+  assert.deepEqual(prefilterNearby(candidates, { visitTime: 'future' }).candidates.map(c => c.placeId), ['a', 'c']);
+  assert.deepEqual(prefilterNearby(candidates).candidates.map(c => c.placeId), ['c']);
+});
+
+test('price enum mapping, invalid facts, duplicate IDs and all-excluded do not spend Routes calls', async () => {
+  const requests: { url: string; body: any; mask: string | null }[] = [];
+  const returned = [
+    { id: 'pricey', displayName: { text: 'Pricey' }, priceLevel: 'PRICE_LEVEL_VERY_EXPENSIVE' },
+    { id: 'unknown', displayName: { text: 'Unknown' }, priceLevel: 'invalid', currentOpeningHours: { openNow: 'false' } },
+    { id: 'unknown', displayName: { text: 'Duplicate' } }
+  ];
+  const discovered = await provider([{ places: returned }], requests).discover({ origin: { kind: 'address', address: 'Test city' },
+    destination: 'cafe', mode: 'walk', kind: 'nearby', nearbyPreferences: { priceCeiling: 'moderate' } }, new AbortController().signal);
+  assert.equal(discovered.candidates.length, 1); assert.equal(discovered.candidates[0].priceLevel, undefined);
+  assert.equal(discovered.candidates[0].openNow, undefined); assert.equal(discovered.excluded?.[0].reason, 'price');
+  const noMatches = provider([{ places: returned.slice(0, 1) }], requests);
+  await assert.rejects(noMatches.route({ origin: { kind: 'address', address: 'Test city' }, destination: 'cafe',
+    mode: 'walk', kind: 'nearby', nearbyPreferences: { priceCeiling: 'moderate' } }, new AbortController().signal),
+  (e: unknown) => e instanceof RouteError && e.code === 'ROUTE_NO_MATCHING_PLACES' && e.excluded?.[0].reason === 'price');
+  assert.equal(requests.length, 2); assert.ok(requests.every(r => r.url.endsWith('/places')));
+});
+
+test('coarse ordering uses coordinates and food/type priors without inventing ETA or venue attributes', () => {
+  const candidates = [
+    { placeId: 'far', name: 'Far', location: { latitude: 42, longitude: -93.62 } },
+    { placeId: 'close', name: 'Close', location: { latitude: 41.58, longitude: -93.62 } }
+  ];
+  const ranked = rankNearbyCoarse(candidates, {}, { kind: 'coordinates', location: fix });
+  assert.equal(ranked[0].placeId, 'close'); assert.equal('durationSeconds' in ranked[0], false);
+  const food = rankNearbyCoarse([{ placeId: 'bar', name: 'Bar', primaryType: 'bar' },
+    { placeId: 'food', name: 'Food', primaryType: 'restaurant' }], { needsFood: true }, { kind: 'address', address: 'Test city' });
+  assert.equal(food[0].placeId, 'food'); assert.equal('servesFood' in food[0], false);
+});
+
+test('five nearby destinations charge five matrix elements to the existing monthly ledger', async () => {
+  const ledger = await CostLedger.create(join(await mkdtemp(join(tmpdir(), 'pi1-cost-')), 'ledger.json'), {});
+  const five = Array.from({ length: 5 }, (_, i) => ({ id: `p-${i}`, displayName: { text: `Test ${i}` } }));
+  const responses = [{ places: five }, five.map((_, destinationIndex) => ({ ...matrix[0], destinationIndex }))];
+  const routes = new GoogleRoutesProvider('test-key', async () => new Response(JSON.stringify(responses.shift())),
+    'http://127.0.0.1:3009/places', 'http://127.0.0.1:3009/routes', ledger);
+  await routes.route({ origin: { kind: 'coordinates', location: fix }, kind: 'nearby', mode: 'drive', destination: 'cafe' },
+    new AbortController().signal);
+  const snapshot = await ledger.snapshot();
+  assert.equal(snapshot.googleUnits['places-text-search-enterprise'], 1);
+  assert.equal(snapshot.googleUnits['route-matrix-pro'], 5);
+});
 
 function provider(responses: unknown[], requests: { url: string; body: any; mask: string | null }[]) {
   return new GoogleRoutesProvider('test-key', async (input, init) => {

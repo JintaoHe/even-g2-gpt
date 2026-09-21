@@ -15,6 +15,9 @@ test('runtime metrics retain metadata-only turn and provider distributions', asy
   metrics.observeProvider('soniox', 'cancelled', 5);
   metrics.observeDocument('success', 120);
   metrics.observeDocument('failure', 180, true);
+  metrics.observeNearby('prefiltered', 3); metrics.observeNearby('routed', 5);
+  metrics.observeNearby('clarified'); metrics.observeNearby('assumed');
+  metrics.observeNearby('routed', -1);
 
   const snapshot = await metrics.snapshot({
     connections: { authenticated: 1, unauthenticated: 2, total: 3 },
@@ -29,6 +32,7 @@ test('runtime metrics retain metadata-only turn and provider distributions', asy
     latency: { count: 2, p50_ms: 120, p95_ms: 180, max_ms: 180 } });
   assert.deepEqual(snapshot.connections, { authenticated: 1, unauthenticated: 2, total: 3 });
   assert.equal(snapshot.costs?.totalUsd, 6);
+  assert.deepEqual(snapshot.nearby, { prefiltered: 3, routed: 5, assumed: 1, clarified: 1, invalid_patch: 0 });
   const serialized = JSON.stringify(snapshot);
   assert.doesNotMatch(serialized, /private answer|private provider prose|session-a|session-b/);
 });

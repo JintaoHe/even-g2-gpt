@@ -4,6 +4,79 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { OpenAIDialogue } from '../src/dialogue-model.js';
 
+test('place research uses bounded search and degrades to analysis when quota is unavailable', async () => {
+  for (const available of [true, false]) {
+    let body: any, settled: number | undefined;
+    const model = new OpenAIDialogue('fake', 'test', undefined, true, 1, 'America/Chicago', {
+      reserve: async requested => { assert.equal(requested, 1); return available
+        ? { limit: 1, settle: async actual => { settled = actual; } } : null; }
+    }, { adaptiveReasoning: true, fetcher: async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { output: available
+        ? [{ type: 'web_search_call' }] : [] } })}\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+    } });
+    const updates: any[] = [];
+    await model.reply([{ role: 'user', content: '评价两家店' }], new AbortController().signal, () => {},
+      event => updates.push(event), 'medium', 'decision_support', [{ kind: 'navigation', action: 'analyze_places' }, { kind: 'search', action: 'read' }]);
+    assert.match(body.instructions, /Analyze the displayed places rather than replaying/);
+    assert.deepEqual(body.reasoning, { effort: 'medium' });
+    if (available) { assert.equal(body.max_tool_calls, 1); assert.equal(body.tools[0].type, 'web_search'); assert.equal(settled, 1); }
+    else { assert.equal(body.tools, undefined); assert.ok(updates.some(event => event.status === 'quota_exhausted')); }
+  }
+});
+
+test('place analysis preserves research routing while route recomparison still suppresses web search', async () => {
+  let action = 'analyze_places';
+  const model = new OpenAIDialogue('fake', 'test', undefined, false, 1, 'America/Chicago', undefined,
+    { locationRouting: true, webRouting: true, fetcher: async () => new Response(JSON.stringify({ status: 'completed',
+      output: [{ content: [{ type: 'output_text', text: JSON.stringify({ decision: 'respond', location_action: action,
+        route_destination: null, route_origin: null, route_mode: 'drive', route_mode_explicit: false,
+        search_action: 'search', nearby: null }) }] }] })) });
+  const plan = await model.plan([], '查资料比较两家', false, new AbortController().signal);
+  assert.equal(plan.locationAction, 'analyze_places'); assert.equal(plan.searchAction, 'search'); assert.equal(plan.nearby, undefined);
+  action = 'recompare';
+  assert.equal((await model.plan([], '重新看车程', false, new AbortController().signal)).searchAction, 'none');
+});
+
+test('real intent adapter parses field-local nearby patches and passes no-ask policy to clarification', async () => {
+  const bodies: any[] = [];
+  const outputs = [
+    { decision: 'respond', location_action: 'nearby_search', route_destination: 'cafe', route_origin: null,
+      route_mode: 'drive', route_mode_explicit: false, nearby: { mode: 'recommend', task_action: 'continue', delegated: true,
+        patch: { vibe: { operation: 'clear', value: null }, needs_food: { operation: 'keep', value: null },
+          price_ceiling: { operation: 'set', value: 'moderate' }, exclude_types: { operation: 'keep', value: null },
+          visit_time: { operation: 'set', value: 'future' } } } },
+    { action: 'assume', selected_indices: [1], question: null, assumption_note: '咖啡店' }
+  ];
+  const model = new OpenAIDialogue('fake', 'test', 'https://api.openai.com/v1/responses', false, 1, 'America/Chicago', undefined,
+    { locationRouting: true, reasoningEffort: 'medium', fetcher: async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify(outputs.shift()) }] }] }));
+    } });
+  const signal = new AbortController().signal;
+  const plan = await model.plan([], '不用安静的了，明天去，价格适中就行，你选吧', false, signal);
+  assert.deepEqual(plan.nearby, { mode: 'recommend', taskAction: 'continue', delegated: true,
+    patch: { vibe: null, priceCeiling: 'moderate', visitTime: 'future' } });
+  assert.ok(bodies[0].text.format.schema.required.includes('nearby'));
+  assert.ok(bodies[0].max_output_tokens >= 768);
+  const choice = await model.clarifyRoute('cafe', [{ name: 'Tea' }, { name: 'Coffee' }], [], signal,
+    { allowAsk: false, mode: 'recommend' });
+  assert.equal(choice.action, 'assume'); assert.deepEqual(choice.selectedIndices, [1]);
+  assert.equal(JSON.parse(bodies[1].input).allow_ask, false);
+  assert.equal(bodies[1].max_output_tokens, 768);
+  assert.deepEqual(bodies[1].reasoning, { effort: 'low' });
+  assert.match(bodies[0].instructions, /Ordinary category searches are recommend/);
+});
+
+test('incomplete clarification never accepts partial JSON as a completed decision', async () => {
+  const model = new OpenAIDialogue('fake', 'test', undefined, false, 1, 'America/Chicago', undefined,
+    { fetcher: async () => new Response(JSON.stringify({ status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' }, output: [{ content: [{ type: 'output_text',
+        text: JSON.stringify({ action: 'proceed', selected_indices: [0], question: null, assumption_note: null }) }] }] })) });
+  await assert.rejects(model.clarifyRoute('Target', [{ name: 'Target' }, { name: 'Target Mobile' }], [],
+    new AbortController().signal), /Incomplete route clarification/);
+});
+
 test('location intent schema supports nearby/recompare, defaults to drive, and keeps transit disabled', async () => {
   const bodies: any[] = [];
   const outputs = [
@@ -33,7 +106,7 @@ test('location intent schema supports nearby/recompare, defaults to drive, and k
     assert.equal(nearby.locationAction, 'nearby_search'); assert.equal(nearby.routeMode, 'drive'); assert.equal(nearby.routeModeExplicit, false);
     assert.equal(walk.locationAction, 'recompare'); assert.equal(walk.routeMode, 'walk'); assert.equal(walk.routeModeExplicit, true);
     const schema = bodies[0].text.format.schema.properties;
-    assert.deepEqual(schema.location_action.enum, ['none', 'route_eta', 'nearby_search', 'recompare', 'cancel']);
+    assert.deepEqual(schema.location_action.enum, ['none', 'route_eta', 'nearby_search', 'recompare', 'analyze_places', 'cancel']);
     assert.deepEqual(schema.route_mode.enum, ['drive', 'walk', 'bicycle']); assert.equal(schema.route_mode_explicit.type, 'boolean');
     assert.match(bodies[0].instructions, /Default to drive/); assert.match(bodies[0].instructions, /Transit is not supported/);
     assert.match(bodies[0].instructions, /Never default to the first candidate/);
