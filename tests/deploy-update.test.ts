@@ -48,7 +48,16 @@ test('migration-sensitive environment is validated before either SQLite store op
   assert.ok(config >= 0 && config < jobs && config < conversations);
 });
 
-test('automatic updater is periodic, persistent, serialized, and filesystem constrained', () => {
+test('automatic timer is opt-in while manual deployment stays available', async () => {
+  assert.match(updateTimer, /^ConditionPathExists=\/etc\/even-agent\/automatic-updates\.enabled$/m);
+  assert.doesNotMatch(updateService, /ConditionPathExists|automatic-updates\.enabled/);
+  assert.doesNotMatch(updateScript, /touch .*automatic-updates\.enabled|enable .*even-agent-update\.timer/);
+  const guide = await readFile(new URL('../docs/setup/AUTOMATIC_UPDATES.md', import.meta.url), 'utf8');
+  assert.match(guide, /disable --now even-agent-update\.timer/);
+  assert.match(guide, /install -o root -g root -m 0644 \/dev\/null \/etc\/even-agent\/automatic-updates\.enabled/);
+});
+
+test('opt-in updater is periodic, persistent, serialized, and filesystem constrained', () => {
   assert.match(updateTimer, /OnUnitActiveSec=6h/);
   assert.match(updateTimer, /RandomizedDelaySec=30min/);
   assert.match(updateTimer, /Persistent=true/);

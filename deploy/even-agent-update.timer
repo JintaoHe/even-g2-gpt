@@ -1,5 +1,7 @@
 [Unit]
 Description=Check protected main for a verified Even Agent update
+# Automatic application releases are opt-in; manual update.service is unaffected.
+ConditionPathExists=/etc/even-agent/automatic-updates.enabled
 
 [Timer]
 OnBootSec=15min

@@ -374,7 +374,7 @@ sudo ss -lntp | grep 127.0.0.1:3001
 
 ## 15. 更新、回滚和备份
 
-- 若启用自动更新，使用 release 目录与原子 `current` symlink，不要在生产目录直接 `git pull`；完整安装和回滚步骤见 [Linux 自动更新与回滚](AUTOMATIC_UPDATES.md)。
+- 默认手动部署，开发及真机验收期间保持 `even-agent-update.timer` disabled/inactive。自动更新需要管理员显式创建启用标记并开启 timer；使用 release 目录与原子 `current` symlink，不要在生产目录直接 `git pull`。安装、停用、恢复及回滚步骤见 [Linux 自动更新与回滚](AUTOMATIC_UPDATES.md)。
 - 更新前做快照或一致性备份；SQLite 使用 WAL 时不要只复制主 `.sqlite` 文件。
 - 新版本先在独立临时目录解压、检查 manifest、安装依赖和运行自检，再短暂停机切换。
 - 保留上一份经过验证的 server-only 发布包，以便回滚代码；Secret 和数据不应打包进代码回滚文件。
