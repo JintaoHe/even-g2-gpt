@@ -204,7 +204,149 @@ sudo install -o even-agent -g even-agent -m 0600 \
 
 服务器重启后，`tailscaled` 会自动启动；只要设备仍在 tailnet 且 key 未过期，WinSCP 无需重新配置。若服务器节点已关闭 key expiry，它会保持授权，直到管理员手动移除该节点。
 
-## 11. 常见问题
+## 11. 安全轮换生产 `.env`
+
+生产 Secret 轮换与普通文件上传不同。目标是：Secret 只经过 Tailscale
+私网中的 SFTP；WinSCP 固定服务器 host key；新旧配置都不进入 Git、命令参数、
+终端历史、日志或截图；最终文件在 `/etc` 内原子替换，启动失败时可以立即回滚。
+
+### 11.1 本地预检
+
+在项目目录检查文件存在、被 Git 忽略且未被跟踪。不要运行 `Get-Content .env`，
+也不要把文件拖进浏览器、Issue、PR 或聊天窗口：
+
+```powershell
+$envFile = Join-Path (Get-Location) '.env'
+Get-Item -LiteralPath $envFile | Select-Object Name, Length, LastWriteTime
+git check-ignore .env
+git ls-files --error-unmatch .env 2>$null
+```
+
+期望 `git check-ignore` 返回 `.env`，而 `git ls-files` 找不到它。上传前重新运行
+`tailscale ping <server-magicdns-name>`，并按照第 6–8 节从 AWS 浏览器 SSH
+独立核对 host key；不要使用 `Accept any host key` 或 `-hostkey=*`。
+
+### 11.2 只上传到管理员暂存目录
+
+先在服务器创建或确认暂存目录：
+
+```bash
+install -d -m 0700 /home/<admin-user>/staging
+```
+
+用 WinSCP/SFTP 将本地 `.env` 上传为：
+
+```text
+/home/<admin-user>/staging/even-agent.env.next
+```
+
+不要直接上传到 `/etc/even-agent.env`，不要启用同步，也不要让 WinSCP 或文本编辑器
+保存远程副本。传输完成后，分别在本地和服务器计算 SHA-256，只比较是否相等；
+不要把 hash 发到公开仓库：
+
+```powershell
+(Get-FileHash -Algorithm SHA256 -LiteralPath .env).Hash
+```
+
+```bash
+sha256sum /home/<admin-user>/staging/even-agent.env.next
+chmod 0600 /home/<admin-user>/staging/even-agent.env.next
+```
+
+### 11.3 不显示值地检查格式
+
+以下检查只验证非注释行是否为合法的 `KEY=value`，不会输出值：
+
+```bash
+awk '
+  /^[[:space:]]*($|#)/ { next }
+  /^[A-Za-z_][A-Za-z0-9_]*=/ { next }
+  { bad=1 }
+  END { exit bad }
+' /home/<admin-user>/staging/even-agent.env.next
+```
+
+如果需要比较新旧键集合，只输出键名并在 root-only 临时目录中比较；不要输出整行：
+
+```bash
+sudo install -d -o root -g root -m 0700 /run/even-agent-env-check
+sudo awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' /etc/even-agent.env \
+  | sudo sort -u > /run/even-agent-env-check/old.keys
+awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' \
+  /home/<admin-user>/staging/even-agent.env.next \
+  | sort -u | sudo tee /run/even-agent-env-check/new.keys >/dev/null
+sudo diff -u /run/even-agent-env-check/old.keys \
+  /run/even-agent-env-check/new.keys || true
+```
+
+键名差异可能是有意新增或撤销，但必须逐项解释后才能继续。**只要服务器含有本地
+文件没有的生产专用字段，就禁止整文件覆盖。** 本项目常见的生产专用字段包括公网
+host/origin、监听端口、模型、时区和 provider 开关；覆盖掉它们会让服务使用错误默认值
+或无法启动。
+
+轮换现有凭据时，以 `/etc/even-agent.env` 为基底，只允许从暂存文件替换已批准的完整
+行。本项目当前的凭据 allowlist 是 `G2_CLIENT_TOKEN`、`OPENAI_API_KEY`、
+`SONIOX_API_KEY`、`GOOGLE_MAPS_API_KEY` 和 `SMTP_PASS`。合并脚本必须在 root-only
+`/run` 目录生成候选文件，并满足以下条件后才可安装：
+
+1. 暂存文件中五个字段各出现一次；
+2. 只替换 allowlist 中的完整 `KEY=value` 行，不把值放入命令参数、日志或 shell 历史；
+3. 候选文件与当前生产文件的排序后键名集合 hash 完全相同；
+4. 候选文件只在 `/run` 和 `/etc` 中短暂存在，权限始终为 `0600`；
+5. 任何检查失败都保持当前生产文件不变。
+
+不要 `source` 两份 `.env`，不要用包含真实值的 `sed` 命令，也不要在 WinSCP 中直接
+编辑生产文件。只有在新旧键名集合完全一致、且本地文件本来就是生产配置的 canonical
+副本时，才允许按下一节做整文件原子替换。此检查不能证明 Secret 本身有效；
+provider/API 的最小只读 smoke test 仍要在安装前执行。
+
+### 11.4 原子替换、回滚与验收
+
+键名集合一致时，先把现有配置保存为单一 root-only 回滚副本，再把完整新文件安装到
+`/etc` 的临时名。若使用上一节的 allowlist 合并，则下列 `even-agent.env.next` 应当是
+已在 root-only `/run` 中构造并通过键名 hash 检查的候选文件，而不是原始本地 `.env`。
+`mv -T` 在同一文件系统内原子替换，避免服务读到半个文件：
+
+```bash
+sudo install -o root -g root -m 0600 \
+  /etc/even-agent.env /etc/even-agent.env.rollback
+sudo install -o root -g root -m 0600 \
+  /home/<admin-user>/staging/even-agent.env.next \
+  /etc/even-agent.env.next
+sudo mv -T /etc/even-agent.env.next /etc/even-agent.env
+sudo systemctl daemon-reload
+sudo systemctl restart even-agent
+```
+
+若候选文件来自 `/run` 的 allowlist 合并，把第二条命令的来源路径替换为该 root-only
+候选文件。不要先把候选文件复制回普通用户目录。
+
+服务启动和监听端口之间可能相差数秒。最多等待 30 秒、每秒检查一次状态和回环健康，
+超时才触发回滚；不要在 restart 返回后的第一毫秒把正常启动误判为失败。随后检查权限
+和公开 HTTPS。不要用 `systemctl show` 打印 environment，也不要 `cat` 配置：
+
+```bash
+sudo systemctl is-active even-agent
+sudo stat -c '%n %U:%G %a' /etc/even-agent.env
+curl --fail --silent http://127.0.0.1:3001/healthz
+curl --fail --silent https://<your-domain.example>/healthz
+sudo journalctl -u even-agent -n 30 --no-pager
+```
+
+若 restart 或健康检查失败，立即恢复旧文件并再次检查：
+
+```bash
+sudo install -o root -g root -m 0600 \
+  /etc/even-agent.env.rollback /etc/even-agent.env.next
+sudo mv -T /etc/even-agent.env.next /etc/even-agent.env
+sudo systemctl restart even-agent
+```
+
+确认新 key 的最小 smoke test 成功后，删除管理员暂存副本和 `/run` 中的键名清单；
+回滚副本只保留到本次轮换验收完成，之后也应移除，避免服务器长期存放多份有效
+Secret。清理时使用上述三个完整文件路径，不使用通配符、变量拼接或递归删除。
+
+## 12. 常见问题
 
 | 现象 | 原因与处理 |
 | --- | --- |
@@ -218,7 +360,7 @@ sudo install -o even-agent -g even-agent -m 0600 \
 | WinSCP 能连接但无权写系统目录 | 正常；先上传到用户暂存目录，再用 SSH 和 `sudo install` 安装 |
 | 服务器显示 key expired | 从 AWS 控制台恢复，重新认证或调整该服务器的 key expiry；失效的 Tailscale 通道不能自行恢复 |
 
-## 12. 更换电脑
+## 13. 更换电脑
 
 不要把 WinSCP 站点配置当成唯一备份。换电脑时：
 
@@ -231,7 +373,7 @@ sudo install -o even-agent -g even-agent -m 0600 \
 
 如果暂时沿用 Lightsail 默认私钥，必须通过加密、受控的离线方式迁移，并重新收紧本地文件权限；不要通过 Git、普通邮件或聊天发送。
 
-## 13. 安全验收清单
+## 14. 安全验收清单
 
 - WinSCP 使用 `SFTP`，不是 FTP；
 - Host 使用 MagicDNS 或 Tailscale IP，不是 Lightsail 公网 IP；
