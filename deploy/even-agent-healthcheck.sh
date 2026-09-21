@@ -7,6 +7,7 @@ readonly PUBLIC_HOST='calendar.eveng2assistant.com'
 readonly LOCAL_URL='http://127.0.0.1:3001/healthz'
 readonly CALENDAR_URL='http://127.0.0.1:3001/internal/health/calendar'
 readonly STORAGE_URL='http://127.0.0.1:3001/internal/health/storage'
+readonly DRIFT_CHECK='/usr/local/sbin/even-agent-drift-check'
 
 log() {
   printf '%s even-agent-health: %s\n' "$(date --iso-8601=seconds)" "$*"
@@ -35,4 +36,21 @@ if [[ -n "${storage_warnings}" ]]; then
   exit 1
 fi
 
-log 'local app, TLS ingress, read-only Calendar, and storage probes passed'
+drift_status=0
+drift_report=''
+if drift_report="$("${DRIFT_CHECK}" 2>&1)"; then
+  :
+else
+  drift_status=$?
+  case "${drift_status}" in
+    1) log 'operational file drift detected; compare installed files with the current release' ;;
+    2) log 'operational drift map references a source missing from the current release' ;;
+    *) log "operational drift check failed unexpectedly with exit ${drift_status}" ;;
+  esac
+  printf '%s\n' "${drift_report}" >&2
+  /usr/bin/logger -p daemon.err -t even-agent-health \
+    "Operational file drift check failed with exit ${drift_status}; inspect even-agent-healthcheck.service"
+  exit "${drift_status}"
+fi
+
+log 'local app, TLS ingress, read-only Calendar, storage, and operational drift probes passed'

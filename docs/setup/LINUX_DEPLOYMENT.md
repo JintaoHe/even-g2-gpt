@@ -294,7 +294,7 @@ Google 私密文件放在：
 ## 12. 安装 systemd 服务
 
 ```bash
-sudo install -o root -g root -m 0644 /opt/even-agent/deploy/even-agent.service /etc/systemd/system/even-agent.service
+sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/even-agent.service /etc/systemd/system/even-agent.service
 sudo systemd-analyze verify /etc/systemd/system/even-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now even-agent
@@ -312,17 +312,28 @@ sudo journalctl -u even-agent -n 50 --no-pager
 
 ## 13. Caddy 与静态说明页
 
-将 `deploy/Caddyfile` 中的域名换成你的专用子域名，并安装静态页面：
+将 `deploy/Caddyfile` 中的域名换成你的专用子域名，并安装静态页面。为了让后续精确漂移检查成立，自托管 fork 应把这个非 Secret 的域名配置保存在自己的受保护部署分支中；不要只修改服务器上的 `/etc/caddy/Caddyfile`，否则它会被正确报告为漂移：
 
 ```bash
-sudo install -o root -g root -m 0644 /opt/even-agent/deploy/site/calendar/index.html /var/www/even-calendar/index.html
-sudo install -o root -g root -m 0644 /opt/even-agent/deploy/site/calendar/privacy.html /var/www/even-calendar/privacy.html
-sudo install -o root -g root -m 0644 /opt/even-agent/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/site/calendar/index.html /var/www/even-calendar/index.html
+sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/site/calendar/privacy.html /var/www/even-calendar/privacy.html
+sudo install -o root -g root -m 0644 /opt/even-agent/current/deploy/Caddyfile /etc/caddy/Caddyfile
 sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
 Caddy 只代理 `/ws/conversation` 和 `/artifacts/*` 到 `127.0.0.1:3001`。不要使用全站无条件反向代理，也不要让 Caddy 读取 `/etc/even-agent.env` 或 `/var/lib/even-agent`。
+
+## 13.1 运维文件漂移检查
+
+完成 updater、监控、备份和 Caddy 的生产安装后，从当前已验证 release 安装只读检查器。不要使用 `/dev/stdin`、临时目录或 `/opt/even-agent` 顶层的旧 bootstrap 副本作为 root 脚本来源：
+
+```bash
+sudo install -o root -g root -m 0755 /opt/even-agent/current/deploy/even-agent-drift-check.sh /usr/local/sbin/even-agent-drift-check
+sudo even-agent-drift-check
+```
+
+成功时输出 `OK ... operational files match the current release` 并返回 `0`。返回 `1` 时会逐项输出 `DRIFT <installed> != <source>`，表示已安装副本缺失或与当前 release 不同；返回 `2` 时输出 `SOURCE_MISSING <source>`，表示当前 release 删除或改名了映射中的源文件。任何非零结果都必须先审阅 diff，再从 `/opt/even-agent/current/deploy/` 手动安装；检查器本身只读，不会自动覆盖系统文件。
 
 ## 14. 上线验收
 
@@ -330,6 +341,7 @@ Caddy 只代理 `/ws/conversation` 和 `/artifacts/*` 到 `127.0.0.1:3001`。不
 
 ```bash
 sudo systemctl is-active even-agent caddy
+sudo even-agent-drift-check
 sudo ss -lntup
 sudo ufw status verbose
 sudo stat -c '%n %U:%G %a' \
