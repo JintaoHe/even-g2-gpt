@@ -4,6 +4,7 @@ import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextSummary } from './context-builder.js';
+import type { PriorSessionContext } from './prior-session-context.js';
 import { validateContextSummary } from './summary-validation.js';
 import { selectSummaryBatch, mergeSummaryLosses, type SummaryLoss } from './summary-request.js';
 import { parseCalendarRecoveryState, parseDeliveryRecoveryState } from './recovery-drafts.js';
@@ -1531,6 +1532,38 @@ export class ConversationStore {
     return (this.db.prepare(`SELECT * FROM messages WHERE session_id=? AND sequence>? AND sequence<=?
       AND status='committed' ORDER BY sequence LIMIT ?`).all(sessionId, afterSequence, throughSequence, limit) as any[])
       .map(messageRecord);
+  }
+
+  /** Owner-only, read-only prior selection. SQL bounds reads before materializing
+   * long messages; no client-supplied session scope can bypass this boundary. */
+  priorSessionContext(input: { ownerScope: string; currentSessionId: string; before: number;
+    withinMs?: number; tailLimit?: number; pendingUserTurn?: boolean }): PriorSessionContext | undefined {
+    this.ensureOpen();
+    const { ownerScope, currentSessionId, before } = input;
+    const withinMs = input.withinMs ?? 24 * 60 * 60_000, tailLimit = input.tailLimit ?? 12;
+    requireGuestAccess({ mode: 'owner', ownerScope }, 'prior_context');
+    if (!validUuid(currentSessionId) || !Number.isSafeInteger(before) || before < 0
+      || !Number.isSafeInteger(withinMs) || withinMs < 1 || withinMs > 24 * 60 * 60_000
+      || !Number.isSafeInteger(tailLimit) || tailLimit < 1 || tailLimit > 12
+      || (input.pendingUserTurn !== undefined && typeof input.pendingUserTurn !== 'boolean')) throw Error('Invalid prior context query');
+    const current = this.getSession(currentSessionId);
+    if (!current) throw Error('Invalid prior context session');
+    requireGuestAccess({ mode: 'owner', ownerScope }, 'prior_context', { ownerScope: current.ownerScope, sessionId: current.id });
+    if (!['active', 'idle'].includes(current.status) || current.latestSequence + (input.pendingUserTurn ? 1 : 0) > 20 || before < current.createdAt) return undefined;
+    const prior = this.db.prepare(`SELECT id,ended_at,summary_through_sequence FROM sessions
+      WHERE owner_scope=? AND id<>? AND status IN ('ended','expired')
+        AND ended_at>=? AND ended_at<=? ORDER BY ended_at DESC,id DESC LIMIT 1`).get(
+          ownerScope, currentSessionId, before - withinMs, Math.min(before, current.createdAt)) as any;
+    if (!prior) return undefined;
+    const summary = this.latestSummary(prior.id);
+    const tail = (this.db.prepare(`SELECT role,sequence,substr(content,1,1200) AS content,
+        length(content)>1200 AS truncated FROM messages WHERE session_id=? AND sequence>?
+        AND status='committed' AND role IN ('user','assistant') ORDER BY sequence DESC LIMIT ?`)
+      .all(prior.id, prior.summary_through_sequence, tailLimit) as any[])
+      .reverse().map(row => ({ role: row.role as 'user' | 'assistant', sequence: row.sequence,
+        content: row.content as string, truncated: !!row.truncated }));
+    return { sessionId: prior.id, closedAt: prior.ended_at, throughSequence: prior.summary_through_sequence,
+      ...(summary ? { summary } : {}), sourceLosses: !!summary?.sourceLosses.length || (!summary && prior.summary_through_sequence > 0), tail };
   }
 
   latestSummary(sessionId: string): StoredSessionSummary | undefined {

@@ -13,7 +13,7 @@ export type Message = { role: 'user' | 'assistant'; content: string; citations?:
   topicId?: string; topicLabel?: string; cognitiveMode?: CognitiveMode; assistantMode?: AssistantMode;
   /** Durable metadata is optional so legacy/in-memory callers remain compatible. */
   messageId?: string; sequence?: number; status?: 'committed' | 'streaming' | 'interrupted' | 'failed';
-  contextKind?: 'summary' };
+  contextKind?: 'summary' | 'prior' };
 
 /** Select one topic only for artifacts that must not blend separate projects. Normal
  * conversation receives the whole bounded session so the assistant has short-term memory. */
@@ -323,7 +323,7 @@ export class Conversation {
     try {
       const text = this.pending;
       const history = this.contextBuilder.build({ messages: this.history,
-        currentTopicId: this.currentTopic?.id }).messages;
+        currentTopicId: this.currentTopic?.id, pendingUserTurn: true }).messages;
       const recovery = this.runtime?.recoverAnswer?.(text);
       const rawPlan = recovery?.kind === 'committed' || recovery?.kind === 'missing'
         ? { decision: 'respond' as const, cognitiveMode: 'casual' as const, reasoningEffort: 'low' as const,

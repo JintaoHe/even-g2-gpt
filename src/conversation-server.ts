@@ -397,7 +397,9 @@ export function createConversationServer(options: {
     } : undefined, {
       build: input => {
         const summary = store?.latestSummary(id);
-        return baseContextBuilder.build({ ...input, ...(summary ? { summary } : {}) });
+        const prior = store?.priorSessionContext({ ownerScope: options.ownerScope ?? 'single-user', currentSessionId: id,
+          before: Date.now(), pendingUserTurn: input.pendingUserTurn });
+        return baseContextBuilder.build({ ...input, ...(summary ? { summary } : {}), ...(prior ? { prior } : {}) });
       },
     });
     if (hydrate && store) {
