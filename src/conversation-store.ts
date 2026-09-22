@@ -7,9 +7,11 @@ import type { ContextSummary } from './context-builder.js';
 import { validateContextSummary } from './summary-validation.js';
 import { selectSummaryBatch, mergeSummaryLosses, type SummaryLoss } from './summary-request.js';
 import { parseCalendarRecoveryState, parseDeliveryRecoveryState } from './recovery-drafts.js';
+import { lockedDevicePrincipal, requireGuestAccess, type AccessPrincipal, type DeviceGuestLock } from './guest-access.js';
+import { presentation, type Document } from './document-presentation.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 12;
 const MAX_RECOVERY_DRAFT_BYTES = 256 * 1024;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const MAX_DEVICE_CREDENTIAL_MS = 366 * 24 * 60 * 60_000;
@@ -622,6 +624,38 @@ export class ConversationStore {
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (9,?,?)')
           .run('closed-summary-recovery-clocks', Date.now());
       }
+      if (latest < 10) {
+        // Deliberately independent of session retention: deleting a guest
+        // conversation must never silently restore owner permissions.
+        db.exec(`CREATE TABLE device_guest_locks (
+          client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE RESTRICT,
+          guest_scope TEXT NOT NULL UNIQUE,
+          session_id TEXT NOT NULL UNIQUE,
+          created_at INTEGER NOT NULL
+        ) STRICT;`);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (10,?,?)')
+          .run('durable-device-guest-locks', Date.now());
+      }
+      if (latest < 11) {
+        db.exec(`ALTER TABLE clients ADD COLUMN access_epoch INTEGER NOT NULL DEFAULT 0 CHECK(access_epoch>=0);
+          CREATE TRIGGER guest_lock_insert_epoch AFTER INSERT ON device_guest_locks
+            BEGIN UPDATE clients SET access_epoch=access_epoch+1 WHERE id=NEW.client_id; END;
+          CREATE TRIGGER guest_lock_update_epoch AFTER UPDATE ON device_guest_locks
+            BEGIN UPDATE clients SET access_epoch=access_epoch+1 WHERE id=OLD.client_id OR id=NEW.client_id; END;
+          CREATE TRIGGER guest_lock_delete_epoch AFTER DELETE ON device_guest_locks
+            BEGIN UPDATE clients SET access_epoch=access_epoch+1 WHERE id=OLD.client_id; END;`);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (11,?,?)')
+          .run('durable-device-access-epoch', Date.now());
+      }
+      if (latest < 12) {
+        db.exec(`CREATE TABLE guest_drafts (
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          document_json TEXT NOT NULL, created_at INTEGER NOT NULL
+        ) STRICT;
+        CREATE INDEX guest_drafts_session_idx ON guest_drafts(session_id,created_at);`);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (12,?,?)')
+          .run('session-scoped-guest-drafts', Date.now());
+      }
     });
   }
 
@@ -767,6 +801,173 @@ export class ConversationStore {
     if (!validUuid(id)) return undefined;
     const row = this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id);
     return row ? sessionRecord(row) : undefined;
+  }
+
+  /** Only a missing row means unlocked. Storage/validation failures propagate. */
+  getDeviceGuestLock(clientId: string): DeviceGuestLock | undefined {
+    this.ensureOpen();
+    if (!validUuid(clientId)) throw new Error('Invalid guest lock client');
+    const row = this.db.prepare('SELECT guest_scope,session_id FROM device_guest_locks WHERE client_id=?')
+      .get(clientId) as { guest_scope: string; session_id: string } | undefined;
+    if (!row) return undefined;
+    const lock = { guestScope: row.guest_scope, sessionId: row.session_id };
+    lockedDevicePrincipal(lock, undefined);
+    return lock;
+  }
+
+  getDeviceAccessEpoch(clientId: string): number {
+    this.ensureOpen();
+    if (!validUuid(clientId)) throw new Error('Invalid access epoch client');
+    const row = this.db.prepare('SELECT access_epoch FROM clients WHERE id=?').get(clientId) as { access_epoch: number } | undefined;
+    if (!row) return 0; // A fresh master-authenticated client has not been registered yet.
+    if (!Number.isSafeInteger(row.access_epoch) || row.access_epoch < 0) throw new Error('Invalid access epoch');
+    return row.access_epoch;
+  }
+
+  private requireLiveGuest(principal: AccessPrincipal, capability: 'draft_create' | 'draft_read'): string {
+    requireGuestAccess(principal, 'conversation');
+    if (principal.mode !== 'guest') throw new Error('GUEST_ACCESS_DENIED');
+    const session = this.getSession(principal.sessionId);
+    if (!session || !['active', 'idle'].includes(session.status)) throw new Error('GUEST_ACCESS_DENIED');
+    requireGuestAccess(principal, capability, { ownerScope: session.ownerScope, sessionId: session.id });
+    return session.id;
+  }
+
+  private normalizeGuestDocument(document: Document): Document {
+    if (typeof document?.markdown !== 'string'
+      || !document.markdown.trim() || typeof document.presentation?.title !== 'string'
+      || typeof document.presentation.summary !== 'string'
+      || !['summary', 'excerpt'].includes(document.presentation.kind)) throw new Error('GUEST_DRAFT_INVALID');
+    for (const flag of ['partial', 'lengthMismatch'] as const) {
+      if (document.presentation[flag] !== undefined && typeof document.presentation[flag] !== 'boolean') throw new Error('GUEST_DRAFT_INVALID');
+    }
+    for (const key of ['incompleteSections', 'compressedSections'] as const) {
+      const value = document.presentation[key];
+      if (value !== undefined && (!Array.isArray(value) || value.length > 100
+        || value.some(n => !Number.isSafeInteger(n) || n < 1 || n > 100))) throw new Error('GUEST_DRAFT_INVALID');
+    }
+    // Bounded JSON, and a generated filename rather than a model-provided path.
+    const normalized: Document = { markdown: document.markdown, presentation: {
+      ...presentation(document.presentation.title, document.presentation.summary, document.presentation.kind),
+      ...(document.presentation.partial ? { partial: true } : {}),
+      ...(document.presentation.lengthMismatch ? { lengthMismatch: true } : {}),
+      ...(document.presentation.incompleteSections ? { incompleteSections: [...document.presentation.incompleteSections] } : {}),
+      ...(document.presentation.compressedSections ? { compressedSections: [...document.presentation.compressedSections] } : {}),
+    } };
+    if (Buffer.byteLength(JSON.stringify(normalized)) > 256 * 1024) throw new Error('GUEST_DRAFT_LIMIT');
+    return normalized;
+  }
+
+  assertGuestDraftCapacity(principal: AccessPrincipal): void {
+    this.ensureOpen();
+    const sessionId = this.requireLiveGuest(principal, 'draft_create');
+    const count = (this.db.prepare('SELECT COUNT(*) AS n FROM guest_drafts WHERE session_id=?').get(sessionId) as { n: number }).n;
+    if (count >= 8) throw new Error('GUEST_DRAFT_LIMIT');
+  }
+
+  saveGuestDraft(principal: AccessPrincipal, document: Document, at: number): { id: string; document: Document } {
+    this.ensureOpen();
+    const sessionId = this.requireLiveGuest(principal, 'draft_create');
+    if (!Number.isSafeInteger(at) || at < 0) throw new Error('GUEST_DRAFT_INVALID');
+    const normalized = this.normalizeGuestDocument(document);
+    const payload = JSON.stringify(normalized);
+    return transaction(this.db, () => {
+      this.assertGuestDraftCapacity(principal);
+      const id = randomUUID();
+      this.db.prepare('INSERT INTO guest_drafts(id,session_id,document_json,created_at) VALUES (?,?,?,?)')
+        .run(id, sessionId, payload, at);
+      return { id, document: normalized };
+    });
+  }
+
+  readGuestDraft(principal: AccessPrincipal, id?: string): { id: string; document: Document } | undefined {
+    this.ensureOpen();
+    const sessionId = this.requireLiveGuest(principal, 'draft_read');
+    if (id !== undefined && !validUuid(id)) throw new Error('GUEST_ACCESS_DENIED');
+    const row = (id === undefined
+      ? this.db.prepare('SELECT id,document_json FROM guest_drafts WHERE session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(sessionId)
+      : this.db.prepare('SELECT id,document_json FROM guest_drafts WHERE session_id=? AND id=?').get(sessionId, id)) as
+      { id: string; document_json: string } | undefined;
+    if (!row) return undefined;
+    let document: Document;
+    try { document = JSON.parse(row.document_json); } catch { throw new Error('GUEST_DRAFT_INVALID'); }
+    return { id: row.id, document: this.normalizeGuestDocument(document) };
+  }
+
+  /** Internal authenticated entry point; transport must verify the client first.
+   * Repeated entry preserves the lock, even after its session ends or expires.
+   * No unlock/delete API exists here until fresh-owner authorization is wired. */
+  enterDeviceGuestMode(input: { clientId: string; at: number }): DeviceGuestLock {
+    this.ensureOpen();
+    if (!validUuid(input.clientId) || !Number.isSafeInteger(input.at) || input.at < 0) {
+      throw new Error('Invalid guest lock request');
+    }
+    return transaction(this.db, () => {
+      const existing = this.getDeviceGuestLock(input.clientId);
+      if (existing) return existing;
+      const sessionId = randomUUID(), guestScope = `guest:${randomUUID()}`;
+      this.db.prepare(`INSERT INTO sessions(id,owner_scope,status,created_at,updated_at,last_activity_at)
+        VALUES (?,?,'active',?,?,?)`).run(sessionId, guestScope, input.at, input.at, input.at);
+      this.db.prepare(`INSERT INTO topics(id,session_id,label,status,created_at,updated_at)
+        VALUES (?,?,'General','active',?,?)`).run(randomUUID(), sessionId, input.at, input.at);
+      this.db.prepare(`INSERT INTO device_guest_locks(client_id,guest_scope,session_id,created_at)
+        VALUES (?,?,?,?)`).run(input.clientId, guestScope, sessionId, input.at);
+      return { guestScope, sessionId };
+    });
+  }
+
+  /** Authenticated guest reconnect only. Terminal/retained sessions get a new
+   * isolated scope, atomically, without an intermediate unlocked device. */
+  ensureDeviceGuestSession(input: { clientId: string; at: number }): DeviceGuestLock {
+    this.ensureOpen();
+    if (!validUuid(input.clientId) || !Number.isSafeInteger(input.at) || input.at < 0) throw new Error('Invalid guest session request');
+    return transaction(this.db, () => {
+      const lock = this.getDeviceGuestLock(input.clientId);
+      if (!lock) throw new Error('GUEST_ACCESS_DENIED');
+      const prior = this.getSession(lock.sessionId);
+      if (prior && prior.ownerScope !== lock.guestScope) throw new Error('GUEST_ACCESS_DENIED');
+      if (prior && ['active', 'idle'].includes(prior.status)) {
+        if (!this.listTopics(prior.id).length) this.db.prepare(`INSERT INTO topics(id,session_id,label,status,created_at,updated_at)
+          VALUES (?,?,'General','active',?,?)`).run(randomUUID(), prior.id, input.at, input.at);
+        return lock;
+      }
+      const sessionId = randomUUID(), guestScope = `guest:${randomUUID()}`;
+      this.db.prepare(`INSERT INTO sessions(id,owner_scope,status,created_at,updated_at,last_activity_at)
+        VALUES (?,?,'active',?,?,?)`).run(sessionId, guestScope, input.at, input.at, input.at);
+      this.db.prepare(`INSERT INTO topics(id,session_id,label,status,created_at,updated_at)
+        VALUES (?,?,'General','active',?,?)`).run(randomUUID(), sessionId, input.at, input.at);
+      this.db.prepare('UPDATE device_guest_locks SET guest_scope=?,session_id=?,created_at=? WHERE client_id=?')
+        .run(guestScope, sessionId, input.at, input.clientId);
+      return { guestScope, sessionId };
+    });
+  }
+
+  /** Internal CAS, called only by the fresh-owner authorization service.
+   * Revoke saved credentials in the same transaction as releasing the lock. */
+  releaseDeviceGuestLock(input: { clientId: string; expected: DeviceGuestLock; at: number }): void {
+    this.ensureOpen();
+    if (!validUuid(input.clientId) || !Number.isSafeInteger(input.at) || input.at < 0) throw new Error('Invalid guest unlock');
+    lockedDevicePrincipal(input.expected, undefined);
+    transaction(this.db, () => {
+      const lock = this.getDeviceGuestLock(input.clientId);
+      if (!lock || lock.guestScope !== input.expected.guestScope || lock.sessionId !== input.expected.sessionId) {
+        throw new Error('GUEST_ACCESS_DENIED');
+      }
+      const session = this.getSession(lock.sessionId);
+      if (session && session.ownerScope !== lock.guestScope) throw new Error('GUEST_ACCESS_DENIED');
+      // Do not enqueue a closing summary for a departed guest. Preserve an
+      // existing terminal timestamp, and tolerate retention having removed it.
+      this.db.prepare(`UPDATE sessions SET status='ended',updated_at=MAX(updated_at,?),
+        ended_at=?,end_reason='guest_unlock' WHERE id=? AND status IN ('active','idle')`)
+        .run(input.at, input.at, lock.sessionId);
+      this.db.prepare('DELETE FROM recovery_drafts WHERE session_id=?').run(lock.sessionId);
+      this.db.prepare('UPDATE resume_credentials SET revoked_at=? WHERE session_id=? AND revoked_at IS NULL')
+        .run(input.at, lock.sessionId);
+      this.revokeDeviceCredentials(input.clientId, input.at);
+      this.db.prepare('UPDATE resume_credentials SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL')
+        .run(input.at, input.clientId);
+      this.db.prepare('DELETE FROM device_guest_locks WHERE client_id=?').run(input.clientId);
+    });
   }
 
   putRecoveryDraft(input: {
@@ -1385,7 +1586,7 @@ export class ConversationStore {
   // second summary flag, is the source of truth. In-flight ranges stay immutable.
   private enqueueClosedSummaryInTransaction(sessionId: string, at: number): void {
     const session = this.getSession(sessionId);
-    if (!session || !['ended', 'expired'].includes(session.status) || this.hasBlockingSummaryJob(sessionId)
+    if (!session || session.ownerScope.startsWith('guest:') || !['ended', 'expired'].includes(session.status) || this.hasBlockingSummaryJob(sessionId)
       || this.hasTerminalSummaryStart(sessionId, session.summaryThroughSequence + 1, at)) return;
     const pending = this.db.prepare(`SELECT sequence FROM messages WHERE session_id=? AND sequence>?
       AND status='committed' ORDER BY sequence LIMIT 6`).all(sessionId, session.summaryThroughSequence);

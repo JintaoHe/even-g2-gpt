@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
+
+test('resume access gate runs before hydration and cannot disturb an attached lease', async () => {
+  let hydrations = 0;
+  const registry = new SessionRegistry({ resumeWindowMs: 900_000,
+    create: id => runtime(id), hydrate: async () => { hydrations++; return undefined; } });
+  const id = randomUUID(), clientId = randomUUID(), first = randomUUID();
+  const denied = { clientId, allowTakeover: true, validateAccess: () => { throw new Error('scope denied'); } };
+  await assert.rejects(registry.resume(id, randomUUID(), () => {}, undefined, denied), /scope denied/);
+  assert.equal(hydrations, 0);
+  await registry.create(first, () => {}, id, undefined, clientId);
+  await assert.rejects(registry.resume(id, randomUUID(), () => {}, undefined, denied), /scope denied/);
+  assert.equal(registry.connectionFor(id), first);
+  await registry.shutdown();
+});
 import {
   ActiveInputLeaseError,
   SessionRegistry,

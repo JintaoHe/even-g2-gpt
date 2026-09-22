@@ -4,6 +4,7 @@ const COMMANDS = new Set(['turn.submit', 'pause', 'resume', 'interrupt', 'answer
 const LOCAL_TEST_COMMANDS = new Set(['test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
   'test.storage.cleanup_preview', 'test.storage.cleanup_apply']);
 const CLIENT_KEY = 'conversation-lab.client-id.v2', RESUME_KEY = 'conversation-lab.resume.v2';
+const DEVICE_KEY = 'conversation-lab.device.v1';
 
 export function isLoopbackHost(hostname) { return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname); }
 export function browserReconnectDelay(attempt, random = Math.random) {
@@ -39,26 +40,58 @@ export class BrowserSessionClient {
     try { this.storage.setItem(RESUME_KEY, JSON.stringify(value)); return true; } catch { return false; }
   }
   clearCredential() { try { this.storage.removeItem(RESUME_KEY); } catch {} }
+  deviceCredential() {
+    try {
+      const value = JSON.parse(this.storage.getItem(DEVICE_KEY) || 'null');
+      if (!value || value.clientId !== this.clientId() || !UUID.test(value.id) || typeof value.secret !== 'string'
+        || value.secret.length < 32 || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= this.now()) return undefined;
+      return value;
+    } catch { return undefined; }
+  }
+  saveDevice(event, ws) {
+    if (!UUID.test(event.device_credential_id) || typeof event.device_credential !== 'string'
+      || event.device_credential.length < 32 || !Number.isSafeInteger(event.device_expires_at)) return;
+    const value = { clientId: this.clientId(), id: event.device_credential_id, secret: event.device_credential, expiresAt: event.device_expires_at };
+    try {
+      const serialized = JSON.stringify(value); this.storage.setItem(DEVICE_KEY, serialized);
+      if (this.storage.getItem(DEVICE_KEY) === serialized) ws.send(JSON.stringify({ type: 'credential.persisted', credential_id: value.id }));
+    } catch { this.onEvent({ type: 'notice', text: '设备恢复凭证未保存，冷启动可能需要重新授权。' }); }
+  }
+  accessChanged(event, ws) {
+    this.ending = true; this.cancelTimer(); this.token = ''; this.lastSeen = 0; this.lastSubmission = undefined;
+    this.socket = undefined; this.generation++; this.onEvent(event); ws.close(); this.onStatus({ state: 'disconnected' });
+    try {
+      this.storage.removeItem(RESUME_KEY);
+      if (event.mode === 'reauthorize') this.storage.removeItem(DEVICE_KEY);
+      if (this.storage.getItem(RESUME_KEY) || (event.mode === 'reauthorize' && this.storage.getItem(DEVICE_KEY))) throw Error('clear');
+    } catch { this.onEvent({ type: 'notice', text: '恢复引用清理失败，请重新打开页面后再连接。' }); return; }
+    if (event.mode === 'guest' && event.reconnect === true) { this.ending = false; this.forceFresh = true; this.open(true); }
+  }
   connect(token = '') {
     if (this.disposed) return false; if (token.trim()) this.token = token.trim();
     this.ending = false; this.forceFresh = false; this.recoveryFailed = false; this.attempt = 0; this.cancelTimer();
     if (this.socket && this.socket.readyState < WebSocket.CLOSING) return false;
     return this.open(false);
   }
-  resumeIfAvailable() { if (!this.credential() || this.disposed) return false; return this.open(true); }
+  resumeIfAvailable() { if ((!this.credential() && !this.deviceCredential()) || this.disposed) return false; return this.open(true); }
   open(recovering) {
     const credential = this.forceFresh ? undefined : this.credential();
-    if (!credential && !this.token) { this.onStatus({ state: 'disconnected', reason: this.forceFresh ? 'credential_expired' : 'token_required' }); return false; }
+    const device = this.deviceCredential();
+    if (!credential && !device && !this.token) { this.onStatus({ state: 'disconnected', reason: this.forceFresh ? 'credential_expired' : 'token_required' }); return false; }
     const ws = this.socketFactory(this.url), generation = ++this.generation; this.socket = ws;
     this.onStatus({ state: recovering || this.attempt ? 'recovering' : 'connecting', attempt: this.attempt });
     ws.onopen = () => { if (this.socket !== ws || generation !== this.generation) return ws.close();
       const hello = { type: 'hello', protocol_version: 2, client_id: credential?.clientId ?? this.clientId(),
-        client_capabilities: { location: false } };
+        credential_storage: 'browser_v1', client_capabilities: { location: false, guest_mode: true } };
       if (credential) Object.assign(hello, { resume_session_id: credential.sessionId, resume_credential: credential.secret, last_seen_sequence: this.lastSeen });
+      else if (device) hello.device_credential = device.secret;
       else hello.token = this.token; ws.send(JSON.stringify(hello)); };
     ws.onmessage = ({ data }) => { if (this.socket !== ws || generation !== this.generation || typeof data !== 'string') return;
       let event; try { event = JSON.parse(data); } catch { return; }
+      if (event.type === 'access.changed') { this.accessChanged(event, ws); return; }
       if (event.type === 'ready' && event.protocol_version === 2 && this.saveCredential(event)) {
+        if (event.access_mode === 'guest') this.token = '';
+        this.saveDevice(event, ws);
         this.forceFresh = false; this.attempt = 0; this.observe(event.latest_sequence);
         const reason = event.resumed ? 'resumed' : this.recoveryFailed ? 'new_session' : undefined;
         this.recoveryFailed = false;
@@ -67,9 +100,18 @@ export class BrowserSessionClient {
       } else if (event.type === 'resume.credential') this.saveCredential(event);
       else if (event.type === 'message.ack' || event.type === 'answer.committed') this.observe(event.sequence);
       else if (event.type === 'error' && event.code === 'SESSION_UNAVAILABLE') { this.clearCredential(); this.forceFresh = true; this.recoveryFailed = true; }
+      else if (event.type === 'error' && event.code === 'DEVICE_CREDENTIAL_INVALID') {
+        try { this.storage.removeItem(DEVICE_KEY); } catch {} this.ending = true;
+      }
       this.onEvent(event); };
     ws.onerror = () => { if (this.socket === ws) this.onStatus({ state: 'recovering', reason: 'offline' }); };
-    ws.onclose = () => { if (this.socket !== ws || generation !== this.generation) return; this.socket = undefined;
+    ws.onclose = event => { if (this.socket !== ws || generation !== this.generation) return; this.socket = undefined;
+      this.lastSeen = 0;
+      if (event?.code === 4003) {
+        this.token = ''; this.ending = true; this.clearCredential();
+        try { this.storage.removeItem(DEVICE_KEY); } catch {}
+      }
+      this.lastSubmission = undefined; this.onEvent({ type: 'transport.cleared' });
       if (this.disposed || this.ending) return this.onStatus({ state: 'disconnected' }); this.schedule(); };
     return true;
   }
@@ -81,7 +123,7 @@ export class BrowserSessionClient {
   networkAvailable() { if (this.disposed || this.ending || this.socket?.readyState === WebSocket.OPEN) return false; this.cancelTimer(); return this.open(true); }
   envelope(value) { const message = { ...value };
     if (message.type === 'text.submit' && !message.message_id) message.message_id = this.uuid();
-    if ((COMMANDS.has(message.type) || message.type === 'exit.confirm' || LOCAL_TEST_COMMANDS.has(message.type)) && !message.command_id) message.command_id = this.uuid();
+    if ((COMMANDS.has(message.type) || message.type === 'exit.confirm' || LOCAL_TEST_COMMANDS.has(message.type) || String(message.type).startsWith('guest.')) && !message.command_id) message.command_id = this.uuid();
     return message; }
   send(value) { if (this.socket?.readyState !== WebSocket.OPEN) return false; const message = this.envelope(value);
     if (message.type === 'text.submit') this.lastSubmission = message; this.socket.send(JSON.stringify(message)); return true; }

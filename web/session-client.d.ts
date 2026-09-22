@@ -14,6 +14,7 @@ export class BrowserSessionClient {
   constructor(options: any);
   socket?: WebSocket;
   credential(): { clientId: string; sessionId: string; secret: string; expiresAt: number } | undefined;
+  deviceCredential(): { clientId: string; id: string; secret: string; expiresAt: number } | undefined;
   connect(token?: string): boolean;
   resumeIfAvailable(): boolean;
   send(value: Record<string, unknown>): boolean;

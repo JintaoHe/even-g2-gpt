@@ -7,6 +7,8 @@ const progress = createProgress(text => { $('progress').textContent = text; });
 let session, state = 'closed', connected = false, context, media, source, worklet, micEpoch = 0, hasReady = false;
 let speechAvailable = true;
 let emailAvailable = false;
+let guestMode = false, guestEnabled = false;
+let accessRevision = 0;
 let cliSearchEnabled = false;
 let downloadToken = '', jobTimer;
 let forceColdStart = false;
@@ -37,8 +39,10 @@ function controls() {
   $('applyRouteMode').disabled = !connected || ['closed', 'exit_pending'].includes(state);
   $('exit').disabled = !connected || ['closed', 'exit_pending'].includes(state);
   $('connect').disabled = connected;
-  $('exportMd').disabled = !connected;
-  $('exportCalendar').disabled = !connected;
+  $('exportMd').disabled = !connected || guestMode;
+  $('exportCalendar').disabled = !connected || guestMode;
+  $('guestEnter').disabled = !connected || !guestEnabled || guestMode;
+  $('guestUnlock').disabled = !connected || !guestEnabled || !guestMode;
 }
 function renderJobs(jobs) {
   $('jobs').replaceChildren();
@@ -50,10 +54,13 @@ function renderJobs(jobs) {
       for (const calendar of job.calendar ? [false, true] : [false]) {
       const button = document.createElement('button'); button.textContent = calendar ? '下载 ICS' : '下载 MD';
       button.onclick = async () => {
+        const revision = accessRevision;
         try {
           const response = await fetch(`/artifacts/${encodeURIComponent(job.id)}${calendar ? '/calendar' : ''}`, { headers: { Authorization: `Bearer ${downloadToken}` } });
           if (!response.ok) throw new Error('Download failed');
-          const url = URL.createObjectURL(await response.blob()), link = document.createElement('a');
+          const blob = await response.blob();
+          if (revision !== accessRevision || guestMode || !connected) return;
+          const url = URL.createObjectURL(blob), link = document.createElement('a');
           link.href = url; link.download = calendar ? (job.filename ?? '日程.md').replace(/\.md$/, '.ics') : job.filename ?? '谈话笔记.md'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch { notice('下载失败，请重新连接后重试。'); }
       }; row.append(button);
@@ -82,6 +89,8 @@ function renderJobs(jobs) {
   }
 }
 $('exportMd').onclick = () => send({ type: 'jobs.export' });
+$('guestEnter').onclick = () => send({ type: 'guest.enter' });
+$('guestUnlock').onclick = () => send({ type: 'guest.unlock.begin' });
 function calendarDescription(e) {
   return `${e.title}\n${e.start} → ${e.end}\n${e.allDay ? '全天（不包含结束日期）' : e.timezone}${e.location ? '\n地点：' + e.location : ''}${e.notes ? '\n备注：' + e.notes : ''}\n不会自动添加到日历；收到附件后请确认导入。`;
 }
@@ -119,12 +128,34 @@ function restoreSnapshot(snapshot, replace) {
   }
 }
 function handleServerEvent(e) {
+    if (e.type === 'access.changed' || e.type === 'transport.cleared') {
+      accessRevision++;
+      stopMic(); clearInterval(jobTimer); connected = false; state = 'closed'; hasReady = false;
+      downloadToken = ''; answers.clear(); restoredMessages.clear();
+      $('history').replaceChildren(); $('jobs').replaceChildren();
+      for (const id of ['transcript', 'progress', 'storageReport', 'connectionMeta']) $(id).textContent = '';
+      $('token').value = ''; $('text').value = ''; $('calendarForm').reset();
+      if ($('exitDialog').open) $('exitDialog').close();
+      calendarEvent(e); progress.event({ type: 'state', state: 'closed' });
+      const text = e.mode === 'guest' ? '访客模式已锁定，正在连接。' : e.mode === 'reauthorize'
+        ? '访客模式已结束，请重新输入主人凭证连接。' : '连接已断开，旧画面已清除。';
+      $('accessMode').textContent = text; notice(text); controls(); return;
+    }
+    if (e.type === 'guest.unlock.challenge') {
+      const token = $('token').value.trim(); $('token').value = '';
+      if (token) send({ type: 'guest.unlock.confirm', challenge: e.challenge, owner_token: token.trim() });
+      else notice('请在密码框重新输入主人凭证，再点主人重新授权。');
+      return;
+    }
     calendarEvent(e);
     progress.event(e);
     if (e.type === 'route.status' && e.status === 'failed') console.warn('Route request failed', {
       stage: e.stage, providerStatus: e.provider_status, providerReason: e.provider_reason
     });
     if (e.type === 'ready') {
+      guestMode = e.access_mode === 'guest'; guestEnabled = e.guest_mode_enabled === true;
+      if (guestMode) downloadToken = '';
+      $('accessMode').textContent = guestMode ? '访客模式 · 无主人邮件、日历和历史权限' : '主人模式';
       if (e.resumed) restoreSnapshot(e.snapshot, !hasReady);
       else if (hasReady) { $('history').replaceChildren(); restoredMessages.clear(); }
       hasReady = true;
@@ -132,7 +163,7 @@ function handleServerEvent(e) {
         ? `会话恢复窗口：${e.resume_window_minutes} 分钟` : '会话恢复窗口：服务器未提供';
       emailAvailable = e.capabilities?.email === true;
       clearInterval(jobTimer);
-      send({ type: 'jobs.list' }); jobTimer = setInterval(() => send({ type: 'jobs.list' }), 3000);
+      if (!guestMode) { send({ type: 'jobs.list' }); jobTimer = setInterval(() => send({ type: 'jobs.list' }), 3000); }
       connected = true; $('token').value = ''; notice('已连接。点击开启麦克风，或发送文字。');
       speechAvailable = e.capabilities?.speech !== false;
       const provider = e.capabilities?.provider;
@@ -224,7 +255,7 @@ const conversationUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${lo
 session = new BrowserSessionClient({ url: conversationUrl, onEvent: handleServerEvent, onStatus: handleConnectionStatus });
 $('connect').onclick = () => {
   const token = $('token').value.trim();
-  if (!session.credential() && token.length < 32) { notice('请填写本机 .env 中的 G2_CLIENT_TOKEN。'); return; }
+  if (!session.credential() && !session.deviceCredential() && token.length < 32) { notice('请填写本机 .env 中的 G2_CLIENT_TOKEN。'); return; }
   if (token) downloadToken = token;
   if (!session.connect(token)) { notice(connected ? '已经连接。' : '无法连接；请检查 token 或恢复凭证。'); return; }
   $('token').value = '';

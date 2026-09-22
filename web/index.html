@@ -11,6 +11,8 @@ body{font:16px/1.65 system-ui,sans-serif;background:#101713;color:#e4eee6;max-wi
 <div id="models" class="muted">连接后显示当前模型配置</div>
 <section aria-label="测试通道"><strong id="channel" role="status">测试通道：尚未连接，等待服务器确认</strong><div id="channelDetails" class="muted">连接后显示实际对话通道与语音转录方式。</div></section>
 <div id="connectionMeta" class="muted">连接与会话 ID：尚未建立</div>
+<div id="accessMode" role="status">身份：尚未连接</div>
+<button id="guestEnter" disabled>进入访客模式</button><button id="guestUnlock" disabled>主人重新授权</button>
 <div id="recoveryWindow" class="muted">会话恢复窗口：连接后由服务器确认</div>
 <style>a{color:#cdfcae;text-decoration:underline}.sources{font-size:13px;margin-top:12px;color:#a7b8aa}</style>
 <section id="login">

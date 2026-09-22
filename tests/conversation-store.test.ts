@@ -16,17 +16,17 @@ test('conversation store creates a private WAL database with idempotent migratio
   let store = await ConversationStore.create(root);
   const health = store.health();
   assert.deepEqual(health, {
-    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 9,
+    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 12,
   });
   await store.close();
 
   // Simulate a production database created by PR1 before summary jobs existed.
   const legacy = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
-  legacy.exec('DROP TABLE summary_recovery_clocks; DROP TABLE summary_jobs; DROP TABLE legacy_session_imports; DROP TABLE device_credentials; DROP TABLE recovery_drafts; ALTER TABLE session_summaries DROP COLUMN source_losses_json; DELETE FROM schema_migrations WHERE version>=2;');
+  legacy.exec('DROP TABLE device_guest_locks; ALTER TABLE clients DROP COLUMN access_epoch; DROP TABLE summary_recovery_clocks; DROP TABLE summary_jobs; DROP TABLE legacy_session_imports; DROP TABLE device_credentials; DROP TABLE recovery_drafts; ALTER TABLE session_summaries DROP COLUMN source_losses_json; DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version>=2;');
   legacy.close();
 
   store = await ConversationStore.create(root);
-  assert.equal(store.health().schemaVersion, 9);
+  assert.equal(store.health().schemaVersion, 12);
   await store.close();
 
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
@@ -40,7 +40,10 @@ test('conversation store creates a private WAL database with idempotent migratio
         { version: 6, name: 'bounded-summary-budget-deferrals' },
         { version: 7, name: 'summary-source-losses' },
         { version: 8, name: 'summary-recovery-generations' },
-        { version: 9, name: 'closed-summary-recovery-clocks' }]);
+        { version: 9, name: 'closed-summary-recovery-clocks' },
+        { version: 10, name: 'durable-device-guest-locks' },
+        { version: 11, name: 'durable-device-access-epoch' },
+        { version: 12, name: 'session-scoped-guest-drafts' }]);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(row => row.name);
     for (const table of ['sessions', 'clients', 'resume_credentials', 'topics', 'turns', 'messages', 'session_summaries',
       'summary_jobs', 'legacy_session_imports', 'device_credentials', 'recovery_drafts']) {

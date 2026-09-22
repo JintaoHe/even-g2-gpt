@@ -118,6 +118,23 @@ test('server-confirmed recovery window is visible after connection', async () =>
   assert.equal(f.element('recovery-window').textContent, '会话恢复窗口：15 分钟');
 });
 
+test('mode change clears owner pager, form, token, references and late frames before guest display', async () => {
+  const f = await fixture(); const ws = await f.connect();
+  ws.onmessage({ data: JSON.stringify({ type: 'answer.start', id: 7 }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'answer.delta', id: 7, text: 'OWNER_PRIVATE_VIEW' }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'answer.done', id: 7 }) });
+  await f.tick(); assert.match(f.element('preview').textContent, /OWNER_PRIVATE_VIEW/);
+  f.element('text').value = 'private unsent'; f.element('token').value = 'private token';
+  ws.onmessage({ data: JSON.stringify({ type: 'access.changed', mode: 'guest', clear_display: true, clear_resume: true, reconnect: true }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'answer.delta', id: 7, text: 'LATE_SECRET' }) });
+  await f.flush(); await f.tick();
+  assert.doesNotMatch(f.writes.at(-1)!, /OWNER_PRIVATE_VIEW|LATE_SECRET/);
+  assert.equal(f.element('text').value, ''); assert.equal(f.element('token').value, '');
+  assert.equal(f.element('connection-meta').textContent, '');
+  assert.match(f.element('access-mode').textContent, /访客/);
+  assert.equal(f.element('guest-unlock').disabled, true);
+});
+
 test('cold start reconciles side effects and renders uncertain server state on glasses', async () => {
   const f = await fixture();
   const ws = await f.connect({ provider: 'api', speech: true, email: true, calendar: true });

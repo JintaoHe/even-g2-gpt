@@ -48,7 +48,11 @@ test('local session and storage test controls cannot be exposed by a configured 
   }), /loopback/i);
 });
 
-test('protocol v2 resumes after service restart, rotates credential and deduplicates replayed input', { timeout: 15_000 }, async () => {
+test('protocol v2 resumes after service restart, rotates credential and deduplicates replayed input', { timeout: 15_000 }, async t => {
+  // Force separate clock reads across a millisecond boundary. A 16-minute TTL
+  // must not become 16 minutes + 1 ms and fail the store's lifetime validator.
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => ++now);
   const root = await mkdtemp(join(tmpdir(), 'even-reconnect-'));
   let store = await ConversationStore.create(root), replies = 0;
   const model: DialogueModel = {
@@ -57,7 +61,9 @@ test('protocol v2 resumes after service restart, rotates credential and deduplic
   };
   const clientId = randomUUID(), messageId = randomUUID();
   let firstServer = await listen(store, model);
+  t.after(async () => { await firstServer.app.close(); await store.close(); });
   const first = new WebSocket(firstServer.url); await once(first, 'open');
+  t.after(() => first.terminate());
   const ready1Promise = waitFor(first, 'ready');
   first.send(JSON.stringify({ type: 'hello', protocol_version: 2, client_id: clientId, token }));
   const ready1 = await ready1Promise;
@@ -599,7 +605,7 @@ test('loopback storage lab reports safe metadata and cleans only fixed retention
     };
     const inspected = await command('test.storage.inspect');
     assert.equal(inspected.action, 'inspect');
-    assert.equal(inspected.sqlite.schema_version, 9);
+    assert.equal(inspected.sqlite.schema_version, 12);
     assert.equal(inspected.retention.test_eligible_sessions, 0);
     assert.doesNotMatch(JSON.stringify(inspected), /content|transcript|database_path|session_id/i);
 

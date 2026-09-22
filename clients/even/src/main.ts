@@ -24,6 +24,30 @@ let developmentLocation: { label: string; latitude: number; longitude: number; a
 let connected = false, speech = false, audio = false, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
 let hasReady = false;
+let accessMode = 'unknown';
+async function clearPrivateView(text: string) {
+  hasReady = false; answerId = undefined; connected = false; state = 'closed';
+  void stopAudio(); void locationController?.stop();
+  pager.reset(text); last = ''; status = text;
+  element('preview').textContent = text;
+  element('connection-meta').textContent = '';
+  (element('token') as HTMLInputElement).value = '';
+  (element('text') as HTMLTextAreaElement).value = '';
+  (element('guest-enter') as HTMLButtonElement).disabled = true;
+  (element('guest-unlock') as HTMLButtonElement).disabled = true;
+  refresh();
+  // Wait behind any in-flight BLE write, then overwrite it before permitting
+  // automatic guest reconnection. A failed SDK clear must not claim success.
+  while (drawing && !disposed) await new Promise(resolve => setTimeout(resolve, 10));
+  if (bridge && display.open && !disposed && !exiting) {
+    drawing = true;
+    try {
+      if (!await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1,
+        containerName: 'conversation', content: text }))) throw Error('Display clear failed');
+      last = text;
+    } finally { drawing = false; }
+  }
+}
 const active = () => connected && !exiting && !disposed && !['paused', 'exit_pending', 'closed'].includes(state);
 let credentialStore: SessionCredentialStore;
 let connection: ConnectionController;
@@ -122,8 +146,27 @@ function handleConnectionStatus(next: ConnectionStatus) {
 }
 
 function handleServerEvent(event: any) {
+    if (event.type === 'access.changed' || event.type === 'transport.cleared') {
+      const text = event.mode === 'guest' ? '访客模式已锁定，正在连接。'
+        : event.mode === 'reauthorize' ? '访客模式已结束，请重新输入主人凭证连接。' : '连接已断开，旧画面已清除。';
+      accessMode = event.mode ?? 'unknown'; const clearing = clearPrivateView(text);
+      element('access-mode').textContent = text;
+      if (event.type === 'access.changed') return clearing;
+      void clearing.catch(() => { status = '眼镜清屏未确认，请重新打开应用'; refresh(); }); return;
+    }
+    if (event.type === 'guest.unlock.challenge') {
+      const field = element('token') as HTMLInputElement;
+      const token = field.value.trim(); field.value = '';
+      if (token) send({ type: 'guest.unlock.confirm', challenge: event.challenge, owner_token: token.trim() });
+      else { status = '请在密码框重新输入主人凭证，再点主人重新授权'; refresh(); }
+      return;
+    }
     developmentSessionControls?.handleEvent(event);
     if (event.type === 'ready') {
+      accessMode = event.access_mode ?? 'owner';
+      element('access-mode').textContent = accessMode === 'guest' ? '访客模式 · 仅本次会话，无主人邮件、日历和历史权限' : '主人模式';
+      (element('guest-enter') as HTMLButtonElement).disabled = !event.guest_mode_enabled || accessMode !== 'owner';
+      (element('guest-unlock') as HTMLButtonElement).disabled = !event.guest_mode_enabled || accessMode !== 'guest';
       if (event.resumed === true && Array.isArray(event.snapshot?.messages)) pager.restoreSnapshot(event.snapshot.messages, !hasReady);
       else if (hasReady && connection.status.reason === 'new_session') pager.reset('原会话已过期，已建立新会话。\n请继续说话或输入文字。');
       hasReady = true;
@@ -190,7 +233,7 @@ function handleServerEvent(event: any) {
     if (event.type === 'error') status = event.code === 'SESSION_UNAVAILABLE' ? '恢复凭证已过期，正在建立新会话' : `错误：${event.code}`;
     if (event.type === 'notice') {
       status = event.text;
-      if (event.code === 'EXIT_CANCELLED') pager.notice(event.text);
+      if (event.code === 'EXIT_CANCELLED' || event.code === 'GUEST_RUNTIME_BUSY') pager.notice(event.text);
     }
     if (event.type === 'location.status') {
       status = event.state === 'available'
@@ -221,6 +264,8 @@ element('form').onsubmit = event => {
   if (input.value.trim()) { send({ type: 'text.submit', text: input.value.trim() }); input.value = ''; }
 };
 element('audio').onclick = () => void toggleAudio();
+element('guest-enter').onclick = () => send({ type: 'guest.enter' });
+element('guest-unlock').onclick = () => send({ type: 'guest.unlock.begin' });
 element('resume').onclick = async () => {
   if (disposed) return;
   if (exiting && !await restoreDisplay()) return;
@@ -277,7 +322,7 @@ element('preview').onwheel = event => {
 const timer = setInterval(async () => {
   if (!dirty || drawing || disposed) return;
   dirty = false; drawing = true;
-  const text = `${channel} | ${status.slice(0, 18)} | ${audio ? 'MIC' : 'OFF'}\n${pager.label}\n${pager.current}`;
+  const text = `${accessMode === 'guest' ? '访客' : channel} | ${status.slice(0, 18)} | ${audio ? 'MIC' : 'OFF'}\n${pager.label}\n${pager.current}`;
   element('preview').textContent = text; element('page').textContent = `记录 ${pager.index + 1}/${pager.entries.length} · ${pager.label}`;
   try {
     if (bridge && display.open && !exiting && text !== last) {

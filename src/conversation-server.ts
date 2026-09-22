@@ -41,6 +41,10 @@ import { ActiveInputLeaseError, SessionRegistry, SessionUnavailableError,
 import { CONVERSATION_PROTOCOL_VERSION, parseCoreClientMessage } from './conversation-protocol.js';
 import { RuntimeMetrics } from './runtime-metrics.js';
 import type { CostSnapshot } from './cost-ledger.js';
+import { GuestAccessDenied, lockedDevicePrincipal, requireGuestResume, requestsGuestMode, type AccessPrincipal } from './guest-access.js';
+import { GuestModeController } from './guest-mode-controller.js';
+import { createGuestRuntimePool, type GuestRuntimePool } from './guest-runtime.js';
+import { conversationAuthPath } from './conversation-auth-path.js';
 
 export function requestsAnswerRecovery(value: string) {
   const text = value.trim().replace(/[\r\n\t]+/g, ' ');
@@ -62,6 +66,7 @@ export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
   conversationStore?: ConversationStore;
+  guestRuntimes?: GuestRuntimePool;
   storageWarningBytes?: { databaseWarningBytes: number; diskFreeWarningBytes: number };
   sessionSummary?: SessionSummaryService;
   resumeWindowMs?: number;
@@ -250,6 +255,7 @@ export function createConversationServer(options: {
   const maxUnauthenticatedSockets = 4;
   type MailApproval = { id: string; token: string; expires: number; retryAttempt?: number };
   type ServerSessionRuntime = ManagedSessionRuntime<Event> & {
+    guest?: boolean;
     conversation: Conversation;
     delivery?: DeliveryDialogue;
     calendarControl?: CalendarControl;
@@ -274,7 +280,44 @@ export function createConversationServer(options: {
     || deviceCredentialPersistWindowMs > 10 * 60_000
     || deviceCredentialPersistWindowMs >= deviceCredentialTtlMs) throw new Error('Invalid device credential lifetime');
   const store = options.conversationStore;
+  const guestBindings = new Map<string, { clientId: string; principal: AccessPrincipal }>();
+  const guestController = store && options.guestRuntimes ? new GuestModeController(store, options.token, options.guestRuntimes) : undefined;
   const buildRuntime = async (id: string, hydrate = false): Promise<ServerSessionRuntime> => {
+    const guestBinding = guestBindings.get(id);
+    if (guestBinding && store && options.guestRuntimes) {
+      const guest = options.guestRuntimes.acquireAuthenticated(guestBinding.clientId, guestBinding.principal);
+      let sink: ((event: Event) => void) | undefined;
+      let capture: { id: string; stop: () => void } | undefined;
+      const locationBroker = guest.transportLocationBroker();
+      const topic = store.listTopics(id).at(-1)!;
+      const conversation = new Conversation(guest.model, event => sink?.(event), undefined, {
+        sessionId: id, persistence: new StoreConversationPersistence(store, id), initialTopic: { id: topic.id, label: topic.label },
+        idFactory: randomUUID, onTurnCommitted: () => options.sessionSummary?.consider(id),
+      });
+      conversation.restoreHistory(store.listRecentMessages(id, 100).filter(m => m.role !== 'system' && m.status !== 'streaming')
+        .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content, topicId: m.topicId,
+          messageId: m.id, sequence: m.sequence, status: m.status })));
+      return { id, guest: true, conversation, locationBroker, locationDialogue: guest.transportLocationDialogue(), artifactSource: () => [],
+        replaceEventSink(next) {
+          sink = next;
+          if (next) { guest.setSink(next); guest.model.startSession?.(); store.markSessionAttached(id, Date.now()); }
+          else { try { guest.setSink(undefined); } catch {} }
+        },
+        detach() { capture?.stop(); locationBroker.cancel();
+          if (['active', 'idle'].includes(store.getSession(id)?.status ?? '')) store.markSessionDetached(id, Date.now()); },
+        interrupt() { capture?.stop(); locationBroker.cancel(); conversation.interrupt(); },
+        dispose(reason) {
+          capture?.stop(); conversation.close(); options.guestRuntimes!.release(id); guestBindings.delete(id);
+          const current = store.getSession(id);
+          if (!current || !['active', 'idle'].includes(current.status)) return;
+          if (reason === 'ended') store.endSession(id, Date.now(), 'user_exit');
+          else if (reason === 'expired') store.expireSession(id, Date.now());
+          else store.markSessionDetached(id, Date.now());
+        },
+        setCaptureStop(connectionId, stop) { if (stop) capture = { id: connectionId, stop }; else if (capture?.id === connectionId) capture = undefined; },
+      };
+    }
+    if (store?.getSession(id)?.ownerScope.startsWith('guest:')) throw new GuestAccessDenied();
     let sink: ((event: Event) => void) | undefined;
     let captureStop: { connectionId: string; stop: () => void } | undefined;
     let conversation!: Conversation;
@@ -435,7 +478,7 @@ export function createConversationServer(options: {
       return { runtime: await buildRuntime(id, true), lastDetachedAt: session.updatedAt };
     } : undefined,
   });
-  const sessionSweep = setInterval(() => { void registry.sweepExpired(); }, 30_000);
+  const sessionSweep = setInterval(() => { void registry.sweepExpired().then(() => guestController?.sweepInvalid()).catch(() => {}); }, 30_000);
   sessionSweep.unref();
 
   wss.on('connection', (client, request) => {
@@ -451,6 +494,10 @@ export function createConversationServer(options: {
     let pendingDeviceCredentialId: string | undefined;
     let session: ServerSessionRuntime | undefined;
     let authenticatedClientId: string | undefined;
+    let authStage = 'protocol';
+    let accessRevoked = false;
+    let authenticatedEpoch: number | undefined;
+    let guestSupported = false;
     let current: Transcriber | undefined, lastActivity = Date.now(), totalBytes = 0, forced = false, segmentId = 0;
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
@@ -461,7 +508,34 @@ export function createConversationServer(options: {
       authSlotHeld = false;
       unauthenticatedSockets.delete(client);
     };
+    const connectionMayUseOwnerRuntime = () => {
+      if (accessRevoked) return false;
+      if (!authenticated || !store || !authenticatedClientId || !session) return true;
+      try {
+        if (authenticatedEpoch === undefined || store.getDeviceAccessEpoch(authenticatedClientId) !== authenticatedEpoch) {
+          throw new GuestAccessDenied();
+        }
+        const principal = lockedDevicePrincipal(store.getDeviceGuestLock(authenticatedClientId), options.ownerScope ?? 'single-user');
+        if ((principal.mode === 'guest') !== !!session.guest) throw new GuestAccessDenied();
+        const target = store.getSession(session.id);
+        if (!target) throw new GuestAccessDenied();
+        if (session.guest && !['active', 'idle'].includes(target.status)) throw new GuestAccessDenied();
+        requireGuestResume(principal, { ownerScope: target.ownerScope, sessionId: target.id });
+        return true;
+      } catch {
+        // Stop delivery before cancellation can emit another owner event.
+        accessRevoked = true;
+        try { session.replaceEventSink(undefined); } catch { /* close still required */ }
+        clearCapture();
+        void Promise.resolve(session.detach('connection_detached')).catch(() => {});
+        // Do not wait for a possibly half-open peer to acknowledge the close.
+        void registry.detach(connectionId).catch(() => {});
+        client.close(4003, 'Session access changed');
+        return false;
+      }
+    };
     const send = (event: Event) => {
+      if (!connectionMayUseOwnerRuntime()) return;
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 262144) client.send(JSON.stringify(event));
       else client.close(1013, 'Client too slow');
     };
@@ -487,9 +561,15 @@ export function createConversationServer(options: {
       for (const slot of slots) slot.job.cancel(); slots = [];
     };
     const flush = () => {
+      if (!connectionMayUseOwnerRuntime()) return;
       if (closed || !session || detector.active || !session.conversation.acceptsInput || slots.some(s => s.text === undefined)) return;
       const text = slots.map(s => s.text).filter(Boolean).join('\n'); slots = [];
       const submitForced = forced; forced = false;
+      if (!session.guest && requestsGuestMode(text)) {
+        if (guestController && guestSupported) void guestController.enter(connectionId).catch(() => client.close(4003, 'Access changed'));
+        else send({ type: 'notice', text: '访客模式尚未开启；请不要将当前主人会话交给访客。' });
+        return;
+      }
       if (text || submitForced) {
         runtimeMetrics.beginTurn(session.id);
         void session.conversation.submit(text, submitForced);
@@ -516,6 +596,8 @@ export function createConversationServer(options: {
       const job = current; current = undefined; job?.finish(); send({ type: 'speech.ended', segment_id: segmentId });
     });
     const authTimer = setTimeout(() => client.close(1008, 'Auth timeout'), 5000);
+    const accessSweep = setInterval(() => { connectionMayUseOwnerRuntime(); }, 1000);
+    accessSweep.unref();
     const heartbeat = setInterval(() => {
       if (client.readyState !== WebSocket.OPEN || pongDeadline) return;
       try {
@@ -541,18 +623,73 @@ export function createConversationServer(options: {
       if (msg?.type !== 'hello') throw new Error('Auth');
       protocolV2 = msg.protocol_version === CONVERSATION_PROTOCOL_VERSION;
       if (protocolV2) msg = parseCoreClientMessage(msg);
+      guestSupported = protocolV2 && msg.client_capabilities?.guest_mode === true;
       if (protocolV2 && !store) throw new SessionUnavailableError();
       const clientId = protocolV2 ? String(msg.client_id ?? '') : randomUUID();
       if (!/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('Auth');
+      const loginPath = conversationAuthPath(msg, protocolV2);
+      if (loginPath === 'master') {
+        authStage = 'master_credential';
+        const given = Buffer.from(typeof msg.token === 'string' ? msg.token : '');
+        const expected = Buffer.from(options.token);
+        if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Auth');
+      }
+      // Legacy clients and servers without an isolated guest runtime refuse
+      // locked devices; capable clients bind exclusively to their durable lock.
+      // Check before hydration, and again inside the registry's mutation queue.
+      const validateOwnerAccess = (sessionId?: string) => {
+        authStage = 'scope_gate';
+        if (!store) return;
+        const epoch = store.getDeviceAccessEpoch(clientId);
+        if (authenticatedEpoch !== undefined && authenticatedEpoch !== epoch) throw new GuestAccessDenied();
+        authenticatedEpoch = epoch;
+        const principal = lockedDevicePrincipal(store.getDeviceGuestLock(clientId), options.ownerScope ?? 'single-user');
+        if (principal.mode === 'guest' && (!guestController || !guestSupported)) throw new GuestAccessDenied();
+        if (sessionId) {
+          const target = store.getSession(sessionId);
+          if (!target) throw new SessionUnavailableError();
+          requireGuestResume(principal, { ownerScope: target.ownerScope, sessionId: target.id });
+        }
+      };
+      const guestLogin = !!(store && guestController && store.getDeviceGuestLock(clientId));
+      validateOwnerAccess(!guestLogin && typeof msg.resume_session_id === 'string' ? msg.resume_session_id : undefined);
       let binding, credential: ReturnType<ConversationStore['issueResumeCredential']> | undefined;
       let deviceCredential: ReturnType<ConversationStore['issueDeviceCredential']> | undefined;
-      if (protocolV2 && typeof msg.resume_credential === 'string' && typeof msg.resume_session_id === 'string') {
+      if (guestLogin && store) {
+        const now = Date.now();
+        if (loginPath === 'resume') credential = store.rotateResumeCredential({ secret: msg.resume_credential, clientId,
+          sessionId: msg.resume_session_id, at: now, expiresAt: now + resumeCredentialTtlMs });
+        else if (loginPath === 'device') deviceCredential = store.rotateDeviceCredential({ secret: msg.device_credential, clientId,
+          at: now, expiresAt: now + deviceCredentialTtlMs, persistDeadlineAt: now + deviceCredentialPersistWindowMs });
+        binding = await registry.attachGuest(connectionId, clientId, send, () => {
+          validateOwnerAccess();
+          const previous = store.getDeviceGuestLock(clientId);
+          const saved = previous && store.getSession(previous.sessionId);
+          if (saved && !registry.has(saved.id) && ['active', 'idle'].includes(saved.status)
+            && Date.now() - saved.updatedAt >= resumeWindowMs) store.expireSession(saved.id, Date.now());
+          const lock = store.ensureDeviceGuestSession({ clientId, at: Date.now() });
+          authenticatedEpoch = store.getDeviceAccessEpoch(clientId);
+          const principal = lockedDevicePrincipal(lock, options.ownerScope ?? 'single-user');
+          guestBindings.set(lock.sessionId, { clientId, principal });
+          return lock.sessionId;
+        }, () => validateOwnerAccess());
+        if (binding.sessionId === msg.resume_session_id) binding.resumed = true;
+        if (credential?.sessionId !== binding.sessionId) credential = undefined;
+        if (!deviceCredential && ['even_host_v1', 'browser_v1'].includes(msg.credential_storage)) {
+          deviceCredential = store.issueDeviceCredential({ clientId, createdAt: now, expiresAt: now + deviceCredentialTtlMs,
+            persistDeadlineAt: now + deviceCredentialPersistWindowMs });
+        }
+      } else if (loginPath === 'resume') {
         if (!store) throw new SessionUnavailableError();
         binding = await registry.resume(msg.resume_session_id, connectionId, send, () => {
+          authStage = 'resume_credential';
+          const now = Date.now();
           credential = store.rotateResumeCredential({ secret: msg.resume_credential, clientId,
-            sessionId: msg.resume_session_id, at: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
-        }, { clientId, allowTakeover: true });
-        if (msg.credential_storage === 'even_host_v1') {
+            sessionId: msg.resume_session_id, at: now, expiresAt: now + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
+        }, { clientId, allowTakeover: true, validateAccess: () => {
+          validateOwnerAccess(msg.resume_session_id); authStage = 'session_restore';
+        } });
+        if (['even_host_v1', 'browser_v1'].includes(msg.credential_storage)) {
           const now = Date.now();
           // Re-provision on every authenticated resume. This closes the narrow
           // crash window where the resume secret reached host storage but the
@@ -561,32 +698,38 @@ export function createConversationServer(options: {
             expiresAt: now + deviceCredentialTtlMs,
             persistDeadlineAt: now + deviceCredentialPersistWindowMs });
         }
-      } else if (protocolV2 && typeof msg.device_credential === 'string') {
+      } else if (loginPath === 'device') {
         if (!store) throw new SessionUnavailableError();
         const now = Date.now();
         binding = await registry.create(connectionId, send, randomUUID(), () => {
+          validateOwnerAccess();
+          authStage = 'device_credential';
           deviceCredential = store.rotateDeviceCredential({ secret: msg.device_credential, clientId, at: now,
             expiresAt: now + deviceCredentialTtlMs,
             persistDeadlineAt: now + deviceCredentialPersistWindowMs });
         }, clientId);
       } else {
-        const given = Buffer.from(typeof msg.token === 'string' ? msg.token : '');
-        const expected = Buffer.from(options.token);
-        if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Auth');
         store?.registerClient({ id: clientId, at: Date.now(), label: protocolV2 ? 'Even client' : 'Legacy client' });
-        binding = await registry.create(connectionId, send, randomUUID(), undefined, clientId);
-        if (store) credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
-          createdAt: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
-        if (store && protocolV2 && msg.credential_storage === 'even_host_v1') {
+        binding = await registry.create(connectionId, send, randomUUID(), () => validateOwnerAccess(), clientId);
+        if (store) {
+          const now = Date.now();
+          credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
+            createdAt: now, expiresAt: now + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
+        }
+        if (store && protocolV2 && ['even_host_v1', 'browser_v1'].includes(msg.credential_storage)) {
           const now = Date.now();
           deviceCredential = store.issueDeviceCredential({ clientId, createdAt: now,
             expiresAt: now + deviceCredentialTtlMs,
             persistDeadlineAt: now + deviceCredentialPersistWindowMs });
         }
       }
-      if (store && !credential) credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
-        createdAt: Date.now(), expiresAt: Date.now() + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
+      if (store && !credential) {
+        const now = Date.now();
+        credential = store.issueResumeCredential({ clientId, sessionId: binding.sessionId,
+          createdAt: now, expiresAt: now + Math.min(resumeWindowMs + 60_000, 16 * 60_000) });
+      }
       session = binding.runtime as ServerSessionRuntime;
+      validateOwnerAccess(binding.sessionId);
       session.locationBroker.setClientLocationAvailable(protocolV2
         ? msg.client_capabilities?.location === true
         : undefined);
@@ -594,6 +737,13 @@ export function createConversationServer(options: {
       session.setCaptureStop(connectionId, clearCapture);
       authenticated = true; releaseAuthSlot(); clearTimeout(authTimer);
       authenticatedSockets.set(connectionId, client);
+      if (guestController && guestSupported && store) guestController.registerAuthenticated({ connectionId, clientId,
+        principal: lockedDevicePrincipal(store.getDeviceGuestLock(clientId), options.ownerScope ?? 'single-user'),
+        cutOff: () => { accessRevoked = true; clearCapture(); session?.replaceEventSink(undefined); },
+        detach: () => registry.detach(connectionId),
+        notify: event => { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(event)); },
+        close: () => client.close(4003, 'Session access changed'),
+      });
       if (binding.replacedConnectionId) {
         const replaced = authenticatedSockets.get(binding.replacedConnectionId);
         authenticatedSockets.delete(binding.replacedConnectionId);
@@ -602,11 +752,13 @@ export function createConversationServer(options: {
       const lastSeen = protocolV2 && Number.isSafeInteger(msg.last_seen_sequence) && msg.last_seen_sequence >= 0 ? msg.last_seen_sequence : 0;
       const sessionRecord = store?.getSession(binding.sessionId);
       const recoverable = store?.latestRecoverableTurn(binding.sessionId);
-      const snapshot = store ? store.listMessages(binding.sessionId, lastSeen, 100).filter(item => item.status !== 'streaming').map(item => ({
+      const snapshot = store ? (lastSeen === 0 ? store.listRecentMessages(binding.sessionId, 100)
+        : store.listMessages(binding.sessionId, lastSeen, 100)).filter(item => item.status !== 'streaming').map(item => ({
         id: item.id, turn_id: item.turnId, topic_id: item.topicId, sequence: item.sequence,
         role: item.role, status: item.status, content: item.content, created_at: item.createdAt,
       })) : [];
       send({ type: 'ready', protocol_version: protocolV2 ? CONVERSATION_PROTOCOL_VERSION : undefined,
+        access_mode: session.guest ? 'guest' : 'owner', guest_mode_enabled: !!guestController && guestSupported,
         connection_id: connectionId, session_id: binding.sessionId, resumed: binding.resumed,
         latest_sequence: sessionRecord?.latestSequence ?? 0, resume_window_minutes: Math.ceil(resumeWindowMs / 60_000),
         resume_credential: credential?.secret, resume_expires_at: credential?.expiresAt,
@@ -617,17 +769,19 @@ export function createConversationServer(options: {
           ...(recoverable?.turn.status === 'interrupted' ? { interrupted_turn_id: recoverable.turn.id } : {}) },
         recovery: { calendar: session.calendarDialogue?.recoveryManifest() ?? null,
           delivery: session.delivery?.recoveryManifest() ?? null,
-          uncertainMail: options.jobs?.list().filter(job => ['sending', 'unknown'].includes(job.mail_state ?? '')).length ?? 0,
-          uncertainCalendar: (options.calendar?.list().operations ?? []).filter(operation => ['sending', 'unknown'].includes(operation.state)).length },
-        models: options.models, capabilities: { ...options.capabilities, email: !!options.mail, calendar: !!options.calendar } });
+          uncertainMail: session.guest ? 0 : options.jobs?.list().filter(job => ['sending', 'unknown'].includes(job.mail_state ?? '')).length ?? 0,
+          uncertainCalendar: session.guest ? 0 : (options.calendar?.list().operations ?? []).filter(operation => ['sending', 'unknown'].includes(operation.state)).length },
+        models: options.models, capabilities: { ...options.capabilities, ...(session.guest ? { provider: 'api' } : {}),
+          email: !session.guest && !!options.mail, calendar: !session.guest && !!options.calendar } });
       pendingDeviceCredentialId = deviceCredential?.id;
       if (protocolV2 && store) {
         const refresh = () => {
           credentialRefresh = setTimeout(() => {
-            if (closed || !session || client.readyState !== WebSocket.OPEN) return;
+            if (closed || !session || client.readyState !== WebSocket.OPEN || !connectionMayUseOwnerRuntime()) return;
             try {
+              const now = Date.now();
               const replacement = store.issueResumeCredential({ clientId, sessionId: session.id,
-                createdAt: Date.now(), expiresAt: Date.now() + resumeCredentialTtlMs });
+                createdAt: now, expiresAt: now + resumeCredentialTtlMs });
               send({ type: 'resume.credential', session_id: session.id,
                 resume_credential: replacement.secret, resume_expires_at: replacement.expiresAt });
               refresh();
@@ -641,7 +795,7 @@ export function createConversationServer(options: {
         refresh();
       }
       send({ type: 'state', state: session.conversation.state });
-      if (options.calendar) {
+      if (options.calendar && !session.guest) {
         let lastHealthState = '';
         send({ type: 'calendar.health', health: options.calendar.health() });
         unsubscribeCalendarHealth = options.calendar.subscribeHealth(health => {
@@ -658,6 +812,7 @@ export function createConversationServer(options: {
     };
     const handleMessage = async (raw: WebSocket.RawData, binary: boolean) => {
       try {
+        if (!connectionMayUseOwnerRuntime()) return;
         // Bound message bursts from local clients as well as total audio per session.
         if (Date.now() - budgetStart >= 1000) { budgetStart = Date.now(); budgetFrames = 0; }
         if (++budgetFrames > 250) throw new Error('Rate limit');
@@ -676,9 +831,15 @@ export function createConversationServer(options: {
         if (!authenticated) {
           try { await authenticate(msg); }
           catch (error) {
+            console.warn(JSON.stringify({ event: 'conversation_auth_rejected', stage: authStage,
+              reason: error instanceof GuestAccessDenied ? 'scope_denied'
+                : error instanceof ResumeCredentialError ? 'resume_credential_invalid'
+                : error instanceof DeviceCredentialError ? 'device_credential_invalid'
+                : error instanceof SessionUnavailableError ? 'session_unavailable'
+                : error instanceof ActiveInputLeaseError ? 'lease_busy' : 'invalid_or_unavailable' }));
             send({ type: 'error', code: error instanceof ActiveInputLeaseError ? 'BUSY'
-              : error instanceof DeviceCredentialError ? 'DEVICE_CREDENTIAL_INVALID'
-              : error instanceof SessionUnavailableError || error instanceof ResumeCredentialError
+              : error instanceof DeviceCredentialError || (error instanceof GuestAccessDenied && typeof msg.device_credential === 'string') ? 'DEVICE_CREDENTIAL_INVALID'
+              : error instanceof SessionUnavailableError || error instanceof ResumeCredentialError || error instanceof GuestAccessDenied
                 ? 'SESSION_UNAVAILABLE' : 'INVALID_MESSAGE' });
             client.close(1008);
           }
@@ -691,6 +852,18 @@ export function createConversationServer(options: {
             allowLocalTestControls: localTestConnection && (options.localTestControls?.read === true || options.localTestControls?.write === true),
           });
         const active = session!;
+        if (typeof msg.type === 'string' && msg.type.startsWith('guest.')) {
+          if (!guestController || !guestSupported) throw new GuestAccessDenied();
+          const result = await guestController.handle(connectionId, msg); if (result) send(result); return;
+        }
+        if (msg.type === 'text.submit' && !active.guest && requestsGuestMode(msg.text)) {
+          if (!guestController || !guestSupported) { send({ type: 'notice', text: '访客模式尚未启用，没有切换身份。' }); return; }
+          await guestController.enter(connectionId); return;
+        }
+        if (active.guest && !['text.submit','turn.submit','pause','resume','interrupt','answer.retry','exit.request','exit.confirm',
+          'credential.persisted','location.report','location.failed','location.clear','route.mode'].includes(String(msg.type))) {
+          send({ type: 'notice', text: '访客模式不能访问主人的日历、邮件、文件或私人记录。' }); return;
+        }
         const conversation = active.conversation, delivery = active.delivery, calendarControl = active.calendarControl;
         const locationBroker = active.locationBroker, locationDialogue = active.locationDialogue;
         lastActivity = Date.now();
@@ -880,8 +1053,10 @@ export function createConversationServer(options: {
     client.on('message', (raw, binary) => { incoming = incoming.then(() => handleMessage(raw, binary)); });
     client.on('error', () => client.close());
     client.on('close', () => {
+      guestController?.unregister(connectionId);
       closed = true; releaseAuthSlot(); clearTimeout(authTimer); clearInterval(heartbeat); clearTimeout(pongDeadline);
       clearInterval(idle); clearTimeout(lifetime); clearTimeout(credentialRefresh);
+      clearInterval(accessSweep);
       unsubscribeCalendarHealth?.();
       if (authenticatedSockets.get(connectionId) === client) authenticatedSockets.delete(connectionId);
       clearCapture(); session?.setCaptureStop(connectionId, undefined);
@@ -894,6 +1069,7 @@ export function createConversationServer(options: {
     for (const client of wss.clients) client.terminate();
     await new Promise<void>(resolve => wss.close(() => resolve()));
     await registry.shutdown();
+    await guestController?.close(); options.guestRuntimes?.close();
     await options.sessionSummary?.close();
     await new Promise<void>(resolve => http.close(() => resolve()));
     await Promise.allSettled(calendarTasks);
@@ -976,6 +1152,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
+    guestRuntimes: process.env.EVEN_GUEST_MODE_ENABLED === 'true'
+      ? createGuestRuntimePool(conversationStore, process.env, openaiFetch, routeProvider) : undefined,
     conversationStore,
     storageWarningBytes: maintenanceConfig,
     sessionSummary,
