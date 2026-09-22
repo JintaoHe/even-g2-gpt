@@ -1,4 +1,5 @@
 import type { Message } from './conversation.js';
+import { priorContextText, type PriorSessionContext } from './prior-session-context.js';
 
 export type ContextTopicSummary = { id: string; label: string; summary: string };
 export type ContextSummary = {
@@ -24,7 +25,7 @@ export type ContextBuilderOptions = {
 };
 
 export interface ContextComposer {
-  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string }): ContextBuildResult;
+  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string; prior?: PriorSessionContext; pendingUserTurn?: boolean }): ContextBuildResult;
 }
 
 const DEFAULT_MAX_CHARACTERS = 24_000;
@@ -100,10 +101,9 @@ export class ContextBuilder implements ContextComposer {
     }
   }
 
-  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string }): ContextBuildResult {
+  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string; prior?: PriorSessionContext }): ContextBuildResult {
     const source = input.messages.filter(message => ['user', 'assistant'].includes(message.role)
       && typeof message.content === 'string' && message.content.trim());
-    if (!source.length) return { messages: [], characterCount: 0, ...(input.summary ? { throughSequence: input.summary.throughSequence } : {}) };
 
     const chosen = new Map<number, Message>();
     let used = 0;
@@ -124,7 +124,7 @@ export class ContextBuilder implements ContextComposer {
     };
 
     // The newest turn is never displaced by summaries or older context.
-    add(source.length - 1, source.at(-1)!, true);
+    if (source.length) add(source.length - 1, source.at(-1)!, true);
 
     let summary: Message | undefined;
     if (input.summary) {
@@ -149,6 +149,9 @@ export class ContextBuilder implements ContextComposer {
 
     const selected = [...chosen.entries()].sort((left, right) => left[0] - right[0]).map(([, message]) => message);
     const messages = summary ? [summary, ...selected] : selected;
+    // Prior is last in budget priority: it cannot displace current-session text.
+    const prior = input.prior && priorContextText(input.prior, Math.max(0, this.maxCharacters - contextCharacterCount(messages) - MESSAGE_OVERHEAD));
+    if (prior) messages.unshift({ role: 'assistant', contextKind: 'prior', status: 'committed', content: prior });
     return {
       messages,
       characterCount: contextCharacterCount(messages),

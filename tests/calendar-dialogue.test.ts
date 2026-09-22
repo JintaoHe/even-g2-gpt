@@ -9,6 +9,23 @@ import { Conversation, type TurnPlan } from '../src/conversation.js';
 import { createCalendarPlanner, type CalendarRequest } from '../src/calendar-planner.js';
 import { TimezoneClarificationError } from '../src/timezone.js';
 import type { CalendarRecoveryState } from '../src/recovery-drafts.js';
+import { ContextBuilder } from '../src/context-builder.js';
+
+test('previous-session confirmation text cannot authorize a fresh calendar runtime', async t => {
+  const f = await fixture(t), before = f.writes();
+  const base = { plan: async (): Promise<TurnPlan> => ({ decision: 'respond', calendarAction: 'confirm' }),
+    decide: async () => 'respond' as const, reply: async () => {} };
+  const dialogue = new CalendarDialogue(base, f.service, async () => { throw Error('No new planner request'); });
+  const history = new ContextBuilder().build({ messages: [{ role: 'user', content: '确认' }], prior: {
+    sessionId: 'previous-synthetic-session', closedAt: 100, throughSequence: 0, sourceLosses: false,
+    tail: [{ role: 'assistant', sequence: 1, content: '确认创建 Orion workshop?', truncated: false },
+      { role: 'user', sequence: 2, content: '确认创建', truncated: false }],
+  } }).messages;
+  const signal = new AbortController().signal;
+  await dialogue.plan(history.slice(0,-1), '确认', false, signal);
+  let answer='';await dialogue.reply(history, signal, text=>{answer+=text;});
+  assert.equal(f.writes(),before);assert.doesNotMatch(answer,/已创建|已删除|已修改/);
+});
 
 const original = { title: '测试 A', start: '2026-10-01T18:00-05:00', end: '2026-10-01T19:00-05:00', timezone: 'America/Chicago', allDay: false, location: '原地点', notes: '原备注' };
 const empty = { title: null, start: null, end: null, timezone: null, allDay: null, location: null, notes: null };

@@ -144,6 +144,16 @@ Simulator 追加发现：对已展示地点的进一步评价不能重播路线�
 
 历史作为带来源边界的数据块传入，不将历史原文提升为系统权限。时间未知时显示 UTC 或明确时区，不猜本地时间。无相关内容就说明不记得，不伪造结论。
 
+#### §4.2 实施候选（2026-09-22，待用户独立复测）
+
+- 新增 store 的 owner-only `priorSessionContext`：验证当前会话归属；只选同 scope 的 ended/expired 会话，关闭时间不得晚于新会话创建时间，也不得早于查询时刻前 24 小时。同时间按 ID 稳定排序；active/idle、其他主人、访客一律不作为来源。
+- `pendingUserTurn` 对意图阶段计入即将提交的消息：上一轮序号已达 20 时，下一轮分类不再使用 prior；回复阶段同样受 durable sequence 上限约束。
+- 每次构建重新读取摘要和覆盖，未覆盖 tail 只读 committed user/assistant，最多 12 条；SQL 中先对每条内容限 1,200 码点，模型块再缩到总计最多 1,500 UTF-16 字符（标注节选、截断及省略条数）。摘要分配最多 500 码点、单条 tail 最多 300 码点；不足时优先较新的尾部。`sourceLosses` 保留缺口/损坏提示，不把缺失当作完整证据。
+- 当前输入、当前会话摘要、近期/主题上下文先占统一预算，prior 只用剩余额度（另计消息开销）；不会挤掉现有问答。即便首轮当前 history 为空，也能给意图模型提供 prior。
+- 仅作为 assistant 角色的带边界 JSON 数据块传给模型，不存入当前 messages，不在 ready snapshot 下发，不建立旧会话 topic/审批绑定；访客 runtime 不调用此查询。Calendar/Email 的新预览确认机制不变。
+- 无新 schema，无生产数据迁移；本单元未部署。跨会话能力限最近一次关闭会话，不是 PI-3 的历史检索。
+- 离线入口：`tests/prior-session-context.test.ts`、`tests/prior-session-websocket.test.ts`；另有 Calendar 历史确认拒写测试。真实冒烟：Node 24 `--use-system-ca --import tsx tests/live-prior-context.ts`，需 `RUN_LIVE_PRIOR_CONTEXT=1`，临时合成 SQLite、现有计量账本、最多 6 次/$0.15、不发邮件、不写日历、不联网搜索；检查本地 3001 无账本写入者后才运行。
+
 ### 4.3 访客权限契约
 
 2026-09-21 实施状态：第一单元已通过独立复测。第二单元新增 schema v10
