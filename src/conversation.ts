@@ -13,7 +13,7 @@ export type Message = { role: 'user' | 'assistant'; content: string; citations?:
   topicId?: string; topicLabel?: string; cognitiveMode?: CognitiveMode; assistantMode?: AssistantMode;
   /** Durable metadata is optional so legacy/in-memory callers remain compatible. */
   messageId?: string; sequence?: number; status?: 'committed' | 'streaming' | 'interrupted' | 'failed';
-  contextKind?: 'summary' | 'prior' };
+  contextKind?: 'summary' | 'prior' | 'history' };
 
 /** Select one topic only for artifacts that must not blend separate projects. Normal
  * conversation receives the whole bounded session so the assistant has short-term memory. */
@@ -43,6 +43,7 @@ export type RouteResolution = { action: 'resolved'; destination: string }
   | { action: 'ask'; question: string }
   | { action: 'not_found' };
 export type TurnPlan = { decision: Decision; cognitiveMode?: CognitiveMode; assistantMode?: AssistantMode; reasoningEffort?: ReasoningEffort;
+  historyQuery?: string | null;
   topicAction?: TopicAction; topicTarget?: string | null; topicLabel?: string | null;
   deliveryAction?: import('./delivery-intent.js').DeliveryAction;
   calendarAction?: import('./calendar-planner.js').CalendarAction; locationAction?: LocationAction;
@@ -59,6 +60,7 @@ export function normalizeTurnPlan(plan: TurnPlan): TurnPlan {
     if (!workflows.some(current => current.kind === workflow.kind && current.action === workflow.action)) workflows.push(workflow);
   };
   if (plan.searchAction === 'search' || (plan.searchAction === undefined && cognitiveMode === 'research')) add({ kind: 'search', action: 'read' });
+  if (typeof plan.historyQuery === 'string' && plan.historyQuery.trim()) add({ kind: 'memory', action: 'recall' });
   if (plan.locationAction && !['none', 'cancel'].includes(plan.locationAction)) add({ kind: 'navigation', action: plan.locationAction });
   if (plan.calendarAction && plan.calendarAction !== 'none') add({ kind: 'calendar', action: plan.calendarAction });
   if (plan.deliveryAction && plan.deliveryAction !== 'none') {
@@ -137,6 +139,7 @@ export type ConversationRuntimeOptions = {
   checkpointMs?: number;
   /** Runs only after the complete assistant answer is durably committed. */
   onTurnCommitted?: () => void;
+  recallHistory?: (query: string, signal: AbortSignal) => Promise<import('./history-recall.js').HistoryRecall>;
   recoverAnswer?: (request: string) => {
     kind: 'committed' | 'interrupted' | 'missing';
     turnId?: string;
@@ -433,21 +436,32 @@ export class Conversation {
             sequence: assistantSequence } : {}) });
       } else if (recovery?.kind === 'missing') delta('当前会话里没有可以恢复的上一轮回答。');
       else if (decision === 'clarify_exit') delta('你是想结束这次对话，还是继续聊？');
-      else await this.model.reply(this.contextBuilder.build({ messages: this.history,
-        currentTopicId: topic.id }).messages, controller.signal, delta, event => {
-        if (!current()) return;
-        if (event.type === 'answer.citations') {
-          const sanitized = stripInternalMetadata(event.text);
-          const text = isInternalReasoningOutput(sanitized)
-            ? '我刚才没有把话组织好，抱歉。请再跟我说一次，我会认真接住。' : sanitized;
-          this.partial = text;
-          // Internal metadata is not a source. If it was echoed, retain only
-          // citations that still point inside the sanitized visible answer.
-          this.citations = event.citations.filter(citation => citation.start >= 0 && citation.end <= text.length);
-          this.emit({ ...event, text, citations: this.citations, id: revision }); return;
+      else {
+        let recall: import('./history-recall.js').HistoryRecall | undefined;
+        if (typeof plan.historyQuery === 'string' && plan.historyQuery.trim()) {
+          try { recall = await this.runtime?.recallHistory?.(plan.historyQuery, controller.signal)
+            ?? { status: 'unavailable', incomplete: true, messages: [] }; }
+          catch { controller.signal.throwIfAborted(); recall = { status: 'unavailable', incomplete: true, messages: [] }; }
+          if (!current()) return;
         }
-        this.emit({ ...event, id: revision });
-      }, plan.reasoningEffort, plan.cognitiveMode, plan.workflows);
+        const replyContext = this.contextBuilder.build({ messages: this.history, currentTopicId: topic.id, recall }).messages;
+        if (recall && !replyContext.some(message => message.contextKind === 'history')) {
+          delta('这轮上下文空间不够，暂时没能带回历史资料。你能把想回顾的那个问题单独问我一次吗？');
+        } else await this.model.reply(replyContext, controller.signal, delta, event => {
+          if (!current()) return;
+          if (event.type === 'answer.citations') {
+            const sanitized = stripInternalMetadata(event.text);
+            const text = isInternalReasoningOutput(sanitized)
+              ? '我刚才没有把话组织好，抱歉。请再跟我说一次，我会认真接住。' : sanitized;
+            this.partial = text;
+            // Internal metadata is not a source. If it was echoed, retain only
+            // citations that still point inside the sanitized visible answer.
+            this.citations = event.citations.filter(citation => citation.start >= 0 && citation.end <= text.length);
+            this.emit({ ...event, text, citations: this.citations, id: revision }); return;
+          }
+          this.emit({ ...event, id: revision });
+        }, plan.reasoningEffort, plan.cognitiveMode, plan.workflows);
+      }
       if (!current()) return;
       const tail = visible.flush(); if (tail) append(tail);
       if (visible.rejectedReasoning) {
