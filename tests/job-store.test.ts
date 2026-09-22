@@ -71,7 +71,7 @@ test('artifact HTTP downloads require credentials and do not expose paths or inl
   const directory = await mkdtemp(join(tmpdir(), 'even-jobs-http-')), store = await JobStore.create(directory);
   const job = store.enqueue(snapshot); await waitJob(store, job.id, 'completed');
   const token = 't'.repeat(64);
-  const app = createConversationServer({ token, jobs: store, model: { decide: async () => 'respond', reply: async () => {} }, transcriber: () => { throw new Error('not used'); } });
+  const app = createConversationServer({ legacyHelloEnabled: true, token, jobs: store, model: { decide: async () => 'respond', reply: async () => {} }, transcriber: () => { throw new Error('not used'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const base = `http://127.0.0.1:${(app.http.address() as any).port}`;
   try {
@@ -97,7 +97,7 @@ test('WebSocket-export job survives client disconnect and remains listable after
   let finish!: () => void;
   const gate = new Promise<void>(r => { finish = r; });
   const store = await JobStore.create(directory, async () => { await gate; return '# saved'; });
-  const token = 'x'.repeat(40), app = createConversationServer({ token, jobs: store,
+  const token = 'x'.repeat(40), app = createConversationServer({ legacyHelloEnabled: true, token, jobs: store,
     model: { decide: async () => 'respond', reply: async (_h, _s, delta) => delta('hello') }, transcriber: () => { throw new Error('not used'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `ws://127.0.0.1:${(app.http.address() as any).port}/ws/conversation`;

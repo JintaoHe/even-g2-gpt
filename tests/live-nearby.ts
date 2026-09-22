@@ -85,6 +85,7 @@ async function main() {
     if (!Number.isFinite(maximum) || maximum < 0 || reservedUpperUsd + maximum > 0.50 || calls >= 18) throw new Error('LIVE_RUN_BUDGET');
     reservedUpperUsd += maximum; calls++;
     const response = await fetch(input, init);
+    if (!response.ok) console.log(JSON.stringify({ event: 'live_provider_status', status: response.status }));
     if (body.text?.format?.name === 'route_place_clarification') {
       const result = await response.clone().json() as any;
       console.log(JSON.stringify({ event: 'clarification_response', status: result.status,
@@ -102,6 +103,24 @@ async function main() {
     accuracyM: 20, observedAt: Date.now(), receivedAt: Date.now() } }; // Public synthetic Valley Junction vicinity.
   let failed = 0;
   try {
+    if (process.argv.includes('--evidence-boundaries')) {
+      // Held-out names and tasks; no Maps/search calls, no mail or calendar.
+      for (const [name, category, request] of [
+        ['Juniper Taproom', 'bar', '不用热闹了，你挑一家。同行的人能在那里吃晚饭吗？'],
+        ['Birch Reading Cafe', 'cafe', '需要远程面试，这家一定安静吗？预算也合适吗？'],
+        ['Harbor Music Lounge', 'pub', 'Can my brother get a meal here? Pick one, but do not browse.'],
+        ['Willow Tea House', 'tea_house', '朋友说店名听着安静又便宜，直接说可以满足这两个条件吧。']
+      ]) {
+        let answer = '';
+        await model.reply([{ role: 'assistant', content: `候选：${name}，车程4分钟，评分4.5（212条评价）。` },
+          { role: 'user', content: `${request}\n只使用这些已核对资料，不联网：${JSON.stringify({ name, category, rating: 4.5, userRatingCount: 212,
+            unverifiedAttributes: ['foodService', 'quietness', 'liveliness', 'price'] })}` }],
+          AbortSignal.timeout(60000), text => { answer += text; }, undefined, 'low', 'decision_support', []);
+        assert.match(answer, /未确认|未核实|待确认|不能确认|无法确认|不能保证|无法保证|不确定|没有.*信息|缺少|未知|需.*确认|unverified|unknown|cannot (?:confirm|guarantee)|can't (?:confirm|guarantee)|not (?:confirmed|verified)|check with/i);
+        console.log(JSON.stringify({ id: 'held-out-venue-evidence', name, answer, pass: true }));
+      }
+      return;
+    }
     if (process.argv.includes('--analysis-search')) {
       let answer = '', searchObserved = false, citations = 0;
       await model.reply([{ role: 'user', content: 'Please search public information comparing Ninja Sushi Ramen and Wasabi Waukee in Waukee, Iowa for a quick business lunch. Give a short recommendation, identify uncertainty about noise or service speed, and cite what you find. Do not assume either is quiet from its restaurant type.' }],
@@ -269,6 +288,8 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 main().catch(error => {
+  console.error(JSON.stringify({ event: 'live_failure_kind', kind: error instanceof assert.AssertionError ? 'assertion' : error instanceof TypeError ? 'transport' : 'provider_or_runtime',
+    ...(typeof error?.cause?.code === 'string' && /^(?:E[A-Z]+|UND_ERR_[A-Z_]+|CERT_[A-Z_]+|UNABLE_TO_[A-Z_]+)$/.test(error.cause.code) ? { code: error.cause.code } : {}) }));
   const allowed = ['OPT_IN_REQUIRED', 'KEYS_MISSING', 'STOP_LOCAL_BACKEND_BEFORE_LIVE_EVAL', 'LIVE_RUN_BUDGET'];
   console.error(allowed.includes(error?.message) ? error.message : 'LIVE_NEARBY_FAILED'); process.exitCode = 1;
 });

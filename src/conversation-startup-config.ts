@@ -19,6 +19,7 @@ export function readConversationStartupConfig(env: NodeJS.ProcessEnv) {
     throw new Error('EVEN_LOCAL_TEST_WRITE_CONTROLS requires EVEN_LOCAL_TEST_CONTROLS=true');
   }
   return {
+    legacyHelloEnabled: booleanSetting(env, 'CONVERSATION_LEGACY_HELLO_ENABLED'),
     resumeWindowMs: resumeMinutes * 60_000,
     maintenance: readConversationMaintenanceConfig(env),
     localTestControls: { read: readTestControls, write: writeTestControls },

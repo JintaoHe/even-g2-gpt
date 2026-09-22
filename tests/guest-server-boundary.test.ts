@@ -11,6 +11,20 @@ import { createConversationServer } from '../src/conversation-server.js';
 import type { DialogueModel } from '../src/conversation.js';
 
 const token = 'test-only-owner-token-'.repeat(4);
+
+test('legacy and unknown-version hellos cannot bypass a locked client or touch storage', { timeout: 10000 }, async t => {
+  const { store, denied } = await fixture(t);
+  const clientId = randomUUID();
+  store.registerClient({ id: clientId, at: Date.now() });
+  store.enterDeviceGuestMode({ clientId, at: Date.now() });
+  let reads = 0, creates = 0;
+  store.getDeviceGuestLock = () => { reads++; throw Error('must reject before storage'); };
+  store.createSession = () => { creates++; throw Error('must not create owner'); };
+  for (const protocol_version of [undefined, null, 1, 3, '2']) {
+    await denied({ protocol_version, client_id: clientId, token, client_capabilities: { guest_mode: true } }, 'INVALID_MESSAGE');
+  }
+  assert.equal(reads, 0); assert.equal(creates, 0);
+});
 async function fixture(t: TestContext, model: DialogueModel = {
   decide: async () => 'respond', reply: async () => { throw new Error('must not reach model'); },
 }, transcriber: Parameters<typeof createConversationServer>[0]['transcriber'] = () => { throw new Error('must not reach audio'); }) {

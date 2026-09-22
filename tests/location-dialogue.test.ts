@@ -24,6 +24,7 @@ test('place analysis receives displayed order and review evidence without reques
   const firstShown = payload.places.find((place: any) => place.displayedOrder === 1);
   assert.equal(firstShown.placeId, 'waukee'); assert.equal(firstShown.userRatingCount, 1800);
   assert.equal(firstShown.durationSeconds, comparison.candidates[0].durationSeconds);
+  assert.deepEqual(firstShown.unverifiedAttributes, ['foodService', 'quietness', 'liveliness', 'price']);
   assert.ok(payload.evidenceAt); assert.doesNotMatch(JSON.stringify(payload), /latitude|longitude|41\.58/);
   assert.deepEqual(answerWorkflows, [{ kind: 'navigation', action: 'analyze_places' }, { kind: 'search', action: 'read' }]);
   dialogue.endSession(); const third = new AbortController().signal;

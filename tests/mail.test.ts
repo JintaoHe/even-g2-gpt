@@ -102,7 +102,7 @@ test('mail endpoint requires authentication, rejects recipient overrides and sen
   const root = await mkdtemp(join(tmpdir(), 'even-mail-ws-')), store = await JobStore.create(root);
   const id = await completed(store, { title: 'Synthetic meeting', start: '2026-09-20T14:00-05:00', end: '2026-09-20T15:00-05:00', timezone: 'America/Chicago', allDay: false, location: '', notes: '' }); let sends = 0;
   const token = 'test-token-'.repeat(5);
-  const app = createConversationServer({ token, jobs: store, mail: async () => { sends++; return 'accepted'; },
+  const app = createConversationServer({ legacyHelloEnabled: true, token, jobs: store, mail: async () => { sends++; return 'accepted'; },
     model: { decide: async () => 'respond', reply: async () => {} }, transcriber: () => { throw Error('Unused'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `ws://127.0.0.1:${(app.http.address() as { port: number }).port}/ws/conversation`;

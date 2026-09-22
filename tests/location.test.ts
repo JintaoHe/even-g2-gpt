@@ -111,7 +111,7 @@ test('device timezone is only a hint; a resolved session timezone survives coord
 
 test('authenticated WSS accepts ephemeral fixes, returns no coordinates and stays open on a rejected fix', async () => {
   const token = 'location-test-token-'.repeat(3);
-  const app = createConversationServer({ token,
+  const app = createConversationServer({ legacyHelloEnabled: true, token,
     model: { decide: async () => 'respond', reply: async () => {} },
     transcriber: () => { throw new Error('unused'); },
     capabilities: { provider: 'api', delivery: 'api', webSearch: false, speech: false, location: true }
@@ -154,7 +154,7 @@ test('authenticated WSS accepts ephemeral fixes, returns no coordinates and stay
 test('WSS manual location primes the next route turn without a second SDK request, then clears it', async () => {
   const token = 'route-location-token-'.repeat(3);
   let routedMode = '';
-  const app = createConversationServer({ token,
+  const app = createConversationServer({ legacyHelloEnabled: true, token,
     model: {
       plan: async () => ({ decision: 'respond', locationAction: 'route_eta', routeDestination: 'Costco', routeOrigin: null, routeMode: 'drive', routeModeExplicit: false }),
       decide: async () => 'respond', reply: async () => { throw new Error('route wrapper should answer'); }

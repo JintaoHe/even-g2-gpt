@@ -107,7 +107,7 @@ function withRecentPlaceContext(history: Message[], recent?: RecentComparison, f
   const latest = history.at(-1)!.content.toLocaleLowerCase();
   const names = recent.candidates.map(candidate => candidate.name.toLocaleLowerCase());
   const named = names.some(name => name.length >= 3 && latest.includes(name));
-  const referential = /刚才|刚刚|之前|前面|你说|推荐|那家|那个|这家|这个|the one|you (?:said|mentioned|recommended)|earlier/i.test(latest)
+  const referential = /刚才|刚刚|之前|前面|你说|推荐|那家|那个|这家|这个|选一家|选一个|随便你|第一家|第二家|you choose|pick one|the one|you (?:said|mentioned|recommended)|earlier/i.test(latest)
     && history.slice(-24, -1).some(message => names.some(name => message.content.toLocaleLowerCase().includes(name)));
   if (!force && !named && !referential) return history;
   const facts = recent.candidates.slice(0, 5).map(candidate => ({
@@ -119,6 +119,7 @@ function withRecentPlaceContext(history: Message[], recent?: RecentComparison, f
     ...recent.routeFacts.find(fact => fact.placeId === candidate.placeId),
     ...(candidate.openNow === undefined ? {} : { openNow: candidate.openNow }),
     ...(candidate.priceLevel ? { priceLevel: candidate.priceLevel } : {}),
+    unverifiedAttributes: ['foodService', 'quietness', 'liveliness', ...(!candidate.priceLevel ? ['price'] : [])],
     recommended: candidate.placeId === recent.recommendedPlaceId
   }));
   const enriched = history.map(message => ({ ...message }));

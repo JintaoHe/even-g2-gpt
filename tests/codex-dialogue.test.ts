@@ -109,7 +109,7 @@ test('CLI subprocess timeout and interruption terminate work and return no late 
 test('CLI text-only WebSocket advertises capabilities, rejects audio and still answers text', { timeout: 10000 }, async () => {
   const model = new CodexDialogue(async request => request.schema
     ? '{"decision":"respond","reasoning_effort":"low","cognitive_mode":"casual","search_action":"none","topic_action":"continue","topic_target":null,"topic_label":"chat"}' : 'CLI answer');
-  const app = createConversationServer({ token: 'x'.repeat(40), model,
+  const app = createConversationServer({ legacyHelloEnabled: true, token: 'x'.repeat(40), model,
     capabilities: { provider: 'codex-cli', delivery: 'complete-message', webSearch: false, speech: false },
     transcriber: () => { throw new Error('Must never start STT without key'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');

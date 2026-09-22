@@ -375,7 +375,7 @@ test('fatal rejection logging exposes only fixed metadata, never error prose or 
 });
 
 test('local WebSocket authenticates, runs dialogue and pauses safely', { timeout: 10000 }, async () => {
-  const token = 't'.repeat(64), app = createConversationServer({ token, model: immediate, transcriber: () => { throw new Error('not used'); } });
+  const token = 't'.repeat(64), app = createConversationServer({ legacyHelloEnabled: true, token, model: immediate, transcriber: () => { throw new Error('not used'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const host = `127.0.0.1:${(app.http.address() as any).port}`;
   try {
@@ -409,7 +409,7 @@ test('local WebSocket authenticates, runs dialogue and pauses safely', { timeout
 test('production ingress accepts only the configured public host and origin', { timeout: 10000 }, async () => {
   const data = await mkdtemp(join(tmpdir(), 'even-storage-health-'));
   const conversationStore = await ConversationStore.create(data);
-  const app = createConversationServer({ token: 'p'.repeat(64), model: immediate, transcriber: () => { throw new Error('not used'); },
+  const app = createConversationServer({ legacyHelloEnabled: true, token: 'p'.repeat(64), model: immediate, transcriber: () => { throw new Error('not used'); },
     conversationStore,
     ingress: { publicHosts: ['calendar.eveng2assistant.com'], allowedOrigins: ['https://calendar.eveng2assistant.com'] } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
@@ -459,7 +459,7 @@ test('production ingress accepts only the configured public host and origin', { 
 
 test('audio pipeline waits for ordered final transcripts; pause drops late results', { timeout: 10000 }, async () => {
   const jobs: ReturnType<typeof deferred<string>>[] = [], seen: string[] = [];
-  const app = createConversationServer({ token: 'a'.repeat(64),
+  const app = createConversationServer({ legacyHelloEnabled: true, token: 'a'.repeat(64),
     model: { ...immediate, decide: async (_h, text) => { seen.push(text); return 'respond'; } },
     transcriber: () => {
       const job = deferred<string>(); jobs.push(job);
