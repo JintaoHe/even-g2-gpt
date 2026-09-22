@@ -19,7 +19,7 @@ class FakeSocket implements SocketLike {
   drop() { this.readyState = 3; this.onclose?.(); }
 }
 
-async function fixture() {
+async function fixture(onEvent?: (event: any) => unknown) {
   const data = new Map<string, string>();
   const host = { getLocalStorage: async (key: string) => data.get(key) ?? '',
     setLocalStorage: async (key: string, value: string) => { data.set(key, value); return true; } };
@@ -27,7 +27,7 @@ async function fixture() {
   const sockets: FakeSocket[] = [], statuses: any[] = [], events: any[] = [], timers = new Map<number, () => void>();
   let timerId = 0;
   const controller = new ConnectionController({ url: () => 'ws://test', socket: () => { const ws = new FakeSocket(); sockets.push(ws); return ws; },
-    credentials, onEvent: event => events.push(event), onStatus: status => statuses.push(status), random: () => 0.5,
+    credentials, onEvent: event => { events.push(event); return onEvent?.(event); }, onStatus: status => statuses.push(status), random: () => 0.5,
     uuid, setTimer: callback => { const id = ++timerId; timers.set(id, callback); return id as any; },
     clearTimer: id => { timers.delete(id as any); } });
   const ready = (ws: FakeSocket, resumed = false) => ws.message({ type: 'ready', protocol_version: 2,
@@ -42,6 +42,47 @@ test('jitter stays within 80-120 percent and backoff caps at 30 seconds', () => 
   assert.equal(reconnectDelay(99, () => 0.5), 30_000);
 });
 
+test('guest switch clears owner resume and token, drops late events, and reconnects with device proof only', async () => {
+  const f = await fixture();
+  await f.credentials.saveDevice({ clientId, id: '33333333-3333-4333-8333-333333333333', secret: 'd'.repeat(32), expiresAt: 2000 });
+  f.controller.connect('t'.repeat(32)); const old = f.sockets[0]; old.open(); f.ready(old);
+  old.message({ type: 'access.changed', mode: 'guest', clear_display: true, clear_resume: true, reconnect: true });
+  old.message({ type: 'answer.delta', text: 'OWNER_SECRET' });
+  await f.credentials.whenSettled(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.credentials.load(), undefined); assert.equal(f.sockets.length, 2);
+  f.sockets[1].open(); assert.equal(f.sockets[1].sent[0].device_credential, 'd'.repeat(32));
+  assert.equal(f.sockets[1].sent[0].token, undefined); assert.equal(f.sockets[1].sent[0].resume_session_id, undefined);
+  assert.equal(f.events.some(e => e.text === 'OWNER_SECRET'), false);
+  f.sockets[1].message({ type: 'access.changed', mode: 'reauthorize', clear_display: true, clear_resume: true, reconnect: false });
+  await f.credentials.whenSettled(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.credentials.loadDevice(), undefined); assert.equal(f.timers.size, 0);
+  assert.equal(f.controller.networkAvailable(), false); assert.equal(f.controller.connect(), false);
+  f.controller.dispose();
+});
+
+test('unannounced access revocation cannot silently fall back to the cached owner token', async () => {
+  const f = await fixture(); f.controller.connect('t'.repeat(32)); const ws = f.sockets[0]; ws.open(); f.ready(ws);
+  (ws as SocketLike).onclose?.({ code: 4003 });
+  await f.credentials.whenSettled();
+  assert.equal(f.timers.size, 0); assert.equal(f.controller.networkAvailable(), false);
+  assert.equal(f.events.at(-1).type, 'transport.cleared');
+  f.controller.dispose();
+});
+
+test('guest reconnect waits for the physical display barrier and fails closed on a rejected clear', async () => {
+  let reject!: (error: Error) => void;
+  const barrier = new Promise<void>((_resolve, no) => { reject = no; });
+  const f = await fixture(event => event.type === 'access.changed' ? barrier : undefined);
+  await f.credentials.saveDevice({ clientId, id: '33333333-3333-4333-8333-333333333333', secret: 'd'.repeat(32), expiresAt: 2000 });
+  f.controller.connect('t'.repeat(32)); const ws = f.sockets[0]; ws.open(); f.ready(ws);
+  ws.message({ type: 'access.changed', mode: 'guest', reconnect: true });
+  await f.credentials.whenSettled(); assert.equal(f.sockets.length, 1);
+  reject(Error('SDK failed')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.sockets.length, 1); assert.equal(f.controller.networkAvailable(), false);
+  assert.equal(f.events.some(e => e.type === 'notice' && /清屏未确认/.test(e.text)), true);
+  f.controller.dispose();
+});
+
 test('Even client advertises location support on every authentication path', async () => {
   const f = await fixture();
   // Use a dedicated socket because the fixture controller is intentionally
@@ -50,7 +91,7 @@ test('Even client advertises location support on every authentication path', asy
   const capable = new ConnectionController({ url: () => 'ws://test', socket: () => socket,
     credentials: f.credentials, onEvent: () => {}, clientCapabilities: { location: true }, uuid });
   assert.equal(capable.connect('t'.repeat(32)), true); socket.open();
-  assert.deepEqual(socket.sent[0].client_capabilities, { location: true });
+  assert.deepEqual(socket.sent[0].client_capabilities, { location: true, guest_mode: true });
   capable.dispose();
 });
 
@@ -58,13 +99,13 @@ test('initial auth uses protocol v2 and reconnect resumes with the saved scoped 
   const f = await fixture(); assert.equal(f.controller.connect('t'.repeat(32)), true);
   const first = f.sockets[0]; first.open();
   assert.deepEqual(first.sent[0], { type: 'hello', protocol_version: 2, client_id: clientId,
-    credential_storage: 'even_host_v1', token: 't'.repeat(32) });
+    credential_storage: 'even_host_v1', client_capabilities: { location: false, guest_mode: true }, token: 't'.repeat(32) });
   f.ready(first); first.drop();
   assert.equal(f.timers.size, 1); [...f.timers.values()][0]();
   const second = f.sockets[1]; second.open();
   assert.deepEqual(second.sent[0], { type: 'hello', protocol_version: 2, client_id: clientId,
-    credential_storage: 'even_host_v1', resume_session_id: sessionId,
-    resume_credential: 's'.repeat(32), last_seen_sequence: 4 });
+    credential_storage: 'even_host_v1', client_capabilities: { location: false, guest_mode: true }, resume_session_id: sessionId,
+    resume_credential: 's'.repeat(32), last_seen_sequence: 0 });
   f.ready(second, true);
   assert.equal(f.controller.status.reason, 'resumed');
 });
@@ -122,7 +163,7 @@ test('cold start uses the scoped device credential without persisting or requiri
   assert.equal(f.controller.resumeIfAvailable(), true);
   const ws = f.sockets[0]; ws.open();
   assert.deepEqual(ws.sent[0], { type: 'hello', protocol_version: 2, client_id: clientId,
-    credential_storage: 'even_host_v1', device_credential: 'd'.repeat(32) });
+    credential_storage: 'even_host_v1', client_capabilities: { location: false, guest_mode: true }, device_credential: 'd'.repeat(32) });
   assert.equal(JSON.stringify(ws.sent[0]).includes('token'), false);
 });
 

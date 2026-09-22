@@ -16,7 +16,7 @@ export type SocketLike = {
   send(data: string | ArrayBuffer | ArrayBufferView): void;
   close(code?: number, reason?: string): void;
   onopen: null | (() => void);
-  onclose: null | (() => void);
+  onclose: null | ((event?: { code?: number }) => void);
   onerror: null | (() => void);
   onmessage: null | ((event: { data: unknown }) => void);
 };
@@ -26,7 +26,8 @@ type ControllerOptions = {
   url: () => string;
   socket: (url: string) => SocketLike;
   credentials: SessionCredentialStore;
-  onEvent: (event: any) => void;
+  /** May return a promise for the physical display-clear barrier. */
+  onEvent: (event: any) => unknown;
   onStatus?: (status: ConnectionStatus) => void;
   now?: () => number;
   random?: () => number;
@@ -122,7 +123,7 @@ export class ConnectionController {
         type: 'hello', protocol_version: 2, client_id: credential?.clientId ?? this.options.credentials.clientId(),
         credential_storage: 'even_host_v1',
       };
-      if (this.options.clientCapabilities) hello.client_capabilities = { ...this.options.clientCapabilities };
+      hello.client_capabilities = { location: false, ...this.options.clientCapabilities, guest_mode: true };
       if (credential) {
         hello.resume_session_id = credential.sessionId;
         hello.resume_credential = credential.secret;
@@ -136,6 +137,7 @@ export class ConnectionController {
       let message: any;
       try { message = JSON.parse(event.data); } catch { return; }
       if (!message || typeof message.type !== 'string') return;
+      if (message.type === 'access.changed') { void this.accessChanged(message, ws); return; }
       if (message.type === 'ready') this.ready(message, ws, generation);
       else if (message.type === 'resume.credential') this.replaceCredential(message);
       else if (message.type === 'message.ack' || message.type === 'answer.committed') this.observeSequence(message.sequence);
@@ -155,9 +157,15 @@ export class ConnectionController {
     ws.onerror = () => {
       if (this.current(ws, generation) && this.state !== 'connected') this.update({ state: 'recovering', reason: 'offline', attempt: this.attempt });
     };
-    ws.onclose = () => {
+    ws.onclose = event => {
       if (!this.current(ws, generation)) return;
       this.socketValue = undefined;
+      this.lastSeenSequence = 0;
+      if (event?.code === 4003) {
+        this.accessToken = ''; this.ending = true;
+        void this.options.credentials.clearSession(); void this.options.credentials.clearDevice();
+      }
+      this.options.onEvent({ type: 'transport.cleared' });
       if (this.disposed || this.ending) {
         this.cancelRetry();
         this.update({ state: 'disconnected', reason: this.disposed ? 'disposed' : undefined });
@@ -172,11 +180,30 @@ export class ConnectionController {
     return this.socketValue === socket && this.generation === generation;
   }
 
+  private async accessChanged(message: any, socket: SocketLike) {
+    this.ending = true; this.cancelRetry(); this.accessToken = ''; this.lastSeenSequence = 0;
+    this.socketValue = undefined; const generation = ++this.generation;
+    const clearView = Promise.resolve(this.options.onEvent(message)).then(() => true, () => false); socket.close();
+    this.update({ state: 'disconnected' });
+    const cleared = await this.options.credentials.clearSession();
+    const unlocked = message.mode === 'reauthorize';
+    const deviceCleared = unlocked ? await this.options.credentials.clearDevice() : true;
+    if (!await clearView) { this.options.onEvent({ type: 'notice', text: '眼镜清屏未确认，请重新打开应用；尚未重连。' }); return; }
+    if (!cleared || !deviceCleared) {
+      this.options.onEvent({ type: 'notice', text: '恢复引用清理未确认，请重新打开应用后再连接。' }); return;
+    }
+    if (!this.disposed && this.generation === generation && message.mode === 'guest' && message.reconnect === true) {
+      this.ending = false; this.forceFresh = true; this.open(true);
+    }
+  }
+
   private ready(message: any, socket: SocketLike, generation: number) {
     if (message.protocol_version !== 2 || typeof message.connection_id !== 'string'
       || typeof message.session_id !== 'string' || typeof message.resume_credential !== 'string'
       || !Number.isSafeInteger(message.resume_expires_at)) return;
     const clientId = this.options.credentials.clientId();
+    if (message.access_mode === 'guest') this.accessToken = '';
+    if (this.statusValue.sessionId !== message.session_id) this.lastSeenSequence = 0;
     const credential: ResumeSessionCredential = { clientId, sessionId: message.session_id,
       secret: message.resume_credential, expiresAt: message.resume_expires_at };
     this.persistCredential(credential);
@@ -259,7 +286,7 @@ export class ConnectionController {
     if (!ws || ws.readyState !== OPEN) return false;
     const message = { ...value };
     if (message.type === 'text.submit' && message.message_id === undefined) message.message_id = this.options.uuid();
-    if ((COMMAND_TYPES.has(String(message.type)) || message.type === 'exit.confirm' || String(message.type).startsWith('test.'))
+    if ((COMMAND_TYPES.has(String(message.type)) || message.type === 'exit.confirm' || String(message.type).startsWith('test.') || String(message.type).startsWith('guest.'))
       && message.command_id === undefined) message.command_id = this.options.uuid();
     ws.send(JSON.stringify(message));
     return true;

@@ -40,7 +40,7 @@ test('v9 recovery-clock migration rolls back, preserves tasks and reopens idempo
   const before = store.listSummaryJobs(sessionId);
   await store.close();
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
-  db.exec(`DROP TABLE summary_recovery_clocks; DELETE FROM schema_migrations WHERE version=9;
+  db.exec(`DROP TABLE device_guest_locks; ALTER TABLE clients DROP COLUMN access_epoch; DROP TABLE summary_recovery_clocks; DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version>=9;
     CREATE TRIGGER fail_v9 BEFORE INSERT ON schema_migrations WHEN NEW.version=9
     BEGIN SELECT RAISE(ABORT,'injected v9 failure'); END;`);
   try {
@@ -51,7 +51,7 @@ test('v9 recovery-clock migration rolls back, preserves tasks and reopens idempo
   } finally { db.close(); }
   for (let i = 0; i < 2; i++) {
     const reopened = await ConversationStore.create(root);
-    try { assert.deepEqual(reopened.listSummaryJobs(sessionId), before); assert.equal(reopened.health().schemaVersion, 9); }
+    try { assert.deepEqual(reopened.listSummaryJobs(sessionId), before); assert.equal(reopened.health().schemaVersion, 12); }
     finally { await reopened.close(); }
   }
 });
@@ -138,7 +138,7 @@ test('v8 migration preserves v7 tasks, anchors terminal baseline, rolls back ato
     INSERT INTO jobs_v7 SELECT id,session_id,from_sequence,through_sequence,status,attempts,created_at,updated_at,error_code,budget_deferrals FROM summary_jobs;
     DROP TABLE summary_jobs; ALTER TABLE jobs_v7 RENAME TO summary_jobs;
     CREATE INDEX summary_jobs_status_idx ON summary_jobs(status,created_at);
-    DROP TABLE summary_recovery_clocks; DELETE FROM schema_migrations WHERE version>=8;
+    DROP TABLE device_guest_locks; ALTER TABLE clients DROP COLUMN access_epoch; DROP TABLE summary_recovery_clocks; DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version>=8;
     CREATE TRIGGER fail_v8 BEFORE INSERT ON schema_migrations WHEN NEW.version=8
     BEGIN SELECT RAISE(ABORT,'injected v8 failure'); END;`);
   try {
@@ -153,7 +153,7 @@ test('v8 migration preserves v7 tasks, anchors terminal baseline, rolls back ato
     try {
       assert.deepEqual(reopened.listSummaryJobs(sessionId), [{ ...job, status: 'failed', attempts: 1, updatedAt: 1002, errorCode: 'SUMMARY_GAVE_UP' }]);
       assert.equal(reopened.scheduleActiveSummary(sessionId, 60, 24, 20, 3000), undefined);
-      assert.equal(reopened.health().schemaVersion, 9);
+      assert.equal(reopened.health().schemaVersion, 12);
     } finally { await reopened.close(); }
   }
 });
@@ -381,7 +381,7 @@ test('v7 loss metadata migration rolls back atomically and preserves old summari
   await store.close();
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
   db.exec(`ALTER TABLE session_summaries DROP COLUMN source_losses_json;
-    DROP TABLE summary_recovery_clocks; DELETE FROM schema_migrations WHERE version>=7;
+    DROP TABLE device_guest_locks; ALTER TABLE clients DROP COLUMN access_epoch; DROP TABLE summary_recovery_clocks; DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version>=7;
     CREATE TRIGGER fail_v7 BEFORE INSERT ON schema_migrations WHEN NEW.version=7
     BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;`);
   try {
@@ -392,7 +392,7 @@ test('v7 loss metadata migration rolls back atomically and preserves old summari
   } finally { db.close(); }
   const migrated = await ConversationStore.create(root);
   try {
-    assert.equal(migrated.health().schemaVersion, 9);
+    assert.equal(migrated.health().schemaVersion, 12);
     assert.equal(migrated.latestSummary(sessionId)?.throughSequence, 6);
     assert.deepEqual(migrated.latestSummary(sessionId)?.sourceLosses, []);
   } finally { await migrated.close(); }
@@ -424,11 +424,11 @@ test('schema v5 migration preserves existing summary jobs and initializes durabl
   const id = store.listSummaryJobs(sessionId)[0].id;
   await store.close();
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
-  db.exec('ALTER TABLE summary_jobs DROP COLUMN budget_deferrals; ALTER TABLE session_summaries DROP COLUMN source_losses_json; DROP TABLE summary_recovery_clocks; DELETE FROM schema_migrations WHERE version>=6;');
+  db.exec('DROP TABLE device_guest_locks; ALTER TABLE clients DROP COLUMN access_epoch; ALTER TABLE summary_jobs DROP COLUMN budget_deferrals; ALTER TABLE session_summaries DROP COLUMN source_losses_json; DROP TABLE summary_recovery_clocks; DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version>=6;');
   db.close();
   const migrated = await ConversationStore.create(root);
   try {
-    assert.equal(migrated.health().schemaVersion, 9);
+    assert.equal(migrated.health().schemaVersion, 12);
     assert.equal(migrated.listSummaryJobs(sessionId)[0].id, id);
     assert.equal(migrated.listMessages(sessionId).length, 6);
     migrated.claimNextSummaryJob(1001); migrated.deferSummaryJob(id, 1002, 'budget');

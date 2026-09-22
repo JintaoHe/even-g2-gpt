@@ -28,6 +28,11 @@ export function calendarPanel(root, send) {
   root.append(heading, note, health, probe, status, refresh, selection, editor, create, update, cancel, list);
   root.hidden = true;
   return event => {
+    if (event.type === 'access.changed' || event.type === 'transport.cleared') {
+      selected = undefined; editor.value = ''; status.textContent = ''; health.textContent = '';
+      selection.textContent = ''; list.replaceChildren(); root.hidden = true;
+      update.disabled = cancel.disabled = true; return;
+    }
     if (event.type === 'ready') { root.hidden = !event.capabilities?.calendar; if (!root.hidden) send({ type: 'calendar.list' }); }
     if (event.type === 'calendar.health') {
       const h = event.health;

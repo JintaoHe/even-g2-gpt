@@ -19,7 +19,7 @@ test('browser reference client uses v2 resume, stable message ids and duplicate-
     socket: () => { const socket = new Socket(); sockets.push(socket); return socket; }, onEvent() {}, uuid, random: () => 0.5,
     now: () => 100, setTimer: (callback: () => void) => { timers.push(callback); return timers.length; }, clearTimer() {} });
   assert.equal(client.connect('t'.repeat(32)), true); sockets[0].open(); assert.equal(sockets[0].sent[0].protocol_version, 2);
-  assert.deepEqual(sockets[0].sent[0].client_capabilities, { location: false });
+  assert.deepEqual(sockets[0].sent[0].client_capabilities, { location: false, guest_mode: true });
   sockets[0].message({ type: 'ready', protocol_version: 2, connection_id: uuid(), session_id: uuid(), resumed: false,
     latest_sequence: 0, resume_window_minutes: 15,
     resume_credential: 'r'.repeat(32), resume_expires_at: 1_000, snapshot: { messages: [] } });
@@ -38,4 +38,28 @@ test('browser reference client uses v2 resume, stable message ids and duplicate-
 test('browser dev controls and reconnect delay are tightly bounded', () => {
   assert.equal(isLoopbackHost('127.0.0.1'), true); assert.equal(isLoopbackHost('calendar.eveng2assistant.com'), false);
   assert.equal(browserReconnectDelay(0, () => 0), 400); assert.equal(browserReconnectDelay(99, () => 1), 30_000);
+});
+
+test('browser guest switching uses restricted device storage and fresh unlock never auto-reconnects as owner', () => {
+  const data = new Map<string,string>(), sockets: Socket[] = [], events: any[] = [];
+  let id = 0; const uuid = () => `${String(++id).padStart(8,'0')}-0000-4000-8000-000000000000`;
+  const client = new BrowserSessionClient({ url: 'ws://test', storage: {
+    getItem: (key: string) => data.get(key) ?? null, setItem: (key: string,value: string) => { data.set(key,value); },
+    removeItem: (key: string) => { data.delete(key); } }, now: () => 100, uuid,
+    socket: () => { const ws = new Socket(); sockets.push(ws); return ws; }, onEvent: (e: any) => events.push(e) });
+  client.connect('private-master-'.repeat(4)); const first = sockets[0]; first.open();
+  first.message({ type: 'ready', protocol_version: 2, session_id: uuid(), connection_id: uuid(),
+    resume_credential: 'r'.repeat(32), resume_expires_at: 1000,
+    device_credential_id: uuid(), device_credential: 'd'.repeat(32), device_expires_at: 2000 });
+  assert.equal(first.sent.at(-1).type, 'credential.persisted');
+  client.send({ type: 'text.submit', text: 'private unsent copy' });
+  first.message({ type: 'access.changed', mode: 'guest', reconnect: true });
+  first.message({ type: 'answer.delta', text: 'LATE_OWNER_DATA' });
+  assert.equal(client.repeatLastSubmission(), false); assert.equal(client.credential(), undefined);
+  const second = sockets[1]; second.open(); assert.equal(second.sent[0].device_credential, 'd'.repeat(32));
+  assert.equal(second.sent[0].token, undefined); assert.equal(events.some(e => e.text === 'LATE_OWNER_DATA'), false);
+  second.message({ type: 'access.changed', mode: 'reauthorize', reconnect: false });
+  assert.equal(client.deviceCredential(), undefined); assert.equal(client.networkAvailable(), false);
+  assert.equal(client.connect(), false); assert.equal(sockets.length, 2);
+  assert.equal(JSON.stringify([...data]).includes('private-master'), false); client.dispose();
 });

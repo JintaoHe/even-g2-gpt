@@ -29,7 +29,7 @@ export class HybridDialogue implements DialogueModel {
 }
 
 export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = process.env,
-  overrides: { endpoint?: string; quota?: SearchBudget; search?: boolean; fetcher?: typeof fetch } = {}) {
+  overrides: { endpoint?: string; quota?: SearchBudget; search?: boolean; fetcher?: typeof fetch; extraInstructions?: string } = {}) {
   const intentModel = env.OPENAI_INTENT_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
   // Retain explicit/legacy overrides; Luna is the evaluated default for both roles.
   const replyModel = env.OPENAI_REPLY_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
@@ -68,6 +68,7 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
         environment: env.GOOGLE_ENVIRONMENT_ENABLED === 'true'
       },
       extraInstructions: "Your name is Even, not the user's name. Preserve Even, G2, R1 and project names as proper nouns; never translate the assistant name Even as 甚至. Follow explicit requested output language."
+        + (overrides.extraInstructions ? '\n' + overrides.extraInstructions : '')
     });
   return { model: new HybridDialogue(intent, reply), models: { intent: intentModel, reply: replyModel } };
 }

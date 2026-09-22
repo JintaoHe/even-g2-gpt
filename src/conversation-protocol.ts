@@ -57,9 +57,9 @@ export type HelloMessageV2 = {
   resume_session_id?: string;
   resume_credential?: string;
   device_credential?: string;
-  credential_storage?: 'even_host_v1';
+  credential_storage?: 'even_host_v1' | 'browser_v1';
   last_seen_sequence?: number;
-  client_capabilities?: { location: boolean };
+  client_capabilities?: { location: boolean; guest_mode?: boolean };
 };
 
 export type CredentialPersistedMessageV2 = {
@@ -246,12 +246,16 @@ export function parseCoreClientMessage(input: unknown, options: ParseOptions = {
     };
     if (value.client_capabilities !== undefined) {
       const capabilities = record(value.client_capabilities);
-      exactKeys(capabilities, ['location']);
+      exactKeys(capabilities, ['location', 'guest_mode']);
       if (typeof capabilities.location !== 'boolean') invalid();
       result.client_capabilities = { location: capabilities.location };
+      if (capabilities.guest_mode !== undefined) {
+        if (typeof capabilities.guest_mode !== 'boolean') invalid();
+        result.client_capabilities.guest_mode = capabilities.guest_mode;
+      }
     }
     if (value.credential_storage !== undefined) {
-      if (value.credential_storage !== 'even_host_v1') invalid();
+      if (value.credential_storage !== 'even_host_v1' && value.credential_storage !== 'browser_v1') invalid();
       result.credential_storage = value.credential_storage;
     }
     if (tokenPresent) result.token = credential(value.token);
@@ -262,7 +266,7 @@ export function parseCoreClientMessage(input: unknown, options: ParseOptions = {
     }
     if (devicePresent) {
       if (result.resume_session_id || value.last_seen_sequence !== undefined
-        || value.credential_storage !== 'even_host_v1') invalid();
+        || !['even_host_v1', 'browser_v1'].includes(String(value.credential_storage))) invalid();
       result.device_credential = credential(value.device_credential);
     }
     if (value.last_seen_sequence !== undefined) {

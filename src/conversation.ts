@@ -490,7 +490,13 @@ export class Conversation {
       this.status('listening');
     } catch (error) {
       if (!current()) return;
-      this.cancel(); this.status('paused'); this.emit({ type: 'error',
+      this.cancel(); this.status('paused');
+      if (error instanceof Error && error.message === 'GUEST_RUNTIME_BUSY') {
+        this.emit({ type: 'notice', code: 'GUEST_RUNTIME_BUSY',
+          text: '上一条请求仍在处理，请稍候再试。这次没有重复执行。' });
+        return;
+      }
+      this.emit({ type: 'error',
         code: error instanceof ConversationPersistenceError ? 'SAVE_FAILED' : 'MODEL_FAILED' });
     }
   }

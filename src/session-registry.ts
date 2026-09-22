@@ -56,6 +56,8 @@ export type SessionBinding<Event> = {
 export type ResumeLeaseOptions = {
   clientId: string;
   allowTakeover?: boolean;
+  /** Read-only scope gate, run inside the mutation queue before hydration. */
+  validateAccess?: () => void;
 };
 
 export type SessionRegistryOptions<Event> = {
@@ -110,6 +112,7 @@ export class SessionRegistry<Event = unknown> {
     return this.serial(async () => {
       this.ensureOpen();
       this.validateIds(connectionId, sessionId);
+      lease?.validateAccess?.();
       let entry = this.entries.get(sessionId);
       if (!entry) {
         const hydrated = await this.options.hydrate?.(sessionId);
@@ -165,6 +168,45 @@ export class SessionRegistry<Event = unknown> {
       entry.runtime.replaceEventSink(undefined);
       await entry.runtime.detach('connection_detached');
       return sessionId;
+    });
+  }
+
+  /** A verified device may attach only the guest session selected by its durable
+   * lock. Selection and final validation run under the single input lease queue. */
+  attachGuest(connectionId: string, clientId: string, sink: SessionEventSink<Event>,
+    select: () => string, validate: () => void): Promise<SessionBinding<Event>> {
+    return this.serial(async () => {
+      this.ensureOpen();
+      const sessionId = select(); this.validateIds(connectionId, sessionId);
+      let entry = this.entries.get(sessionId);
+      const replacedConnectionId = entry?.connectionId;
+      if (replacedConnectionId && replacedConnectionId !== connectionId) {
+        if (entry!.clientId !== clientId || this.activeInputConnection !== replacedConnectionId) throw new ActiveInputLeaseError();
+        validate();
+        this.connections.delete(replacedConnectionId);
+        this.activeInputConnection = undefined;
+        entry!.connectionId = undefined;
+        entry!.detachedAt = this.now();
+        entry!.runtime.replaceEventSink(undefined);
+        await entry!.runtime.detach('connection_detached');
+      } else this.ensureLeaseAvailable(connectionId);
+      if (entry && this.isExpired(entry)) { await this.expireEntry(sessionId, entry); entry = undefined; }
+      // Expiry may have terminalized the old guest session. Selection rebinds it.
+      const selectedId = select();
+      this.validateIds(connectionId, selectedId);
+      entry = this.entries.get(selectedId);
+      const resumed = !!entry;
+      if (!entry) {
+        const runtime = await this.options.create(selectedId);
+        entry = { runtime }; this.entries.set(selectedId, entry);
+      }
+      try { validate(); }
+      catch (error) {
+        if (!resumed) { this.entries.delete(selectedId); await entry.runtime.dispose('shutdown'); }
+        throw error;
+      }
+      this.attach(entry, selectedId, connectionId, sink, clientId);
+      return { sessionId: selectedId, connectionId, runtime: entry.runtime, resumed, replacedConnectionId };
     });
   }
 
