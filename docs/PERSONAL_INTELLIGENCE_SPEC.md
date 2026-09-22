@@ -450,7 +450,13 @@ Even 构建与产物检查、328 文件公开扫描、diff-check 通过。
 
 每单元通过测试再进入下一单元。第一单元查询策略已通过 618 项全量回归（616 通过、2 跳过）。第二单元先实施独立 `installHistoryIndex` 原语，仅在临时数据库调用，未挂接 store 启动迁移：external-content 的源是过滤视图，初始化和 rebuild 共用过滤；消息增删改与父会话删除／作用域变更均同步索引。父会话删除前先删索引，避免 FK 级联时已经读不到父作用域而遗留 token。索引结构完整性用 FTS `integrity-check` 的 rank=1 校验。依据 [SQLite FTS5 官方文档](https://www.sqlite.org/fts5.html#external_content_tables)。
 
-版本化迁移、实际副本升级、存储查询入口的归属校验和工作量限制仍未完成；没有生产部署或实际历史读取，不能将本单元视为 PI-3 可发布。PI-2 的极小预算 summary 挤掉最新 tail 记为非阻塞待办，不混入本单元。
+第二单元后续候选已接入 schema v13：索引创建、过滤回填、完整性检查、时间／作用域索引和迁移记录处于同一事务；失败整体回滚。历史迁移测试降级的是临时夹具，必须同步删除 v13 产物，不能只修改版本号。
+
+存储入口为 `searchMessages(principal,input,now?)` 和 `messageContext(principal,input,now?)`，身份来自服务器、不能取自模型参数。搜索只查同 owner scope、90 天内且不在未来的 committed user/assistant；最多扫描最新 2,000 条候选、4 MiB 内容、返回 10 条且最多三个会话。截到任一边界必须返回 `incomplete`，调用方不得将空结果表述成“从未讨论”。这是应用层行数／内容预算，不是 SQLite VM 的硬超时，性能门禁前不接入对话。每条回传最多 1,200 码点并带 truncated；邻域独立验证锚点归属、状态与时间，每侧最多三条，仍需下一单元统一 2,000 字符注入限制。
+
+当前 Node/SQLite 实测中，FTS rowid 约束绑定 JS number 会返回不符合 rowid 的结果；查询采用 `CAST(? AS INTEGER)` 并再次核对命中 rowid，字面量测试同时含匹配／不匹配消息以防回归。H8 控制字符细分规范化保留为非阻塞待办，尚未改动既定查询策略。
+
+实际副本升级、五万条性能、旧二进制拒绝新 schema／备份恢复演练、对话工具接线仍待完成。**本候选启动会自动升级数据库到 v13，不得对业务库或生产库启动，除非先完成私有副本演练并备份。** 旧代码不允许写 v13；不能将本单元视为 PI-3 可发布。PI-2 的极小预算 summary 挤掉最新 tail 记为非阻塞待办，不混入本单元。
 
 使用实施时的新迁移编号。索引仅 committed 的 user／assistant，不纳入 system 或访客记录。external-content FTS 的内容源与过滤必须一致，可采用专用过滤视图；insert／update／delete 触发器同步，初始化使用同样的过滤条件，不用无条件 rebuild 导入所有消息。
 

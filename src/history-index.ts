@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-/** Index installation primitive for the future versioned store migration.
- * Not called on service startup yet. The migration MUST own the transaction.
+/** Index installation primitive for schema v13.
+ * The store migration owns the transaction.
  * Source and rebuild share the same filtered view, so neither imports guests.
  * See https://www.sqlite.org/fts5.html#external_content_tables */
 export function installHistoryIndex(db: DatabaseSync): void {

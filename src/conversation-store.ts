@@ -5,6 +5,9 @@ import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextSummary } from './context-builder.js';
 import type { PriorSessionContext } from './prior-session-context.js';
+import { installHistoryIndex } from './history-index.js';
+import { searchStoredMessages, storedMessageContext } from './history-store.js';
+import type { HistorySearchInput } from './history-query.js';
 import { validateContextSummary } from './summary-validation.js';
 import { selectSummaryBatch, mergeSummaryLosses, type SummaryLoss } from './summary-request.js';
 import { parseCalendarRecoveryState, parseDeliveryRecoveryState } from './recovery-drafts.js';
@@ -12,7 +15,7 @@ import { lockedDevicePrincipal, requireGuestAccess, type AccessPrincipal, type D
 import { presentation, type Document } from './document-presentation.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 const MAX_RECOVERY_DRAFT_BYTES = 256 * 1024;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const MAX_DEVICE_CREDENTIAL_MS = 366 * 24 * 60 * 60_000;
@@ -656,6 +659,12 @@ export class ConversationStore {
         CREATE INDEX guest_drafts_session_idx ON guest_drafts(session_id,created_at);`);
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (12,?,?)')
           .run('session-scoped-guest-drafts', Date.now());
+      }
+      if (latest < 13) {
+        installHistoryIndex(db);
+        db.exec('CREATE INDEX messages_history_time_idx ON messages(created_at DESC,id); CREATE INDEX sessions_history_owner_idx ON sessions(owner_scope,id)');
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (13,?,?)')
+          .run('filtered-history-search', Date.now());
       }
     });
   }
@@ -1532,6 +1541,16 @@ export class ConversationStore {
     return (this.db.prepare(`SELECT * FROM messages WHERE session_id=? AND sequence>? AND sequence<=?
       AND status='committed' ORDER BY sequence LIMIT ?`).all(sessionId, afterSequence, throughSequence, limit) as any[])
       .map(messageRecord);
+  }
+
+  searchMessages(principal: AccessPrincipal, input: HistorySearchInput, now = Date.now()) {
+    this.ensureOpen();
+    return searchStoredMessages(this.db, principal, input, now);
+  }
+
+  messageContext(principal: AccessPrincipal, input: { messageId: string; before?: number; after?: number }, now = Date.now()) {
+    this.ensureOpen();
+    return storedMessageContext(this.db, principal, input, now);
   }
 
   /** Owner-only, read-only prior selection. SQL bounds reads before materializing

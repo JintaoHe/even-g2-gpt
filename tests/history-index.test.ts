@@ -109,7 +109,7 @@ test('real store writes and restart preserve filtered external-content integrity
   let store = await ConversationStore.create(root);
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
   try {
-    db.exec('BEGIN IMMEDIATE'); installHistoryIndex(db); db.exec('COMMIT');
+    assert.equal(store.health().schemaVersion, 13);
     const sessionId = randomUUID(), topicId = randomUUID(), turnId = randomUUID(), answerId = randomUUID();
     store.createSession({ id: sessionId, ownerScope: 'single-user', createdAt: 100, initialTopic: { id: topicId, label: 'Repairs' } });
     store.commitUserTurn({ sessionId, topicId, turnId, messageId: randomUUID(), content: '换滤芯的讨论', createdAt: 101 });
