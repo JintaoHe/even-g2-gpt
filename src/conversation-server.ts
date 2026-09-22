@@ -66,6 +66,8 @@ export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
   conversationStore?: ConversationStore;
+  /** Compatibility only; absent legacy versions require explicit opt-in. */
+  legacyHelloEnabled?: boolean;
   guestRuntimes?: GuestRuntimePool;
   storageWarningBytes?: { databaseWarningBytes: number; diskFreeWarningBytes: number };
   sessionSummary?: SessionSummaryService;
@@ -622,6 +624,7 @@ export function createConversationServer(options: {
       const startedAt = Date.now();
       if (msg?.type !== 'hello') throw new Error('Auth');
       protocolV2 = msg.protocol_version === CONVERSATION_PROTOCOL_VERSION;
+      if (!protocolV2 && (msg.protocol_version !== undefined || options.legacyHelloEnabled !== true)) throw new Error('Auth');
       if (protocolV2) msg = parseCoreClientMessage(msg);
       guestSupported = protocolV2 && msg.client_capabilities?.guest_mode === true;
       if (protocolV2 && !store) throw new SessionUnavailableError();
@@ -1152,6 +1155,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
+    legacyHelloEnabled: startup.legacyHelloEnabled,
     guestRuntimes: process.env.EVEN_GUEST_MODE_ENABLED === 'true'
       ? createGuestRuntimePool(conversationStore, process.env, openaiFetch, routeProvider) : undefined,
     conversationStore,

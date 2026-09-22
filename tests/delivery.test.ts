@@ -407,7 +407,7 @@ test('WebSocket conversation prepares a draft, requires a separate turn and send
   const root = await mkdtemp(join(tmpdir(), 'even-delivery-ws-')), jobs = await JobStore.create(root);
   let action: DeliveryAction = 'document', sends = 0;
   const token = 'synthetic-token-'.repeat(4);
-  const app = createConversationServer({ token, jobs, draftGenerator: async () => draft,
+  const app = createConversationServer({ legacyHelloEnabled: true, token, jobs, draftGenerator: async () => draft,
     mail: async () => { sends++; return 'accepted'; },
     model: { plan: async () => ({ decision: 'respond', deliveryAction: action }), decide: async () => 'respond', reply: async () => {} },
     transcriber: () => { throw Error('Unused'); } });

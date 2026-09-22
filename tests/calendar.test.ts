@@ -92,7 +92,7 @@ test('ICS download fallback requires authentication and matches email attachment
   const job = jobs.enqueue([{ role: 'user', content: 'Synthetic event' }], event);
   for (let n = 0; n < 200 && jobs.get(job.id)?.state !== 'completed'; n++) await new Promise(r => setTimeout(r, 5));
   const token = 'calendar-download-token-'.repeat(3);
-  const app = createConversationServer({ token, jobs, model: { decide: async () => 'respond', reply: async () => {} }, transcriber: () => { throw Error('Unused'); } });
+  const app = createConversationServer({ legacyHelloEnabled: true, token, jobs, model: { decide: async () => 'respond', reply: async () => {} }, transcriber: () => { throw Error('Unused'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
   const url = `http://127.0.0.1:${(app.http.address() as { port: number }).port}/artifacts/${job.id}/calendar`;
   try {

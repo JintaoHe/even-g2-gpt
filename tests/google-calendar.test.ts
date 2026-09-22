@@ -236,7 +236,7 @@ test('transport refreshes server-side, caches token, fixes calendar and redacts 
 });
 test('authenticated browser protocol advertises calendar and requires a separate confirmed preview', async t => {
   const f = await fixture(t), token = 'synthetic-test-token-'.repeat(3);
-  const app = createConversationServer({ token, calendar: f.service,
+  const app = createConversationServer({ legacyHelloEnabled: true, token, calendar: f.service,
     model: { async decide() { return 'respond'; }, async reply(_history, _signal, delta) { delta('ok'); } },
     transcriber: () => { throw Error('not used'); } });
   app.http.listen(0, '127.0.0.1'); await once(app.http, 'listening');
