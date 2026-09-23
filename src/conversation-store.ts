@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextSummary } from './context-builder.js';
 import type { PriorSessionContext } from './prior-session-context.js';
-import { installHistoryIndex } from './history-index.js';
+import { installHistoryIndex, repairHistoryScopeIndex } from './history-index.js';
 import { searchStoredMessages, storedMessageContext } from './history-store.js';
 import type { HistorySearchInput } from './history-query.js';
 import { validateContextSummary } from './summary-validation.js';
@@ -15,7 +15,7 @@ import { lockedDevicePrincipal, requireGuestAccess, type AccessPrincipal, type D
 import { presentation, type Document } from './document-presentation.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 const MAX_RECOVERY_DRAFT_BYTES = 256 * 1024;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const MAX_DEVICE_CREDENTIAL_MS = 366 * 24 * 60 * 60_000;
@@ -665,6 +665,12 @@ export class ConversationStore {
         db.exec('CREATE INDEX messages_history_time_idx ON messages(created_at DESC,id); CREATE INDEX sessions_history_owner_idx ON sessions(owner_scope,id)');
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (13,?,?)')
           .run('filtered-history-search', Date.now());
+      }
+      if (latest < 14) {
+        // Fresh installs already used the corrected source; existing v13 needs backfill.
+        if (latest >= 13) repairHistoryScopeIndex(db);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (14,?,?)')
+          .run('exact-owner-history-scope', Date.now());
       }
     });
   }

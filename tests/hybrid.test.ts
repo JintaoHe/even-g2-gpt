@@ -15,7 +15,7 @@ test('hybrid routes intent without tools to mini and reply/search to nano; rollb
         ? { decision: 'respond', reasoning_effort: 'low', cognitive_mode: 'research', search_action: 'search',
           topic_action: 'continue', topic_target: null, topic_label: 'test' }
         : { decision: 'respond', search_action: 'search' };
-      res.end(JSON.stringify({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify(classification) }] }] }));
+      res.end(JSON.stringify({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ...classification, history_query: null }) }] }] }));
     }
     else res.end('data: {"type":"response.output_text.delta","delta":"hello"}\n\ndata: {"type":"response.completed","response":{"output":[]}}\n\n');
   });
@@ -32,7 +32,7 @@ test('hybrid routes intent without tools to mini and reply/search to nano; rollb
     let answer = ''; await model.reply(history, signal, text => { answer += text; });
     assert.equal(answer, 'hello'); assert.equal(settled, 0);
     assert.equal(bodies[0].model, 'gpt-4.1-mini'); assert.equal(bodies[0].tools, undefined);
-    assert.equal(bodies[0].reasoning, undefined); assert.equal(bodies[0].max_output_tokens, 128);
+    assert.equal(bodies[0].reasoning, undefined); assert.equal(bodies[0].max_output_tokens, 512);
     assert.equal(bodies[1].model, 'gpt-5-nano'); assert.deepEqual(bodies[1].reasoning, { effort: 'low' });
     assert.equal(bodies[1].max_output_tokens, 3072); assert.equal(bodies[1].max_tool_calls, 1);
     assert.equal(bodies[1].tool_choice, 'auto'); assert.match(bodies[1].instructions, /Your name is Even/);

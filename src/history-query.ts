@@ -14,6 +14,11 @@ export type PreparedHistoryQuery = Readonly<{
   kind: 'like' | 'fts'; parameter: string;
 }>;
 
+/** Default on for owners; malformed configuration fails closed. */
+export function historyRecallEnabled(env: NodeJS.ProcessEnv): boolean {
+  return env.EVEN_HISTORY_RECALL_ENABLED === undefined || env.EVEN_HISTORY_RECALL_ENABLED === 'true';
+}
+
 function invalid(): never { throw new Error('HISTORY_QUERY_INVALID'); }
 function time(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -31,8 +36,11 @@ export function prepareHistoryQuery(principal: AccessPrincipal, input: HistorySe
   requireGuestAccess(principal, 'history_search');
   if (!time(now) || !input || typeof input !== 'object' || Array.isArray(input)
     || typeof input.query !== 'string' || input.query.length > HISTORY_QUERY_LIMITS.queryCodePoints * 2) invalid();
+  // Check before trim: BOM/newline at the edges must not evade the policy.
+  // Literal search: no NFKC rewriting or invisible-character deletion.
+  if (!wellFormed(input.query) || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(input.query)) invalid();
   const query = input.query.trim();
-  if (!query || !wellFormed(query) || /[\u0000-\u001f\u007f]/u.test(query)
+  if (!query
     || Array.from(query).length > HISTORY_QUERY_LIMITS.queryCodePoints) invalid();
   const earliest = Math.max(0, now - HISTORY_QUERY_LIMITS.windowMs);
   const sinceMs = input.sinceMs === undefined ? earliest : input.sinceMs;

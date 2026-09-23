@@ -151,12 +151,14 @@ test('production assembly is API-only, uses supplied fetch, exposes only public 
     }) }] }] });
   };
   const pool = createGuestRuntimePool(store, { OPENAI_API_KEY: 'test-only', DIALOGUE_PROVIDER: 'codex-cli',
-    CODEX_CLI_PATH: 'must-never-execute', EVEN_DATA_DIR: root, GOOGLE_CALENDAR_ENABLED: 'true', EVEN_EMAIL_ENABLED: 'true' }, request);
+    CODEX_CLI_PATH: 'must-never-execute', EVEN_DATA_DIR: root, GOOGLE_CALENDAR_ENABLED: 'true', EVEN_EMAIL_ENABLED: 'true',
+    EVEN_HISTORY_RECALL_ENABLED: 'true' }, request);
   t.after(() => pool.close());
   const r = pool.acquireAuthenticated(a.clientId, a.principal), s = signal(); r.model.startSession?.();
   const plan = await r.model.plan!([], '查公共博物馆开放日', false, s);
   await r.model.reply([], s, () => {}, undefined, plan.reasoningEffort, plan.cognitiveMode, [{ kind: 'search', action: 'read' }]);
   assert.equal(bodies.length, 2); assert.equal(bodies[0].tools, undefined);
+  assert.equal(bodies[0].text.format.schema.properties.history_query, undefined);
   assert.match(bodies[1].instructions, /You are in guest mode/);
   assert.match(bodies[1].instructions, /Email sending: disabled/);
   assert.match(bodies[1].instructions, /Google Calendar read\/create\/update\/cancel: disabled/);

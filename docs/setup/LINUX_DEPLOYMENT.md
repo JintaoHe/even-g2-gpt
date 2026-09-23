@@ -391,3 +391,9 @@ sudo ss -lntp | grep 127.0.0.1:3001
 | Google 连接失败 | 先运行只读检查；核对 OAuth 文件权限和 Production 授权，不打印 token |
 | 邮件失败 | 只做 SMTP `verify()`；核对 465/587 与 `SMTP_SECURE` 配对，不开放入站 SMTP |
 | 换电脑无法维护 | 使用云控制台恢复、备份 SSH 私钥或 Tailscale；不要把私钥提交 Git |
+
+## PI-3 历史检索部署注意
+
+PR #59 补强后，主人历史检索在 `EVEN_HISTORY_RECALL_ENABLED` 未设置时默认开启；访客始终关闭。Linux 部署前必须显式设置 `EVEN_HISTORY_RECALL_ENABLED=false`，直到当次数据库副本迁移演练及同步查询对语音主循环的 p95 影响评估通过，再单独批准开启。不要直接沿用 `.env.example` 的 `true` 作为生产验收结论。
+
+schema v14 会修复 v13 的历史索引作用域过滤并重建索引。部署前保留一致性备份，在副本验证数据、索引完整性和耗时；旧代码拒绝写入 v14，回滚必须恢复升级前备份。

@@ -1,5 +1,6 @@
 import type { AssistantMode, DialogueModel, Message, ReplyUpdate, ReasoningEffort, RoutePlaceOption, RouteClarificationPolicy, TurnPlan, WorkflowSelection } from './conversation.js';
 import { OpenAIDialogue } from './dialogue-model.js';
+import { historyRecallEnabled } from './history-query.js';
 import { SearchQuota, type SearchBudget } from './search-quota.js';
 import { join } from 'node:path';
 
@@ -49,7 +50,7 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
   const intent = new OpenAIDialogue(key, intentModel, overrides.endpoint, false, cap, timezone, undefined,
     { ...(nano(intentModel) ? { reasoningEffort: 'low' as const, intentTokens: 2048 }
       : luna(intentModel) ? { reasoningEffort: 'medium' as const, intentTokens: 1024, adaptiveReasoning: luna(replyModel) } : {}),
-      historyRouting: env.EVEN_HISTORY_RECALL_ENABLED === 'true',
+      historyRouting: historyRecallEnabled(env),
       deliveryRouting: env.EVEN_DELIVERY_ROUTING === 'true', calendarRouting: env.GOOGLE_CALENDAR_ENABLED === 'true',
       fetcher: overrides.fetcher,
       locationRouting: env.GOOGLE_MAPS_ENABLED === 'true',

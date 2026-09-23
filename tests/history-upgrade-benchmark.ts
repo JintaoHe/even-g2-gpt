@@ -56,7 +56,7 @@ await backup(saved, join(migratedRoot, name)); await backup(saved, join(restored
 const beforeBytes = (await stat(join(migratedRoot, name))).size;
 const start = performance.now(), store = await ConversationStore.create(migratedRoot), migrationMs = performance.now() - start;
 const db = new DatabaseSync(join(migratedRoot, name));
-assert.equal(store.health().schemaVersion, 13); assert.deepEqual(fingerprint(db), original);
+assert.equal(store.health().schemaVersion, 14); assert.deepEqual(fingerprint(db), original);
 assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
 db.exec("INSERT INTO history_search_fts(history_search_fts,rank) VALUES('integrity-check',1)");
 db.exec('PRAGMA wal_checkpoint(TRUNCATE)');

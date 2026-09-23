@@ -38,7 +38,8 @@ test(`WS recall ${mode}: no historical authorization, persistence or guest looku
   if (mode === 'guest') store.enterDeviceGuestMode({ clientId, at: now });
   const search = store.searchMessages.bind(store);
   store.searchMessages = (...args) => { reads++; if (mode === 'failed') throw Error('synthetic failure'); return search(...args); };
-  const app = createConversationServer({ token, model, conversationStore: store, historyRecallEnabled: mode !== 'disabled',
+  const app = createConversationServer({ token, model, conversationStore: store,
+    ...(mode === 'disabled' ? { historyRecallEnabled: false } : {}),
     guestRuntimes: pool, jobs, draftGenerator: async () => { throw Error('No draft'); },
     mail: async () => { sends++; return 'accepted'; }, transcriber: () => { throw Error('No audio'); } });
   const sockets: WebSocket[] = [];

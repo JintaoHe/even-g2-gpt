@@ -73,7 +73,7 @@ const sourceCheck = new DatabaseSync(sourcePath, { readOnly: true } as any);
 try { assert.equal((sourceCheck.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as any).v, expectedVersion); }
 finally { sourceCheck.close(); }
 console.log(JSON.stringify({ type: 'history_private_upgrade', sourceOpenedReadOnly: true, sourceVersion: originalVersion,
-  migratedVersion: 13, migrationMs, beforeBytes, afterBytes, growthBytes: afterBytes - beforeBytes,
+  migratedVersion: 14, migrationMs, beforeBytes, afterBytes, growthBytes: afterBytes - beforeBytes,
   counts: original.counts, dataPreserved: true, foreignKeysValid: true, ftsIntegrity: true,
   oldCodeRejectsNewSchema: true, backupVerifiedBeforeRecovery: true, oldCodeWritesRestoredCopy: true,
   apiCalls: 0, privateCopiesRetainedAt: root }));

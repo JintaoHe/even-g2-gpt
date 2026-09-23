@@ -11,5 +11,5 @@ DROP TABLE IF EXISTS history_search_fts;
 DROP VIEW IF EXISTS history_search_source;
 DROP INDEX IF EXISTS messages_history_time_idx;
 DROP INDEX IF EXISTS sessions_history_owner_idx;
-DELETE FROM schema_migrations WHERE version=13;
+DELETE FROM schema_migrations WHERE version>=13;
 `;

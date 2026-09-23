@@ -11,7 +11,7 @@ test('adaptive conversation uses one classification and one reply, validates lev
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw); bodies.push(body);
-    if (!body.stream) res.end(JSON.stringify({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify(classification) }] }] }));
+    if (!body.stream) res.end(JSON.stringify({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ...classification, history_query: null }) }] }] }));
     else res.end('data: {"type":"response.output_text.delta","delta":"ok"}\n\ndata: {"type":"response.completed","response":{"output":[]}}\n\n');
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -30,7 +30,7 @@ test('adaptive conversation uses one classification and one reply, validates lev
       const [intent, reply] = bodies.slice(-2);
       assert.deepEqual(intent.reasoning, { effort: 'medium' });
       assert.deepEqual(intent.text.format.schema.required,
-        ['decision', 'reasoning_effort', 'cognitive_mode', 'topic_action', 'topic_target', 'topic_label']);
+        ['decision', 'reasoning_effort', 'cognitive_mode', 'topic_action', 'topic_target', 'topic_label', 'history_query']);
       assert.match(intent.instructions, /Quoted, negated/);
       assert.match(intent.instructions, /exceptionally difficult multi-stage reasoning/);
       assert.match(reply.instructions, /warm, capable personal assistant/);
@@ -53,7 +53,7 @@ test('adaptive conversation uses one classification and one reply, validates lev
     classification = { decision: 'respond' };
     await new Conversation(rollback.model, () => {}).submit('test');
     assert.equal(bodies.at(-1).reasoning, undefined);
-    assert.deepEqual(bodies.at(-2).text.format.schema.required, ['decision']);
+    assert.deepEqual(bodies.at(-2).text.format.schema.required, ['decision', 'history_query']);
     assert.equal(safeReasoning(null), 'low');
   } finally { await new Promise<void>(r => server.close(() => r())); }
 });

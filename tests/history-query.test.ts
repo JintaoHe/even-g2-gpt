@@ -2,10 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { prepareHistoryQuery, prepareHistoryContext, HISTORY_QUERY_LIMITS } from '../src/history-query.js';
+import { prepareHistoryQuery, prepareHistoryContext, HISTORY_QUERY_LIMITS, historyRecallEnabled } from '../src/history-query.js';
 
 const owner = { mode: 'owner' as const, ownerScope: 'single-user' }, now = 2_000_000_000_000;
 const search = (query: string) => prepareHistoryQuery(owner, { query }, now);
+
+test('owner recall defaults on, explicit false and malformed configuration disable it', () => {
+  assert.equal(historyRecallEnabled({}), true);
+  assert.equal(historyRecallEnabled({ EVEN_HISTORY_RECALL_ENABLED: 'true' }), true);
+  for (const value of ['false', '', 'TRUE', '1', ' true ', 'garbage'])
+    assert.equal(historyRecallEnabled({ EVEN_HISTORY_RECALL_ENABLED: value }), false);
+});
+
+test('H8 rejects control/format/separator characters before trimming without rewriting literals', () => {
+  const denied = [0, 9, 10, 31, 127, 128, 133, 159, 0xad, 0x61c, 0x200b, 0x200c, 0x200d,
+    0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2060, 0x2066, 0x2069, 0xfeff, 0xe0001];
+  for (const code of denied) for (const text of [String.fromCodePoint(code) + 'abc', 'a' + String.fromCodePoint(code) + 'bc', 'abc' + String.fromCodePoint(code)])
+    assert.throws(() => search(text), /HISTORY_QUERY_INVALID/, `U+${code.toString(16)}`);
+  for (const text of ['生日', 'café', 'e\u0301', 'ＡＢＣ', '🚲🚲🚲', '❤️', 'a b'])
+    assert.equal(search(text).query, text);
+});
 
 test('history query defaults and exact time/limit boundaries are bounded', () => {
   const result = search('咖啡采购');

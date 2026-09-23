@@ -36,6 +36,7 @@ import { readConversationStartupConfig } from './conversation-startup-config.js'
 import { StoreConversationPersistence } from './conversation-persistence.js';
 import { ContextBuilder } from './context-builder.js';
 import { recallHistory as readHistoryRecall } from './history-recall.js';
+import { historyRecallEnabled } from './history-query.js';
 import { OpenAISessionSummaryGenerator, SessionSummaryService } from './session-summary.js';
 import { ActiveInputLeaseError, SessionRegistry, SessionUnavailableError,
   type ManagedSessionRuntime, type SessionDisposeReason, type SessionInterruptReason } from './session-registry.js';
@@ -67,7 +68,7 @@ export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
   conversationStore?: ConversationStore;
-  /** Experimental: synchronous history queries remain disabled until deployment acceptance. */
+  /** Owner default on; deployment must explicitly disable pending latency acceptance. */
   historyRecallEnabled?: boolean;
   /** Compatibility only; absent legacy versions require explicit opt-in. */
   legacyHelloEnabled?: boolean;
@@ -385,7 +386,7 @@ export function createConversationServer(options: {
       send(event);
     }, store ? undefined : history => options.save?.(id, history) ?? Promise.resolve(), store && initialTopic ? {
       sessionId: id,
-      ...(options.historyRecallEnabled === true ? { recallHistory: async (query: string, signal: AbortSignal) =>
+      ...(options.historyRecallEnabled !== false ? { recallHistory: async (query: string, signal: AbortSignal) =>
         readHistoryRecall(store, { mode: 'owner', ownerScope: options.ownerScope ?? 'single-user' }, query, signal) } : {}),
       persistence: new StoreConversationPersistence(store, id),
       initialTopic: { id: initialTopic.id, label: initialTopic.label },
@@ -1162,7 +1163,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
-    historyRecallEnabled: process.env.EVEN_HISTORY_RECALL_ENABLED === 'true',
+    historyRecallEnabled: historyRecallEnabled(process.env),
     legacyHelloEnabled: startup.legacyHelloEnabled,
     guestRuntimes: process.env.EVEN_GUEST_MODE_ENABLED === 'true'
       ? createGuestRuntimePool(conversationStore, process.env, openaiFetch, routeProvider) : undefined,

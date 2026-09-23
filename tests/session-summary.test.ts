@@ -53,7 +53,7 @@ test('v9 recovery-clock migration rolls back, preserves tasks and reopens idempo
   } finally { db.close(); }
   for (let i = 0; i < 2; i++) {
     const reopened = await ConversationStore.create(root);
-    try { assert.deepEqual(reopened.listSummaryJobs(sessionId), before); assert.equal(reopened.health().schemaVersion, 13); }
+    try { assert.deepEqual(reopened.listSummaryJobs(sessionId), before); assert.equal(reopened.health().schemaVersion, 14); }
     finally { await reopened.close(); }
   }
 });
@@ -156,7 +156,7 @@ test('v8 migration preserves v7 tasks, anchors terminal baseline, rolls back ato
     try {
       assert.deepEqual(reopened.listSummaryJobs(sessionId), [{ ...job, status: 'failed', attempts: 1, updatedAt: 1002, errorCode: 'SUMMARY_GAVE_UP' }]);
       assert.equal(reopened.scheduleActiveSummary(sessionId, 60, 24, 20, 3000), undefined);
-      assert.equal(reopened.health().schemaVersion, 13);
+      assert.equal(reopened.health().schemaVersion, 14);
     } finally { await reopened.close(); }
   }
 });
@@ -396,7 +396,7 @@ test('v7 loss metadata migration rolls back atomically and preserves old summari
   } finally { db.close(); }
   const migrated = await ConversationStore.create(root);
   try {
-    assert.equal(migrated.health().schemaVersion, 13);
+    assert.equal(migrated.health().schemaVersion, 14);
     assert.equal(migrated.latestSummary(sessionId)?.throughSequence, 6);
     assert.deepEqual(migrated.latestSummary(sessionId)?.sourceLosses, []);
   } finally { await migrated.close(); }
@@ -433,7 +433,7 @@ test('schema v5 migration preserves existing summary jobs and initializes durabl
   db.close();
   const migrated = await ConversationStore.create(root);
   try {
-    assert.equal(migrated.health().schemaVersion, 13);
+    assert.equal(migrated.health().schemaVersion, 14);
     assert.equal(migrated.listSummaryJobs(sessionId)[0].id, id);
     assert.equal(migrated.listMessages(sessionId).length, 6);
     migrated.claimNextSummaryJob(1001); migrated.deferSummaryJob(id, 1002, 'budget');

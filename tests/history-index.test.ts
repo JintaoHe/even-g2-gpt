@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { ConversationStore } from '../src/conversation-store.js';
 import { installHistoryIndex } from '../src/history-index.js';
 import { prepareHistoryQuery } from '../src/history-query.js';
+import { requireGuestAccess } from '../src/guest-access.js';
 
 function fixture() {
   const db = new DatabaseSync(':memory:');
@@ -27,6 +28,65 @@ function fixture() {
   };
   return { db, put, hits, check, install };
 }
+
+test('A4 index eligibility agrees with owner authorization including guest-prefixed legitimate scopes', () => {
+  const f = fixture();
+  try {
+    f.install();
+    const values = ['guest_room:1', 'Guest-room:2', 'guesthouse:3', 'guest', 'guest:', 'guest:bad',
+      `guest:${randomUUID()}`, `GUEST:${randomUUID()}`, ' guest:abc', 'guest :abc', 'a\u0000b',
+      '', '_owner', 'a.b', 'a@b', '主人', 'a\nb', 'a'.repeat(128), 'a'.repeat(129)];
+    for (const [i, scope] of values.entries()) {
+      let allowed = true; try { requireGuestAccess({ mode: 'owner', ownerScope: scope }, 'history_search'); } catch { allowed = false; }
+      f.db.prepare('INSERT INTO sessions VALUES (?,?)').run(`scope-${i}`, scope);
+      f.put(`message-${i}`, 'owner eligibility', `scope-${i}`);
+      const indexed = f.db.prepare('SELECT 1 FROM history_search_source h JOIN messages m ON m.rowid=h.rowid WHERE m.id=?').get(`message-${i}`);
+      assert.equal(!!indexed, allowed, `scope index ${i}`);
+    }
+    f.check();
+    f.db.exec("UPDATE sessions SET owner_scope='guest:invalid' WHERE id='scope-0'");
+    f.check();
+    f.db.exec("UPDATE sessions SET owner_scope='guest_room:1' WHERE id='scope-0'");
+    f.check(); assert.ok(f.hits('eligibility') >= 3);
+  } finally { f.db.close(); }
+});
+
+test('v13 to v14 repairs omitted owners atomically, preserves messages and rejects newer schemas', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'even-history-v14-'));
+  const store = await ConversationStore.create(root), id = randomUUID(), topicId = randomUUID();
+  store.createSession({ id, ownerScope: 'guest_room:1', createdAt: 100, initialTopic: { id: topicId, label: 'Test' } });
+  store.commitUserTurn({ sessionId: id, topicId, turnId: randomUUID(), messageId: randomUUID(), content: 'quartz lighthouse', createdAt: 101 });
+  await store.close();
+  const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
+  try {
+    // Reproduce actual v13 source SQL, not merely a version-number downgrade.
+    db.exec(`DROP VIEW history_search_source;
+      CREATE VIEW history_search_source AS SELECT m.rowid AS rowid,m.content AS content
+      FROM messages m JOIN sessions s ON s.id=m.session_id
+      WHERE m.status='committed' AND m.role IN ('user','assistant') AND lower(trim(s.owner_scope)) NOT GLOB 'guest*:*';
+      INSERT INTO history_search_fts(history_search_fts) VALUES('rebuild');
+      DELETE FROM schema_migrations WHERE version=14;
+      CREATE TRIGGER fail_v14 BEFORE INSERT ON schema_migrations WHEN NEW.version=14 BEGIN SELECT RAISE(ABORT,'v14 rollback'); END;`);
+    const before = db.prepare('SELECT * FROM messages').all();
+    await assert.rejects(ConversationStore.create(root), /v14 rollback/);
+    assert.match((db.prepare("SELECT sql FROM sqlite_master WHERE name='history_search_source'").get() as { sql: string }).sql, /guest\*:\*/);
+    assert.equal((db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v, 13);
+    assert.deepEqual(db.prepare('SELECT * FROM messages').all(), before);
+    db.exec('DROP TRIGGER fail_v14');
+    for (let i = 0; i < 2; i++) {
+      const current = await ConversationStore.create(root);
+      try {
+        assert.equal(current.health().schemaVersion, 14);
+        assert.equal(current.searchMessages({ mode: 'owner', ownerScope: 'guest_room:1' }, { query: 'quartz' }, 200).messages.length, 1);
+        assert.equal(current.searchMessages({ mode: 'owner', ownerScope: 'guest_room:1' }, { query: 'qu' }, 200).messages.length, 1);
+      } finally { await current.close(); }
+    }
+    assert.deepEqual(db.prepare('SELECT * FROM messages').all(), before);
+    db.exec("INSERT INTO history_search_fts(history_search_fts,rank) VALUES('integrity-check',1)");
+    db.exec("INSERT INTO schema_migrations VALUES(15,'future',0)");
+    await assert.rejects(ConversationStore.create(root), /newer than/);
+  } finally { db.close(); }
+});
 
 test('initial index and safe rebuild exclude guest, system and uncommitted rows', () => {
   const f = fixture();
@@ -109,7 +169,7 @@ test('real store writes and restart preserve filtered external-content integrity
   let store = await ConversationStore.create(root);
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
   try {
-    assert.equal(store.health().schemaVersion, 13);
+    assert.equal(store.health().schemaVersion, 14);
     const sessionId = randomUUID(), topicId = randomUUID(), turnId = randomUUID(), answerId = randomUUID();
     store.createSession({ id: sessionId, ownerScope: 'single-user', createdAt: 100, initialTopic: { id: topicId, label: 'Repairs' } });
     store.commitUserTurn({ sessionId, topicId, turnId, messageId: randomUUID(), content: '换滤芯的讨论', createdAt: 101 });
