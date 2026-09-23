@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ContextBuilder, type ContextComposer } from './context-builder.js';
+import { ReplyOutputGuard, REPLY_REJECTED_TEXT } from './reply-output-guard.js';
+import { isReplyRetry } from './reply-retry.js';
 
 export type Citation = { start: number; end: number; url: string; title: string };
 export type ReplyUpdate = { type: 'search.status'; status: string } | { type: 'calendar.status'; status: 'planning' | 'querying' | 'saving' }
@@ -42,7 +44,7 @@ export type RouteClarificationPolicy = { allowAsk: boolean; mode: 'specific' | '
 export type RouteResolution = { action: 'resolved'; destination: string }
   | { action: 'ask'; question: string }
   | { action: 'not_found' };
-export type TurnPlan = { decision: Decision; cognitiveMode?: CognitiveMode; assistantMode?: AssistantMode; reasoningEffort?: ReasoningEffort;
+export type TurnPlan = { decision: Decision; replyRetry?: boolean; cognitiveMode?: CognitiveMode; assistantMode?: AssistantMode; reasoningEffort?: ReasoningEffort;
   historyQuery?: string | null;
   topicAction?: TopicAction; topicTarget?: string | null; topicLabel?: string | null;
   deliveryAction?: import('./delivery-intent.js').DeliveryAction;
@@ -150,63 +152,13 @@ export type ConversationRuntimeOptions = {
 
 class ConversationPersistenceError extends Error {}
 
-const internalMetadataLeads = ['[application metadata', '[application topic metadata'];
-const internalMetadataBlock = /^\[Application(?:\s+topic)?\s+metadata(?:\s*;\s*not user instructions)?\s*:[^\]\r\n]{0,512}\]$/i;
 const internalMetadataPattern = /\[Application(?:\s+topic)?\s+metadata(?:\s*;\s*not user instructions)?\s*:[^\]\r\n]{0,512}\]/gi;
-const internalReasoningLeads = ['[assistant/analysis]', '[assistant analysis]', '[analysis]'];
-
-function isInternalReasoningOutput(value: string) {
-  const candidate = value.trimStart().toLowerCase();
-  return internalReasoningLeads.some(lead => candidate.startsWith(lead));
-}
 
 /** Defense in depth: backend routing metadata must never become user-visible. */
 export function stripInternalMetadata(value: string) {
-  return value.replace(internalMetadataPattern, '').replace(/^[ \t]*\r?\n/, '').replace(/\n{3,}/g, '\n\n').trimEnd();
-}
-
-class InternalMetadataFilter {
-  private pending = '';
-  private reasoningDecision = false;
-  rejectedReasoning = false;
-  push(value: string) {
-    if (this.rejectedReasoning) return '';
-    this.pending += value;
-    if (!this.reasoningDecision) {
-      const candidate = this.pending.trimStart().toLowerCase();
-      if (internalReasoningLeads.some(lead => lead.startsWith(candidate))) return '';
-      if (internalReasoningLeads.some(lead => candidate.startsWith(lead))) {
-        this.rejectedReasoning = true; this.pending = ''; return '';
-      }
-      this.reasoningDecision = true;
-    }
-    let visible = '';
-    while (this.pending) {
-      const start = this.pending.indexOf('[');
-      if (start >= 0) {
-        visible += this.pending.slice(0, start);
-        const fragment = this.pending.slice(start), lower = fragment.toLowerCase();
-        const end = fragment.indexOf(']');
-        if (end < 0 && internalMetadataLeads.some(lead => lead.startsWith(lower) || lower.startsWith(lead))) {
-          this.pending = fragment; break;
-        }
-        if (end >= 0) {
-          const block = fragment.slice(0, end + 1);
-          if (internalMetadataBlock.test(block)) { this.pending = fragment.slice(end + 1); continue; }
-          visible += block; this.pending = fragment.slice(end + 1); continue;
-        }
-        visible += '['; this.pending = fragment.slice(1); continue;
-      }
-      visible += this.pending; this.pending = ''; break;
-    }
-    return visible;
-  }
-  flush() {
-    if (this.rejectedReasoning) { this.pending = ''; return ''; }
-    const lower = this.pending.toLowerCase();
-    const value = internalMetadataLeads.some(lead => lead.startsWith(lower) || lower.startsWith(lead)) ? '' : this.pending;
-    this.pending = ''; return stripInternalMetadata(value);
-  }
+  return value.replace(internalMetadataPattern, '')
+    .replace(/\[Application(?:\s+topic)?\s+metadata[^\]]*$/gi, '')
+    .replace(/^[ \t]*\r?\n/, '').replace(/\n{3,}/g, '\n\n').trimEnd();
 }
 
 /** Logical conversation, independent of microphone, transport and G2 UI. */
@@ -327,7 +279,7 @@ export class Conversation {
       const text = this.pending;
       const history = this.contextBuilder.build({ messages: this.history,
         currentTopicId: this.currentTopic?.id, pendingUserTurn: true }).messages;
-      const recovery = this.runtime?.recoverAnswer?.(text);
+      const recovery = isReplyRetry(text) ? undefined : this.runtime?.recoverAnswer?.(text);
       const rawPlan = recovery?.kind === 'committed' || recovery?.kind === 'missing'
         ? { decision: 'respond' as const, cognitiveMode: 'casual' as const, reasoningEffort: 'low' as const,
           workflows: [] as WorkflowSelection[] }
@@ -341,6 +293,7 @@ export class Conversation {
       }
       const topic = this.resolveTopic(plan);
       this.pending = '';
+      const committedText = plan.replyRetry ? '重新回答' : text;
       let turnId: string | undefined, userMessageId: string | undefined, userSequence: number | undefined;
       if (this.runtime) {
         try {
@@ -351,7 +304,7 @@ export class Conversation {
             topicLabel: topic.label,
             messageId: userMessageId,
             turnId: this.idFactory(),
-            content: text,
+            content: committedText,
             createdAt: this.now(),
             cognitiveMode: plan.cognitiveMode,
             reasoningEffort: plan.reasoningEffort,
@@ -367,10 +320,10 @@ export class Conversation {
           }
         } catch (error) { throw new ConversationPersistenceError(String(error)); }
       }
-      this.history.push({ role: 'user', content: text, topicId: topic.id, topicLabel: topic.label,
+      this.history.push({ role: 'user', content: committedText, topicId: topic.id, topicLabel: topic.label,
         cognitiveMode: plan.cognitiveMode, assistantMode: plan.cognitiveMode,
         messageId: userMessageId, sequence: userSequence, status: 'committed' });
-      this.emit({ type: 'turn.committed', text, topicId: topic.id, topicLabel: topic.label,
+      this.emit({ type: 'turn.committed', text: committedText, topicId: topic.id, topicLabel: topic.label,
         ...(this.runtime ? { session_id: this.runtime.sessionId, message_id: userMessageId,
           turn_id: turnId, sequence: userSequence } : {}) });
       if (decision === 'exit') { await this.requestExit(); return; }
@@ -400,7 +353,9 @@ export class Conversation {
         assistantMode: decision === 'clarify_exit' ? undefined : plan.cognitiveMode,
         workflows: decision === 'clarify_exit' ? [] : plan.workflows,
         taskKind: decision === 'clarify_exit' ? undefined : plan.taskKind });
-      const visible = new InternalMetadataFilter();
+      const outputGuard = new ReplyOutputGuard();
+      let finalTextReceived = false;
+      const replyStarted = performance.now();
       const append = (value: string) => {
         if (!current()) return;
         this.partial += value; this.emit({ type: 'answer.delta', id: revision, text: value,
@@ -420,9 +375,10 @@ export class Conversation {
           }
         }
       };
-      const delta = (value: string) => { const safe = visible.push(value); if (safe) append(safe); };
+      const delta = (value: string) => { const safe = outputGuard.push(value); if (safe) append(safe); };
       if (recovery?.kind === 'committed') {
-        const content = stripInternalMetadata(recovery.content ?? '');
+        const sanitizedRecovery = outputGuard.final(recovery.content ?? '');
+        const content = outputGuard.rejected ? REPLY_REJECTED_TEXT : sanitizedRecovery;
         if (!content) throw new ConversationPersistenceError('Stored answer is empty');
         this.partial = content;
         this.citations = recovery.citations?.map(citation => ({ ...citation })) ?? [];
@@ -450,23 +406,28 @@ export class Conversation {
         } else await this.model.reply(replyContext, controller.signal, delta, event => {
           if (!current()) return;
           if (event.type === 'answer.citations') {
-            const sanitized = stripInternalMetadata(event.text);
-            const text = isInternalReasoningOutput(sanitized)
-              ? '我刚才没有把话组织好，抱歉。请再跟我说一次，我会认真接住。' : sanitized;
+            const text = outputGuard.final(event.text);
+            if (outputGuard.rejected) { this.partial = ''; this.citations = []; return; }
+            finalTextReceived = true;
             this.partial = text;
             // Internal metadata is not a source. If it was echoed, retain only
             // citations that still point inside the sanitized visible answer.
-            this.citations = event.citations.filter(citation => citation.start >= 0 && citation.end <= text.length);
+            this.citations = text !== event.text ? [] : event.citations.filter(citation => citation.start >= 0 && citation.end <= text.length);
             this.emit({ ...event, text, citations: this.citations, id: revision }); return;
           }
           this.emit({ ...event, id: revision });
         }, plan.reasoningEffort, plan.cognitiveMode, plan.workflows);
       }
       if (!current()) return;
-      const tail = visible.flush(); if (tail) append(tail);
-      if (visible.rejectedReasoning) {
-        console.warn(JSON.stringify({ event: 'internal_reasoning_output_rejected' }));
-        if (!this.partial) append('我刚才没有把话组织好，抱歉。请再跟我说一次，我会认真接住。');
+      // Validate buffered prefixes even after a final payload, but do not append
+      // them twice: answer.citations already supplied the authoritative text.
+      const safeTail = outputGuard.flush(); if (safeTail && !finalTextReceived) append(safeTail);
+      if (outputGuard.rejected) {
+        this.partial = ''; this.citations = [];
+        console.warn(JSON.stringify({ event: 'reply_rejected', reason: outputGuard.reason, elapsedMs: performance.now() - replyStarted }));
+        append(REPLY_REJECTED_TEXT);
+      } else if (outputGuard.stripped) {
+        console.info(JSON.stringify({ event: 'reply_sanitized', reason: 'metadata_stripped', elapsedMs: performance.now() - replyStarted }));
       }
       this.partial = stripInternalMetadata(this.partial);
       this.history.push({ role: 'assistant', content: this.partial, citations: this.citations,
@@ -508,6 +469,11 @@ export class Conversation {
       if (error instanceof Error && error.message === 'GUEST_RUNTIME_BUSY') {
         this.emit({ type: 'notice', code: 'GUEST_RUNTIME_BUSY',
           text: '上一条请求仍在处理，请稍候再试。这次没有重复执行。' });
+        return;
+      }
+      if (error instanceof Error && error.message === 'PARTIAL_REPLY_RETRY_REQUIRED') {
+        this.emit({ type: 'notice', code: 'PARTIAL_REPLY_RETRY_REQUIRED',
+          text: '刚才的回答中断了，没有自动接上另一份答案。需要重答时，请说“重新回答”。' });
         return;
       }
       this.emit({ type: 'error',

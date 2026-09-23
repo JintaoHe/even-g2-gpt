@@ -204,6 +204,14 @@ test('server pause keeps microphone intent and one temple tap resumes capture', 
   assert.equal(f.audio.at(-1), true);
 });
 
+test('partial reply retry notice is visible without automatically restarting audio', async () => {
+  const f = await fixture(); const ws = await f.connect();
+  ws.onmessage({ data: JSON.stringify({ type: 'notice', code: 'PARTIAL_REPLY_RETRY_REQUIRED', text: '请说“用5.6重新回答”。' }) });
+  await f.flush(); await f.tick();
+  assert.match(f.writes.at(-1)!, /用5.6重新回答/);
+  assert.equal(f.audio.includes(true), false);
+});
+
 test('exit cancellation notice is visible on the glasses and keeps capture paused', async () => {
   const f = await fixture(); const ws = await f.connect();
   ws.onmessage({ data: JSON.stringify({ type: 'notice', code: 'EXIT_CANCELLED',

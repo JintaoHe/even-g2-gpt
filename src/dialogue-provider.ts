@@ -1,8 +1,10 @@
 import { createHybridDialogue } from './hybrid-dialogue.js';
+import { modelProfile } from './model-profile.js';
 import { CodexDialogue, createCodexRunner } from './codex-dialogue.js';
 
 export function createDialogueProvider(env: NodeJS.ProcessEnv = process.env, options: { fetcher?: typeof fetch } = {}) {
   const provider = env.DIALOGUE_PROVIDER ?? 'api';
+  if (modelProfile(env) !== 'configured' && provider !== 'api') throw new Error('MANAGED_MODEL_PROFILE_REQUIRES_API');
   if (provider === 'api') {
     if (!env.OPENAI_API_KEY) throw new Error('API dialogue requires OPENAI_API_KEY');
     return { ...createHybridDialogue(env.OPENAI_API_KEY, { ...env, EVEN_DELIVERY_ROUTING: 'true' }, { fetcher: options.fetcher }), provider,

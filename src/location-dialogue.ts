@@ -208,6 +208,7 @@ export class LocationDialogue implements DialogueModel {
       : { decision: await this.base.decide(history, text, forced, signal) };
     signal.throwIfAborted();
     const last = history.at(-1);
+    if (plan.replyRetry) { this.plans.set(signal, plan); return plan; }
     if (this.pendingPlace && last?.role === 'assistant' && last.content === this.pendingPlace.prompt) {
       if ((plan.locationAction === 'route_eta' || plan.locationAction === 'nearby_search') && plan.nearby?.taskAction !== 'replace') {
         // Preserve the original search and use the answer only to select candidates.

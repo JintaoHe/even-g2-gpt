@@ -105,6 +105,7 @@ export class DeliveryDialogue implements DialogueModel {
         : { decision: await this.base.decide(history, text, forced, signal) };
       signal.throwIfAborted();
     }
+    if (plan.replyRetry) { this.plans.set(signal, { plan, documentRetry: false }); return plan; }
     if (approval && (explicitSend(text) || explicitResend(text) || naturalMailApproval(text) || contextualMailApproval(text))) {
       plan = { ...plan, decision: 'respond', deliveryAction: 'confirm', calendarAction: 'none', reasoningEffort: 'low' };
     } else if ((!plan.deliveryAction || plan.deliveryAction === 'none' || plan.deliveryAction === 'confirm') && explicitDocumentRequest(text)) {

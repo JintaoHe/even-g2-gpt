@@ -1,4 +1,5 @@
 import type { Message } from './conversation.js';
+import { baselineModel } from './model-profile.js';
 import { presentation, documentWarning, type Document } from './document-presentation.js';
 import { validateCalendar, calendarDetails, type CalendarEvent } from './calendar.js';
 
@@ -131,7 +132,7 @@ const sectionSchema = { type: 'object', additionalProperties: false, properties:
 }, required: ['heading', 'brief', 'targetUnits'] };
 
 export function createDraftGenerator(env: NodeJS.ProcessEnv = process.env, request: typeof fetch = fetch): DraftGenerator {
-  const model = env.OPENAI_DOCUMENT_MODEL ?? env.OPENAI_REPLY_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
+  const model = baselineModel(env, env.OPENAI_DOCUMENT_MODEL ?? env.OPENAI_REPLY_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna');
   const timezone = env.CONVERSATION_TIMEZONE ?? 'America/Chicago';
   const config = readDraftGenerationConfig(env);
   new Intl.DateTimeFormat('en', { timeZone: timezone });

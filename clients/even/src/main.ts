@@ -233,7 +233,7 @@ function handleServerEvent(event: any) {
     if (event.type === 'error') status = event.code === 'SESSION_UNAVAILABLE' ? '恢复凭证已过期，正在建立新会话' : `错误：${event.code}`;
     if (event.type === 'notice') {
       status = event.text;
-      if (event.code === 'EXIT_CANCELLED' || event.code === 'GUEST_RUNTIME_BUSY') pager.notice(event.text);
+      if (event.code === 'EXIT_CANCELLED' || event.code === 'GUEST_RUNTIME_BUSY' || event.code === 'PARTIAL_REPLY_RETRY_REQUIRED') pager.notice(event.text);
     }
     if (event.type === 'location.status') {
       status = event.state === 'available'
