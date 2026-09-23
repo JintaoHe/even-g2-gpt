@@ -36,7 +36,6 @@ import { readConversationStartupConfig } from './conversation-startup-config.js'
 import { StoreConversationPersistence } from './conversation-persistence.js';
 import { ContextBuilder } from './context-builder.js';
 import { recallHistory as readHistoryRecall } from './history-recall.js';
-import { historyRecallEnabled } from './history-query.js';
 import { OpenAISessionSummaryGenerator, SessionSummaryService } from './session-summary.js';
 import { ActiveInputLeaseError, SessionRegistry, SessionUnavailableError,
   type ManagedSessionRuntime, type SessionDisposeReason, type SessionInterruptReason } from './session-registry.js';
@@ -1163,7 +1162,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
-    historyRecallEnabled: historyRecallEnabled(process.env),
+    historyRecallEnabled: startup.historyRecallEnabled,
     legacyHelloEnabled: startup.legacyHelloEnabled,
     guestRuntimes: process.env.EVEN_GUEST_MODE_ENABLED === 'true'
       ? createGuestRuntimePool(conversationStore, process.env, openaiFetch, routeProvider) : undefined,
