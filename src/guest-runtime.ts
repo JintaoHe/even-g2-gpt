@@ -178,7 +178,7 @@ export class GuestRuntimePool {
 export function createGuestRuntimePool(store: ConversationStore, env: NodeJS.ProcessEnv,
   meteredFetch: typeof fetch, routes?: RouteProvider): GuestRuntimePool {
   if (!env.OPENAI_API_KEY || typeof meteredFetch !== 'function') throw new Error('GUEST_API_REQUIRED');
-  const guestEnv = { ...env, DIALOGUE_PROVIDER: 'api', GOOGLE_CALENDAR_ENABLED: 'false', EVEN_EMAIL_ENABLED: 'false',
+  const guestEnv = { ...env, EVEN_HISTORY_RECALL_ENABLED: 'false', DIALOGUE_PROVIDER: 'api', GOOGLE_CALENDAR_ENABLED: 'false', EVEN_EMAIL_ENABLED: 'false',
     GOOGLE_ENVIRONMENT_ENABLED: 'false', EVEN_DELIVERY_ROUTING: 'true', GOOGLE_MAPS_ENABLED: routes ? 'true' : 'false' };
   return new GuestRuntimePool(store, (guard, lifetime) => {
     const fetcher: typeof fetch = async (input, init) => {

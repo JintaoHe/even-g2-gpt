@@ -20,7 +20,8 @@ export class GuestDialogue implements DialogueModel {
     if ((raw.calendarAction && raw.calendarAction !== 'none') || (raw.taskAction && raw.taskAction !== 'none')
       || raw.workflows?.some(w => !allowedWorkflows.has(w.kind)
         && !(w.kind === 'email' && ['document', 'revise', 'review', 'cancel'].includes(action)))) action = 'denied';
-    const plan: TurnPlan = { ...raw, deliveryAction: 'none', calendarAction: 'none', taskAction: 'none', taskKind: null,
+    if (raw.historyQuery) action = 'denied';
+    const plan: TurnPlan = { ...raw, historyQuery: null, deliveryAction: 'none', calendarAction: 'none', taskAction: 'none', taskKind: null,
       ...(action !== 'none' ? { locationAction: 'none', searchAction: 'none' } : {}),
       workflows: action === 'none' ? raw.workflows?.filter(w => allowedWorkflows.has(w.kind)) : [] };
     this.plans.set(signal, { action, plan });

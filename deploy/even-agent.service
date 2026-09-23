@@ -12,6 +12,7 @@ User=even-agent
 Group=even-agent
 WorkingDirectory=/opt/even-agent/current
 EnvironmentFile=/etc/even-agent.env
+Environment=NODE_ENV=production
 Environment=EVEN_DATA_DIR=/var/lib/even-agent
 ExecStart=/usr/local/bin/node --preserve-symlinks-main /opt/even-agent/current/src/conversation-server.js
 StandardOutput=journal

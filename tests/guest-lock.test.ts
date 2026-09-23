@@ -1,3 +1,4 @@
+import { DROP_HISTORY_INDEX_SQL } from './history-index-fixture.js';
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -55,6 +56,7 @@ test('v11 migration failure rolls back the epoch column and triggers', async t =
   const lock = store.enterDeviceGuestMode({ clientId, at: 101 });
   await store.close();
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite')); t.after(() => db.close());
+  db.exec(DROP_HISTORY_INDEX_SQL);
   db.exec(`DROP TRIGGER guest_lock_insert_epoch; DROP TRIGGER guest_lock_update_epoch; DROP TRIGGER guest_lock_delete_epoch;
     ALTER TABLE clients DROP COLUMN access_epoch; DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version>=11;
     CREATE TRIGGER fail_v11 BEFORE INSERT ON schema_migrations WHEN NEW.version=11
@@ -167,6 +169,7 @@ test('v10 migration preserves v9 data and rolls back entirely on failure', async
   await store.close();
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
   t.after(() => db.close());
+  db.exec(DROP_HISTORY_INDEX_SQL);
   db.exec(`DROP TABLE device_guest_locks; ALTER TABLE clients DROP COLUMN access_epoch; DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version>=10;
     CREATE TRIGGER fail_v10 BEFORE INSERT ON schema_migrations WHEN NEW.version=10
     BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;`);
@@ -175,7 +178,7 @@ test('v10 migration preserves v9 data and rolls back entirely on failure', async
   assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='device_guest_locks'").get(), undefined);
   db.exec('DROP TRIGGER fail_v10');
   const reopened = await ConversationStore.create(root); t.after(() => reopened.close());
-  assert.equal(reopened.health().schemaVersion, 12);
+  assert.equal(reopened.health().schemaVersion, 14);
   assert.equal(reopened.getSession(id)?.ownerScope, 'single-user');
   reopened.enterDeviceGuestMode({ clientId, at: 101 });
 });

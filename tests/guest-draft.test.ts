@@ -1,3 +1,4 @@
+import { DROP_HISTORY_INDEX_SQL } from './history-index-fixture.js';
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -89,6 +90,7 @@ test('unlock while generating rejects late result and concurrent generation is b
 test('v12 migration preserves existing locks and rolls back atomically on failure', async t => {
   const { store, root, guest } = await fixture(t); const a = guest(); await store.close();
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite')); t.after(() => db.close());
+  db.exec(DROP_HISTORY_INDEX_SQL);
   db.exec(`DROP TABLE guest_drafts; DELETE FROM schema_migrations WHERE version=12;
     CREATE TRIGGER fail_v12 BEFORE INSERT ON schema_migrations WHEN NEW.version=12
     BEGIN SELECT RAISE(ABORT,'v12 rollback'); END;`);

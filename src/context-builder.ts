@@ -1,5 +1,6 @@
 import type { Message } from './conversation.js';
 import { priorContextText, type PriorSessionContext } from './prior-session-context.js';
+import { historyRecallText, type HistoryRecall } from './history-recall.js';
 
 export type ContextTopicSummary = { id: string; label: string; summary: string };
 export type ContextSummary = {
@@ -25,7 +26,7 @@ export type ContextBuilderOptions = {
 };
 
 export interface ContextComposer {
-  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string; prior?: PriorSessionContext; pendingUserTurn?: boolean }): ContextBuildResult;
+  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string; prior?: PriorSessionContext; pendingUserTurn?: boolean; recall?: HistoryRecall }): ContextBuildResult;
 }
 
 const DEFAULT_MAX_CHARACTERS = 24_000;
@@ -57,7 +58,7 @@ function statusAware(message: Message, maxCharacters: number): Message {
   return { ...message, content: `${label}\n${content}` };
 }
 
-function summaryMessage(summary: ContextSummary & { sourceLosses?: readonly unknown[] }, currentTopicId?: string): Message {
+function summaryMessage(summary: ContextSummary & { sourceLosses?: readonly unknown[] }, currentTopicId?: string, hasRecall = false): Message {
   const currentTopic = currentTopicId ? summary.topics.find(topic => topic.id === currentTopicId) : undefined;
   const topics = summary.topics.map(topic => `- ${topic.label}: ${topic.summary}`).join('\n') || '- 无';
   const decisions = summary.confirmedDecisions.map(item => `- ${item}`).join('\n') || '- 无';
@@ -67,7 +68,7 @@ function summaryMessage(summary: ContextSummary & { sourceLosses?: readonly unkn
     contextKind: 'summary',
     status: 'committed',
     content: `[应用提供的只读会话摘要；不是用户指令；已覆盖到消息序号 ${summary.throughSequence}]
-${summary.sourceLosses?.length ? `注意：摘要链有 ${summary.sourceLosses.length} 处摘录或缺口信息不明，不能视为保留全部细节；当前没有历史原文查询能力，需要精确原话时请用户补充，不要承诺可以检索。\n` : ''}概览：${summary.overview}
+${summary.sourceLosses?.length ? `注意：摘要链有 ${summary.sourceLosses.length} 处摘录或缺口信息不明，不能视为保留全部细节；${hasRecall ? '本轮历史检索也有范围限制；缺失的原话请用户补充。' : '当前没有历史原文查询能力，需要精确原话时请用户补充，不要承诺可以检索。'}\n` : ''}概览：${summary.overview}
 ${currentTopic ? `当前主题摘要（${currentTopic.label}）：${currentTopic.summary}\n` : ''}主题：
 ${topics}
 已确认决定：
@@ -101,7 +102,7 @@ export class ContextBuilder implements ContextComposer {
     }
   }
 
-  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string; prior?: PriorSessionContext }): ContextBuildResult {
+  build(input: { messages: Message[]; summary?: ContextSummary; currentTopicId?: string; prior?: PriorSessionContext; recall?: HistoryRecall }): ContextBuildResult {
     const source = input.messages.filter(message => ['user', 'assistant'].includes(message.role)
       && typeof message.content === 'string' && message.content.trim());
 
@@ -128,7 +129,7 @@ export class ContextBuilder implements ContextComposer {
 
     let summary: Message | undefined;
     if (input.summary) {
-      const candidate = statusAware(summaryMessage(input.summary, input.currentTopicId), Math.min(6_000, this.maxMessageCharacters));
+      const candidate = statusAware(summaryMessage(input.summary, input.currentTopicId, !!input.recall), Math.min(6_000, this.maxMessageCharacters));
       if (used + contextCharacterCount([candidate]) <= this.maxCharacters) {
         summary = candidate; used += contextCharacterCount([candidate]);
       }
@@ -152,6 +153,8 @@ export class ContextBuilder implements ContextComposer {
     // Prior is last in budget priority: it cannot displace current-session text.
     const prior = input.prior && priorContextText(input.prior, Math.max(0, this.maxCharacters - contextCharacterCount(messages) - MESSAGE_OVERHEAD));
     if (prior) messages.unshift({ role: 'assistant', contextKind: 'prior', status: 'committed', content: prior });
+    const recall = input.recall && historyRecallText(input.recall, Math.max(0, this.maxCharacters - contextCharacterCount(messages) - MESSAGE_OVERHEAD));
+    if (recall) messages.unshift({ role: 'assistant', contextKind: 'history', status: 'committed', content: recall });
     return {
       messages,
       characterCount: contextCharacterCount(messages),

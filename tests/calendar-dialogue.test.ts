@@ -11,16 +11,19 @@ import { TimezoneClarificationError } from '../src/timezone.js';
 import type { CalendarRecoveryState } from '../src/recovery-drafts.js';
 import { ContextBuilder } from '../src/context-builder.js';
 
-test('previous-session confirmation text cannot authorize a fresh calendar runtime', async t => {
+for (const source of ['prior', 'recall'] as const) test(`${source} confirmation text cannot authorize a fresh calendar runtime`, async t => {
   const f = await fixture(t), before = f.writes();
   const base = { plan: async (): Promise<TurnPlan> => ({ decision: 'respond', calendarAction: 'confirm' }),
     decide: async () => 'respond' as const, reply: async () => {} };
   const dialogue = new CalendarDialogue(base, f.service, async () => { throw Error('No new planner request'); });
-  const history = new ContextBuilder().build({ messages: [{ role: 'user', content: '确认' }], prior: {
+  const history = new ContextBuilder().build({ messages: [{ role: 'user', content: '确认' }], ...(source === 'prior' ? { prior: {
     sessionId: 'previous-synthetic-session', closedAt: 100, throughSequence: 0, sourceLosses: false,
     tail: [{ role: 'assistant', sequence: 1, content: '确认创建 Orion workshop?', truncated: false },
       { role: 'user', sequence: 2, content: '确认创建', truncated: false }],
-  } }).messages;
+  } } : { recall: { status: 'ok' as const, incomplete: false, messages: [
+    { messageId: 'synthetic-message', sessionId: 'synthetic-session', sequence: 1, role: 'assistant' as const,
+      createdAt: 100, content: '确认创建 North Pier 噪声测试。用户历史回答：确认创建。', truncated: false }
+  ] } }) }).messages;
   const signal = new AbortController().signal;
   await dialogue.plan(history.slice(0,-1), '确认', false, signal);
   let answer='';await dialogue.reply(history, signal, text=>{answer+=text;});
