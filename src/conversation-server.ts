@@ -30,6 +30,7 @@ import { createEnvironmentProvider, type EnvironmentProvider } from './environme
 import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type PlanningEvidenceSelector } from './planning-evidence-dialogue.js';
 import { CostLedger } from './cost-ledger.js';
 import { createMeteredOpenAIFetch, openAIPricing, requestMaximum } from './metered-openai.js';
+import { baselineModel, modelProfileBanner } from './model-profile.js';
 import { ConversationStore, DeviceCredentialError, ResumeCredentialError } from './conversation-store.js';
 import { runConversationMaintenance } from './conversation-maintenance.js';
 import { readConversationStartupConfig } from './conversation-startup-config.js';
@@ -1133,12 +1134,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const maintenanceTimer = setInterval(() => { void maintain(); }, 24 * 60 * 60 * 1000);
   maintenanceTimer.unref();
   const summaryRecoveryMaximum = requestMaximum(JSON.stringify({
-    model: process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply,
+    model: baselineModel(process.env, process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply),
     max_output_tokens: 2000, input: 'x'.repeat(180000),
   }), openAIPricing(process.env));
   const sessionSummary = hybrid.provider === 'api' && key
     ? new SessionSummaryService(conversationStore,
-      new OpenAISessionSummaryGenerator(key, process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply,
+      new OpenAISessionSummaryGenerator(key, baselineModel(process.env, process.env.SESSION_SUMMARY_MODEL?.trim() || hybrid.models.reply),
         'https://api.openai.com/v1/responses', openaiFetch), {
           recoveryBudgetAvailable: () => costs.canReserve('openai', summaryRecoveryMaximum),
         })
@@ -1195,7 +1196,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exitCode = 1;
     void shutdown();
   });
-  app.http.listen(port, '127.0.0.1', () => console.log(`Conversation lab: http://127.0.0.1:${port} | provider=${hybrid.provider} | intent=${hybrid.models.intent} | reply=${hybrid.models.reply} | stt=${stt.name}/${stt.model} | speech=${stt.configured}`));
+  app.http.listen(port, '127.0.0.1', () => console.log(`Conversation lab: http://127.0.0.1:${port} | provider=${hybrid.provider} | ${modelProfileBanner(process.env, hybrid.models)} | stt=${stt.name}/${stt.model} | speech=${stt.configured}`));
   let stopping: Promise<void> | undefined;
   function shutdown() {
     return stopping ??= (async () => {

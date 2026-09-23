@@ -1,5 +1,6 @@
 import type { CostLedger, CostReservation } from './cost-ledger.js';
 import type { ProviderMetricObserver } from './runtime-metrics.js';
+import { RetryableReplyError, providerFailureReason } from './reply-fallback.js';
 
 type Pricing = { inputPerMillion: number; cachedInputPerMillion: number; cacheWritePerMillion: number; outputPerMillion: number; webSearchPerCall: number };
 type Usage = {
@@ -13,12 +14,13 @@ const positive = (value: string | undefined, fallback: number, name: string) => 
   if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative number`);
   return parsed;
 };
-export function openAIPricing(env: NodeJS.ProcessEnv = process.env): Pricing {
+export function openAIPricing(env: NodeJS.ProcessEnv = process.env, model?: string): Pricing {
+  const luna6 = model === 'gpt-6-luna' || model?.startsWith('gpt-6-luna-');
   return {
-    inputPerMillion: positive(env.OPENAI_INPUT_USD_PER_M, 0.20, 'OPENAI_INPUT_USD_PER_M'),
-    cachedInputPerMillion: positive(env.OPENAI_CACHED_INPUT_USD_PER_M, 0.02, 'OPENAI_CACHED_INPUT_USD_PER_M'),
-    cacheWritePerMillion: positive(env.OPENAI_CACHE_WRITE_USD_PER_M, 0.25, 'OPENAI_CACHE_WRITE_USD_PER_M'),
-    outputPerMillion: positive(env.OPENAI_OUTPUT_USD_PER_M, 1.20, 'OPENAI_OUTPUT_USD_PER_M'),
+    inputPerMillion: positive(env.OPENAI_INPUT_USD_PER_M, luna6 ? 0.10 : 0.20, 'OPENAI_INPUT_USD_PER_M'),
+    cachedInputPerMillion: positive(env.OPENAI_CACHED_INPUT_USD_PER_M, luna6 ? 0.01 : 0.02, 'OPENAI_CACHED_INPUT_USD_PER_M'),
+    cacheWritePerMillion: positive(env.OPENAI_CACHE_WRITE_USD_PER_M, luna6 ? 0.125 : 0.25, 'OPENAI_CACHE_WRITE_USD_PER_M'),
+    outputPerMillion: positive(env.OPENAI_OUTPUT_USD_PER_M, luna6 ? 0.50 : 1.20, 'OPENAI_OUTPUT_USD_PER_M'),
     webSearchPerCall: positive(env.OPENAI_WEB_SEARCH_USD_PER_CALL, 0.01, 'OPENAI_WEB_SEARCH_USD_PER_CALL')
   };
 }
@@ -33,7 +35,7 @@ function actualCost(response: any, pricing: Pricing) {
   const ordinary = Math.max(0, input - cached - written);
   const items = Array.isArray(response?.output) ? response.output : [];
   const webCalls = items.filter((item: any) => item?.type === 'web_search_call').length;
-  const longLuna = typeof response?.model === 'string' && response.model.startsWith('gpt-5.6-luna') && input > 272_000;
+  const longLuna = typeof response?.model === 'string' && /^gpt-(5\.6|6)-luna(?:-|$)/.test(response.model) && input > 272_000;
   return (ordinary * pricing.inputPerMillion + cached * pricing.cachedInputPerMillion + written * pricing.cacheWritePerMillion)
       * (longLuna ? 2 : 1) / 1_000_000
     + output * pricing.outputPerMillion * (longLuna ? 1.5 : 1) / 1_000_000
@@ -48,7 +50,7 @@ export function requestMaximum(bodyText: string, pricing: Pricing) {
   const outputTokens = Math.max(1, boundedInteger(body?.max_output_tokens, 8_192));
   const hasSearch = Array.isArray(body?.tools) && body.tools.some((tool: any) => tool?.type === 'web_search' || tool?.type === 'web_search_preview');
   const webCalls = hasSearch ? Math.max(1, boundedInteger(body?.max_tool_calls, 10)) : 0;
-  const longLuna = typeof body?.model === 'string' && body.model.startsWith('gpt-5.6-luna') && inputTokens > 272_000;
+  const longLuna = typeof body?.model === 'string' && /^gpt-(5\.6|6)-luna(?:-|$)/.test(body.model) && inputTokens > 272_000;
   return inputTokens * pricing.inputPerMillion * (longLuna ? 2 : 1) / 1_000_000
     + outputTokens * pricing.outputPerMillion * (longLuna ? 1.5 : 1) / 1_000_000 + webCalls * pricing.webSearchPerCall;
 }
@@ -79,21 +81,30 @@ async function settleFromResponse(ticket: CostReservation, response: Response, p
 
 export function createMeteredOpenAIFetch(ledger: CostLedger, env: NodeJS.ProcessEnv = process.env,
   baseFetch: typeof fetch = fetch, observe?: ProviderMetricObserver): typeof fetch {
-  const pricing = openAIPricing(env);
+  openAIPricing(env); // Validate explicit rate overrides before any request.
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!url.startsWith('https://api.openai.com/')) return baseFetch(input, init);
     const bodyText = typeof init?.body === 'string' ? init.body : '';
+    let model: string | undefined;
+    try { model = JSON.parse(bodyText)?.model; } catch { /* Unknown request keeps conservative legacy rates. */ }
+    const pricing = openAIPricing(env, typeof model === 'string' ? model : undefined);
     const ticket = await ledger.reserve('openai', requestMaximum(bodyText, pricing));
     const startedAt = Date.now();
     let response: Response;
     try { response = await baseFetch(input, init); }
     catch (error) {
       observe?.('openai', (error as Error)?.name === 'AbortError' ? 'cancelled' : 'failure', Date.now() - startedAt);
-      throw error; // Unknown provider outcome: keep the conservative reservation.
+      // This boundary is after reservation and before the raw provider fetch.
+      // Guest/store guards wrap this fetch externally and are never relabelled.
+      if (init?.signal?.aborted) throw error;
+      throw new RetryableReplyError(providerFailureReason(error)); // Keep the conservative reservation.
     }
     observe?.('openai', response.ok ? 'success' : 'failure', Date.now() - startedAt);
-    void settleFromResponse(ticket, response.clone(), pricing).catch(() => {});
+    // Do not create an unread tee for errors: caller cancellation would otherwise
+    // wait forever on the abandoned clone and fallback would never start.
+    if (response.ok) void settleFromResponse(ticket, response.clone(), pricing).catch(() => {});
+    else if (response.status < 500) void ticket.settle(0).catch(() => {});
     return response;
   }) as typeof fetch;
 }

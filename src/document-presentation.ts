@@ -1,4 +1,5 @@
 import type { Message } from './conversation.js';
+import { baselineModel } from './model-profile.js';
 
 export type Presentation = { title: string; summary: string; kind: 'summary' | 'excerpt'; filename: string;
   partial?: boolean; incompleteSections?: number[]; compressedSections?: number[]; lengthMismatch?: boolean };
@@ -39,7 +40,7 @@ export function renderDocument(history: Message[], metadata = fallbackPresentati
 export function createDocumentRenderer(env: NodeJS.ProcessEnv = process.env, request: typeof fetch = fetch) {
   // CLI-only installations never silently start making paid API summary calls.
   const enabled = env.EMAIL_AI_SUMMARY !== 'false' && (env.DIALOGUE_PROVIDER ?? 'api') === 'api' && !!env.OPENAI_API_KEY;
-  const model = env.EMAIL_SUMMARY_MODEL ?? env.OPENAI_INTENT_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
+  const model = baselineModel(env, env.EMAIL_SUMMARY_MODEL ?? env.OPENAI_INTENT_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna');
   return async (history: Message[], signal: AbortSignal): Promise<Document> => {
     signal.throwIfAborted();
     let metadata = fallbackPresentation(history);

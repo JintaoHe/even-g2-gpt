@@ -294,7 +294,7 @@ test('an internal analysis response is rejected instead of reaching the display 
   } }, event => events.push(event));
   await c.submit('我真的累到了');
   const visible = events.filter(event => event.type === 'answer.delta').map(event => String(event.text)).join('');
-  assert.equal(visible, '我刚才没有把话组织好，抱歉。请再跟我说一次，我会认真接住。');
+  assert.equal(visible, '我刚才没有把话组织好，抱歉。请说“重新回答”，我会再试一次。');
   assert.equal(c.history.at(-1)?.content, visible);
   assert.doesNotMatch(JSON.stringify(events), /assistant\/analysis|We need respond/i);
 });

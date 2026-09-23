@@ -1,5 +1,6 @@
 import { readConversationMaintenanceConfig } from './conversation-maintenance.js';
 import { historyRecallEnabled } from './history-query.js';
+import { hybridFirstOutputMs } from './model-profile.js';
 
 function booleanSetting(env: NodeJS.ProcessEnv, name: string, fallback = false) {
   const raw = env[name]?.trim().toLowerCase();
@@ -10,6 +11,7 @@ function booleanSetting(env: NodeJS.ProcessEnv, name: string, fallback = false) 
 }
 
 export function readConversationStartupConfig(env: NodeJS.ProcessEnv) {
+  hybridFirstOutputMs(env); // Validate before opening/migrating stores or creating ledgers.
   const recallEnabled = historyRecallEnabled(env);
   // INVOCATION_ID is supplied by systemd, including existing installations whose
   // service unit predates NODE_ENV=production. Do not infer deployment from DNS.

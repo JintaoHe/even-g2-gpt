@@ -391,6 +391,10 @@ export class CalendarDialogue implements DialogueModel {
         ? { decision: 'respond', calendarAction: 'confirm', deliveryAction: 'none' }
         : this.base.plan ? await this.base.plan(history, text, forced, signal) : { decision: await this.base.decide(history, text, forced, signal) };
       signal.throwIfAborted();
+      if (plan.replyRetry) {
+        if (approval) this.service.dismiss(approval.id);
+        this.plans.set(signal, { plan }); return plan;
+      }
       if ((!plan.calendarAction || plan.calendarAction === 'none') && (!plan.deliveryAction || plan.deliveryAction === 'none') && needsCalendarRead(text, history)) {
         plan = { ...plan, decision: 'respond', calendarAction: 'query', deliveryAction: 'none' };
       }

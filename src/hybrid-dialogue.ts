@@ -3,12 +3,31 @@ import { OpenAIDialogue } from './dialogue-model.js';
 import { historyRecallEnabled } from './history-query.js';
 import { SearchQuota, type SearchBudget } from './search-quota.js';
 import { join } from 'node:path';
+import { baselineModel, modelProfile, hybridFirstOutputMs } from './model-profile.js';
+import { createReplyFallback, requestsBaselineReply, observeReplyFailure, type ReplyDiagnostic } from './reply-fallback.js';
+import { retryContext, withoutRetryTurns } from './reply-retry.js';
 
 export class HybridDialogue implements DialogueModel {
-  constructor(private intent: DialogueModel, private answer: DialogueModel) {}
-  startSession() { this.intent.startSession?.(); this.answer.startSession?.(); }
-  endSession() { this.intent.endSession?.(); this.answer.endSession?.(); }
+  private original?: Message[];
+  private retries = new WeakMap<AbortSignal, Message[]>();
+  constructor(private intent: DialogueModel, private answer: DialogueModel, private replyOverride?: DialogueModel['reply'],
+    private diagnostic: (event: ReplyDiagnostic) => void = () => {}, private answerModel = 'gpt-5.6-luna') {}
+  startSession() { this.original = undefined; this.retries = new WeakMap(); this.intent.startSession?.(); this.answer.startSession?.(); }
+  endSession() { this.original = undefined; this.retries = new WeakMap(); this.intent.endSession?.(); this.answer.endSession?.(); }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan> {
+    signal.throwIfAborted();
+    if (this.replyOverride && requestsBaselineReply([{ role: 'user', content: text }])) {
+      const context = retryContext(history), target = context.at(-1), cached = this.original?.at(-1);
+      // Owner providers can be shared by several session runtimes. Never select
+      // a cached question by text alone, or use it when this session has no target.
+      const same = target && cached && (target.messageId && cached.messageId
+        ? target.messageId === cached.messageId : !!target.topicId && target.topicId === cached.topicId
+          && target.content === cached.content && target.sequence === cached.sequence);
+      this.retries.set(signal, structuredClone(same ? this.original! : context));
+      return { decision: 'respond', replyRetry: true, cognitiveMode: 'explain', reasoningEffort: 'low', searchAction: 'none',
+        deliveryAction: 'none', calendarAction: 'none', locationAction: 'none', taskAction: 'none', historyQuery: null };
+    }
+    history = withoutRetryTurns(history);
     return this.intent.plan ? this.intent.plan(history, text, forced, signal)
       : { decision: await this.intent.decide(history, text, forced, signal) };
   }
@@ -25,18 +44,30 @@ export class HybridDialogue implements DialogueModel {
   }
   reply(history: Message[], signal: AbortSignal, delta: (text: string) => void, update?: (event: ReplyUpdate) => void,
     effort?: ReasoningEffort, mode?: AssistantMode, workflows?: WorkflowSelection[]) {
-    return this.answer.reply(history, signal, delta, update, effort, mode, workflows);
+    const retry = this.retries.get(signal) ?? (this.replyOverride && requestsBaselineReply(history) ? retryContext(history) : undefined);
+    if (retry) {
+      this.retries.delete(signal);
+      signal.throwIfAborted();
+      if (!retry.length) { delta('没有可以重新回答的上一轮问题。'); return Promise.resolve(); }
+      return observeReplyFailure(this.answer.reply.bind(this.answer), this.answerModel, 'retry', this.diagnostic)(retry, signal, delta, update, 'low', 'explain', []);
+    }
+    history = withoutRetryTurns(history);
+    this.original = structuredClone(history);
+    return this.replyOverride ? this.replyOverride(history, signal, delta, update, effort, mode, workflows)
+      : observeReplyFailure(this.answer.reply.bind(this.answer), this.answerModel, 'primary', this.diagnostic)(history, signal, delta, update, effort, mode, workflows);
   }
 }
 
 export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = process.env,
-  overrides: { endpoint?: string; quota?: SearchBudget; search?: boolean; fetcher?: typeof fetch; extraInstructions?: string } = {}) {
-  const intentModel = env.OPENAI_INTENT_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
+  overrides: { endpoint?: string; quota?: SearchBudget; search?: boolean; fetcher?: typeof fetch; extraInstructions?: string;
+    onReplyDiagnostic?: (event: ReplyDiagnostic) => void; hybridPrimaryReply?: boolean } = {}): { model: HybridDialogue; models: { intent: string; reply: string } } {
+  const firstOutputMs = hybridFirstOutputMs(env);
+  const intentModel = baselineModel(env, env.OPENAI_INTENT_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna');
   // Retain explicit/legacy overrides; Luna is the evaluated default for both roles.
-  const replyModel = env.OPENAI_REPLY_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna';
+  const replyModel = baselineModel(env, env.OPENAI_REPLY_MODEL ?? env.OPENAI_DIALOGUE_MODEL ?? 'gpt-5.6-luna');
   const timezone = env.CONVERSATION_TIMEZONE ?? 'America/Chicago';
   const nano = (name: string) => name === 'gpt-5-nano' || name.startsWith('gpt-5-nano-');
-  const luna = (name: string) => name === 'gpt-5.6-luna';
+  const luna = (name: string) => name === 'gpt-5.6-luna' || name === 'gpt-6-luna';
   const positive = (name: string, fallback: number) => {
     const value = Number(env[name] ?? fallback);
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
@@ -61,6 +92,7 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
       ...(nano(replyModel) ? { reasoningEffort: 'low' as const, replyTokens: 3072 } : {}),
       ...(luna(replyModel) ? { reasoningEffort: 'low' as const, replyTokens: 4096, adaptiveReasoning: luna(intentModel) } : {}),
       sessionSearchCalls: sessionCap,
+      hybridPrimaryReply: overrides.hybridPrimaryReply,
       fetcher: overrides.fetcher,
       applicationCapabilities: {
         calendar: env.GOOGLE_CALENDAR_ENABLED === 'true',
@@ -72,5 +104,12 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
       extraInstructions: "Your name is Even, not the user's name. Preserve Even, G2, R1 and project names as proper nouns; never translate the assistant name Even as 甚至. Follow explicit requested output language."
         + (overrides.extraInstructions ? '\n' + overrides.extraInstructions : '')
     });
-  return { model: new HybridDialogue(intent, reply), models: { intent: intentModel, reply: replyModel } };
+  // The ordinary model shares capability/guest instructions but has no tools.
+  const ordinary = modelProfile(env) === 'hybrid-luna'
+    ? createHybridDialogue(key, { ...env, EVEN_MODEL_PROFILE: 'configured', OPENAI_INTENT_MODEL: 'gpt-5.6-luna', OPENAI_REPLY_MODEL: 'gpt-6-luna' },
+      { ...overrides, search: false, hybridPrimaryReply: true }).model : undefined;
+  const onDiagnostic = overrides.onReplyDiagnostic ?? ((event: ReplyDiagnostic) => console.info(JSON.stringify(event)));
+  return { model: new HybridDialogue(intent, reply, ordinary ? createReplyFallback(ordinary, reply, onDiagnostic, firstOutputMs) : undefined,
+    overrides.hybridPrimaryReply ? () => {} : onDiagnostic, replyModel),
+    models: { intent: intentModel, reply: replyModel } };
 }
