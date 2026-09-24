@@ -81,11 +81,11 @@ test('v12 migration is atomic, backfills only eligible messages and reopens idem
   f.db.exec('DROP TRIGGER fail_v13');
   for (let i = 0; i < 2; i++) {
     const reopened = await ConversationStore.create(f.root);
-    try { assert.equal(reopened.health().schemaVersion, 14); assert.equal(reopened.searchMessages(owner, { query: 'cedar' }, now).messages.length, 1); }
+    try { assert.equal(reopened.health().schemaVersion, 16); assert.equal(reopened.searchMessages(owner, { query: 'cedar' }, now).messages.length, 1); }
     finally { await reopened.close(); }
   }
   assert.equal((f.db.prepare('SELECT count(*) AS n FROM messages').get() as any).n, 2);
   f.db.exec("INSERT INTO history_search_fts(history_search_fts,rank) VALUES('integrity-check',1)");
-  f.db.exec("INSERT INTO schema_migrations VALUES(15,'future',0)");
+  f.db.exec("INSERT INTO schema_migrations VALUES(17,'future',0)");
   await assert.rejects(ConversationStore.create(f.root), /newer than/);
 });

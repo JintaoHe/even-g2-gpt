@@ -8,14 +8,15 @@ const ownerPredicate = `typeof(s.owner_scope)='text'
   AND substr(s.owner_scope,1,1) GLOB '[A-Za-z0-9]'
   AND s.owner_scope NOT GLOB '*[^A-Za-z0-9:_-]*'
   AND lower(substr(s.owner_scope,1,6))<>'guest:'`;
-const sourceView = `CREATE VIEW history_search_source AS
+const sourceView = (suppressed = false) => `CREATE VIEW history_search_source AS
   SELECT m.rowid AS rowid,m.content AS content
   FROM messages m JOIN sessions s ON s.id=m.session_id
-  WHERE m.status='committed' AND m.role IN ('user','assistant') AND ${ownerPredicate};`;
+  WHERE m.status='committed' AND m.role IN ('user','assistant') AND ${ownerPredicate}
+  ${suppressed ? 'AND NOT EXISTS (SELECT 1 FROM memory_forget_sources f WHERE f.session_id=s.id)' : ''};`;
 
 /** v14 repair for already-created v13 databases; caller owns transaction. */
-export function repairHistoryScopeIndex(db: DatabaseSync): void {
-  db.exec(`DROP VIEW history_search_source; ${sourceView}
+export function repairHistoryScopeIndex(db: DatabaseSync, suppressed = false): void {
+  db.exec(`DROP VIEW history_search_source; ${sourceView(suppressed)}
     INSERT INTO history_search_fts(history_search_fts) VALUES('rebuild');
     INSERT INTO history_search_fts(history_search_fts,rank) VALUES('integrity-check',1);`);
 }
@@ -26,7 +27,7 @@ export function repairHistoryScopeIndex(db: DatabaseSync): void {
  * See https://www.sqlite.org/fts5.html#external_content_tables */
 export function installHistoryIndex(db: DatabaseSync): void {
   db.exec(`
-    ${sourceView}
+    ${sourceView()}
     CREATE VIRTUAL TABLE history_search_fts USING fts5(
       content, content='history_search_source', content_rowid='rowid', tokenize='trigram'
     );

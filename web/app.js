@@ -9,6 +9,14 @@ let speechAvailable = true;
 let emailAvailable = false;
 let guestMode = false, guestEnabled = false;
 let accessRevision = 0;
+let memorySessionId, memoryBoundary;
+const memoryResetText = '本次对话的上下文已更新，请重新提出需要继续的问题。';
+function resetMemoryView(text = memoryResetText) {
+  accessRevision++; stopMic(); answers.clear(); restoredMessages.clear();
+  $('history').replaceChildren(); $('text').value = ''; $('calendarForm').reset();
+  for (const id of ['transcript', 'progress']) $(id).textContent = '';
+  calendarEvent({ type: 'transport.cleared' }); notice(text);
+}
 let cliSearchEnabled = false;
 let downloadToken = '', jobTimer;
 let forceColdStart = false;
@@ -129,6 +137,7 @@ function restoreSnapshot(snapshot, replace) {
 }
 function handleServerEvent(e) {
     if (e.type === 'access.changed' || e.type === 'transport.cleared') {
+      memorySessionId = undefined; memoryBoundary = undefined;
       accessRevision++;
       stopMic(); clearInterval(jobTimer); connected = false; state = 'closed'; hasReady = false;
       downloadToken = ''; answers.clear(); restoredMessages.clear();
@@ -153,10 +162,17 @@ function handleServerEvent(e) {
       stage: e.stage, providerStatus: e.provider_status, providerReason: e.provider_reason
     });
     if (e.type === 'ready') {
+      const boundary = typeof e.memory_boundary === 'string' ? e.memory_boundary : undefined;
+      const memoryChanged = hasReady && typeof e.session_id === 'string' && e.session_id === memorySessionId
+        && memoryBoundary !== undefined && boundary !== undefined && memoryBoundary !== boundary;
+      if (memoryChanged) resetMemoryView();
+      if (e.session_id !== memorySessionId) memoryBoundary = undefined;
+      memorySessionId = e.session_id;
+      if (boundary !== undefined) memoryBoundary = boundary;
       guestMode = e.access_mode === 'guest'; guestEnabled = e.guest_mode_enabled === true;
       if (guestMode) downloadToken = '';
       $('accessMode').textContent = guestMode ? '访客模式 · 无主人邮件、日历和历史权限' : '主人模式';
-      if (e.resumed) restoreSnapshot(e.snapshot, !hasReady);
+      if (e.resumed) restoreSnapshot(e.snapshot, !hasReady || memoryChanged);
       else if (hasReady) { $('history').replaceChildren(); restoredMessages.clear(); }
       hasReady = true;
       $('recoveryWindow').textContent = Number.isInteger(e.resume_window_minutes)
@@ -164,7 +180,7 @@ function handleServerEvent(e) {
       emailAvailable = e.capabilities?.email === true;
       clearInterval(jobTimer);
       if (!guestMode) { send({ type: 'jobs.list' }); jobTimer = setInterval(() => send({ type: 'jobs.list' }), 3000); }
-      connected = true; $('token').value = ''; notice('已连接。点击开启麦克风，或发送文字。');
+      connected = true; $('token').value = ''; notice(memoryChanged ? memoryResetText : '已连接。点击开启麦克风，或发送文字。');
       speechAvailable = e.capabilities?.speech !== false;
       const provider = e.capabilities?.provider;
       const stt = e.capabilities?.speechProvider === 'soniox' ? 'Soniox' : e.capabilities?.speechProvider === 'openai' ? 'OpenAI' : 'STT';
@@ -236,7 +252,13 @@ function handleServerEvent(e) {
     if (e.type === 'answer.done') { const answer = answers.get(e.id); if (answer && /中|打断/.test(answer.label.textContent)) answer.label.textContent = 'Even · 回答完成'; answers.delete(e.id); }
     if (e.type === 'exit.confirmation_required') { stopMic(); if (!$('exitDialog').open) $('exitDialog').showModal(); }
     if (e.type === 'error') notice(`错误：${e.code}。请检查服务配置；暂停后可恢复或重新连接。`);
-    if (e.type === 'notice') notice(e.text);
+    if (e.type === 'notice') {
+      if (e.code === 'MEMORY_CONTEXT_RESET') {
+        if (typeof e.memory_boundary === 'string') memoryBoundary = e.memory_boundary;
+        resetMemoryView(e.text);
+      }
+      notice(e.text);
+    }
 }
 
 function handleConnectionStatus(status) {

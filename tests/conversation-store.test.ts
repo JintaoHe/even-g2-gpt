@@ -17,7 +17,7 @@ test('conversation store creates a private WAL database with idempotent migratio
   let store = await ConversationStore.create(root);
   const health = store.health();
   assert.deepEqual(health, {
-    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 14,
+    journalMode: 'wal', synchronous: 2, foreignKeys: true, busyTimeoutMs: 5000, schemaVersion: 16,
   });
   await store.close();
 
@@ -28,7 +28,7 @@ test('conversation store creates a private WAL database with idempotent migratio
   legacy.close();
 
   store = await ConversationStore.create(root);
-  assert.equal(store.health().schemaVersion, 14);
+  assert.equal(store.health().schemaVersion, 16);
   await store.close();
 
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
@@ -47,7 +47,9 @@ test('conversation store creates a private WAL database with idempotent migratio
         { version: 11, name: 'durable-device-access-epoch' },
         { version: 12, name: 'session-scoped-guest-drafts' },
         { version: 13, name: 'filtered-history-search' },
-        { version: 14, name: 'exact-owner-history-scope' }]);
+        { version: 14, name: 'exact-owner-history-scope' },
+        { version: 15, name: 'explicit-personal-memory-storage' },
+        { version: 16, name: 'memory-source-suppression' }]);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(row => row.name);
     for (const table of ['sessions', 'clients', 'resume_credentials', 'topics', 'turns', 'messages', 'session_summaries',
       'summary_jobs', 'legacy_session_imports', 'device_credentials', 'recovery_drafts']) {

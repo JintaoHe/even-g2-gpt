@@ -51,6 +51,7 @@ const begin = performance.now();
 // interrupting copied in-flight turns. Verify migration independently of recovery.
 (ConversationStore as any).migrate(db);
 const migrationMs = performance.now() - begin;
+const migratedVersion = (db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as any).v;
 assert.deepEqual(fingerprint(db, original.layout), original);
 assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
 db.exec("INSERT INTO history_search_fts(history_search_fts,rank) VALUES('integrity-check',1)");
@@ -73,7 +74,7 @@ const sourceCheck = new DatabaseSync(sourcePath, { readOnly: true } as any);
 try { assert.equal((sourceCheck.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as any).v, expectedVersion); }
 finally { sourceCheck.close(); }
 console.log(JSON.stringify({ type: 'history_private_upgrade', sourceOpenedReadOnly: true, sourceVersion: originalVersion,
-  migratedVersion: 14, migrationMs, beforeBytes, afterBytes, growthBytes: afterBytes - beforeBytes,
+  migratedVersion, migrationMs, beforeBytes, afterBytes, growthBytes: afterBytes - beforeBytes,
   counts: original.counts, dataPreserved: true, foreignKeysValid: true, ftsIntegrity: true,
   oldCodeRejectsNewSchema: true, backupVerifiedBeforeRecovery: true, oldCodeWritesRestoredCopy: true,
   apiCalls: 0, privateCopiesRetainedAt: root }));

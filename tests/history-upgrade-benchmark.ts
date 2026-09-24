@@ -19,8 +19,8 @@ await mkdir(migratedRoot); await mkdir(restoredRoot);
 const name = 'assistant-memory.sqlite', now = 2_000_000_000_000;
 const backup = (sqlite as any).backup as (db: InstanceType<typeof DatabaseSync>, path: string) => Promise<void>;
 assert.equal(typeof backup, 'function');
-const fingerprint = (db: InstanceType<typeof DatabaseSync>) => {
-  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'history_%' AND name NOT IN ('schema_migrations','service_owner') ORDER BY name").all() as { name: string }[]);
+const fingerprint = (db: InstanceType<typeof DatabaseSync>, names?: string[]) => {
+  const tables = names ? names.map(name => ({ name })) : (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'history_%' AND name NOT IN ('schema_migrations','service_owner') ORDER BY name").all() as { name: string }[]);
   const hash = createHash('sha256'), counts: Record<string, number> = {};
   for (const { name } of tables) {
     assert.match(name, /^[a-z_]+$/); let count = 0;
@@ -56,7 +56,9 @@ await backup(saved, join(migratedRoot, name)); await backup(saved, join(restored
 const beforeBytes = (await stat(join(migratedRoot, name))).size;
 const start = performance.now(), store = await ConversationStore.create(migratedRoot), migrationMs = performance.now() - start;
 const db = new DatabaseSync(join(migratedRoot, name));
-assert.equal(store.health().schemaVersion, 14); assert.deepEqual(fingerprint(db), original);
+assert.equal(store.health().schemaVersion, 16); assert.deepEqual(fingerprint(db, Object.keys(original.counts)), original);
+for (const name of ['personal_memories', 'personal_memory_changes', 'memory_forget_sources'])
+  assert.equal((db.prepare(`SELECT count(*) AS n FROM ${name}`).get() as any).n, 0);
 assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
 db.exec("INSERT INTO history_search_fts(history_search_fts,rank) VALUES('integrity-check',1)");
 db.exec('PRAGMA wal_checkpoint(TRUNCATE)');

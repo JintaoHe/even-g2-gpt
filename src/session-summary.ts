@@ -160,6 +160,7 @@ export class SessionSummaryService {
         let raw = await this.generator.generate({ ...base, attempt: 'summarize' }, controller.signal);
         firstCallCompleted = true;
         controller.signal.throwIfAborted();
+        this.store.assertSummaryRangeAllowed(job.sessionId, job.fromSequence);
         let summary: ContextSummary;
         try { summary = validateContextSummary(raw, job.throughSequence); }
         catch {
@@ -174,7 +175,8 @@ export class SessionSummaryService {
           if (this.closed || controller.signal.aborted) this.store.deferSummaryJob(job.id, this.now(), 'shutdown');
           else if (error instanceof CostBudgetExceeded) this.store.deferSummaryJob(job.id, this.now(), 'budget', firstCallCompleted);
           else this.store.failSummaryJob(job.id,
-            error instanceof Error && error.message === 'SUMMARY_INPUT_LIMIT' ? 'SUMMARY_INPUT_LIMIT'
+            error instanceof Error && error.message === 'SUMMARY_FORGOTTEN' ? 'SUMMARY_FORGOTTEN'
+              : error instanceof Error && error.message === 'SUMMARY_INPUT_LIMIT' ? 'SUMMARY_INPUT_LIMIT'
               : error instanceof Error && error.message === 'SUMMARY_RANGE_INVALID' ? 'SUMMARY_RANGE_INVALID'
               : error instanceof Error && error.message === 'SESSION_SUMMARY_SCHEMA_INVALID'
               ? 'SUMMARY_SCHEMA_INVALID' : 'SUMMARY_MODEL_FAILED', this.now());

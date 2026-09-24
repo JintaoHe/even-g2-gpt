@@ -178,7 +178,7 @@ test('v10 migration preserves v9 data and rolls back entirely on failure', async
   assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='device_guest_locks'").get(), undefined);
   db.exec('DROP TRIGGER fail_v10');
   const reopened = await ConversationStore.create(root); t.after(() => reopened.close());
-  assert.equal(reopened.health().schemaVersion, 14);
+  assert.equal(reopened.health().schemaVersion, 16);
   assert.equal(reopened.getSession(id)?.ownerScope, 'single-user');
   reopened.enterDeviceGuestMode({ clientId, at: 101 });
 });
