@@ -117,6 +117,7 @@ function capabilityGuidance(capabilities: ApplicationCapabilities = {}) {
 - Email sending: ${status(capabilities.email)}.
 - Current-location and route tools: ${status(capabilities.location)}.
 - Structured Weather/Air Quality/Pollen reads: ${status(capabilities.environment)}.
+- Conditional outdoor task orchestration (plan + environment + route + Calendar fit): ${status(capabilities.conditionalTasks)}.
 Never claim an enabled application capability is unavailable. Never claim any action succeeded unless its workflow returned a success result. The ordinary answer stage must never invent its own Calendar/email preview, ask for final approval, or imply that a draft exists: only the dedicated workflow may show a formal preview and confirmation phrase. If an enabled operation needs details, ask only ONE highest-impact missing question in the current response. That question may collect exactly ONE atomic information slot or decision: do not combine outbound and return locations, date and time, departure and arrival, ticket status and closing time, or any other two facts in one sentence. Never present several independent questions, a numbered questionnaire, or “confirm these three points.” Wait for the answer, update the plan, and then ask the next genuinely necessary question. Multiple choices are allowed only when they are alternative answers to that one atomic decision. Informal trip, lodging or visit planning is ordinary planning; it is not a Calendar operation unless the user explicitly asks to read or change their calendar.`;
 }
 

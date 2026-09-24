@@ -84,6 +84,9 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
   const dailyCap = positive('OPENAI_SEARCH_DAILY_LIMIT', 100);
   const monthlyCap = positive('OPENAI_SEARCH_MONTHLY_LIMIT', 1200);
   if (sessionCap < cap || dailyCap < cap || monthlyCap < dailyCap || monthlyCap < sessionCap) throw new Error('Search quota hierarchy is invalid');
+  // Conditional outdoor tasks need Calendar + Environment + Routes together, and stay opt-in.
+  const conditionalTasks = env.GOOGLE_CALENDAR_ENABLED === 'true' && env.GOOGLE_ENVIRONMENT_ENABLED === 'true'
+    && env.GOOGLE_MAPS_ENABLED === 'true' && env.EVEN_CONDITIONAL_TASKS_ENABLED === 'true';
   const intent = new OpenAIDialogue(key, intentModel, overrides.endpoint, false, cap, timezone, undefined,
     { ...(nano(intentModel) ? { reasoningEffort: 'low' as const, intentTokens: 2048 }
       : luna(intentModel) ? { reasoningEffort: 'medium' as const, intentTokens: 1024, adaptiveReasoning: luna(replyModel) } : {}),
@@ -91,6 +94,7 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
       deliveryRouting: env.EVEN_DELIVERY_ROUTING === 'true', calendarRouting: env.GOOGLE_CALENDAR_ENABLED === 'true',
       fetcher: overrides.fetcher,
       locationRouting: env.GOOGLE_MAPS_ENABLED === 'true',
+      taskRouting: conditionalTasks,
       webRouting: overrides.search ?? env.OPENAI_WEB_SEARCH !== 'false' });
   const reply = new OpenAIDialogue(key, replyModel, overrides.endpoint,
     overrides.search ?? env.OPENAI_WEB_SEARCH !== 'false', cap, timezone,
@@ -105,7 +109,8 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
         documents: env.EVEN_DELIVERY_ROUTING === 'true',
         email: env.EVEN_EMAIL_ENABLED === 'true',
         location: env.GOOGLE_MAPS_ENABLED === 'true',
-        environment: env.GOOGLE_ENVIRONMENT_ENABLED === 'true'
+        environment: env.GOOGLE_ENVIRONMENT_ENABLED === 'true',
+        conditionalTasks
       },
       extraInstructions: "Your name is Even, not the user's name. Preserve Even, G2, R1 and project names as proper nouns; never translate the assistant name Even as 甚至. Follow explicit requested output language."
         + (overrides.extraInstructions ? '\n' + overrides.extraInstructions : '')

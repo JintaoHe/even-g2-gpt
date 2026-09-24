@@ -1,17 +1,19 @@
 # Conditional Task Orchestrator
 
-Status: retired from the runtime on 2026-09-18. This file is retained as a
-historical design and test reference. Outdoor, itinerary and multi-stop work
-now routes to Luna's general `planning` mode. Maps/Routes and environmental
-reads are optional evidence sources with quota-bounded research fallbacks;
-Calendar and Email remain dedicated, confirmation-bound services and never use
-a speculative model fallback.
+Status: retired from the runtime on 2026-09-18, then re-wired behind an opt-in
+flag (`EVEN_CONDITIONAL_TASKS_ENABLED=true`) on 2026-09-23. The orchestrator is
+reachable again only when the API dialogue path plus `GOOGLE_CALENDAR_ENABLED`,
+`GOOGLE_ENVIRONMENT_ENABLED` and `GOOGLE_MAPS_ENABLED` are all enabled; with the
+flag off (the default) outdoor, itinerary and multi-stop work still routes to
+Luna's general `planning` mode. Maps/Routes and environmental reads are optional
+evidence sources with quota-bounded research fallbacks; Calendar and Email
+remain dedicated, confirmation-bound services and never use a speculative model
+fallback. Live acceptance on Linux/Even Hub is still pending.
 
-The previous local end-to-end implementation included the
-bounded LLM planner, production tool registry, live conversation router, HUD
-progress, Calendar confirmation flow, one-shot location, environmental
-adapters, Places/Routes comparison, and decision layer are connected behind an
-opt-in feature flag. Weather, Air Quality, and Pollen have all passed
+The local end-to-end implementation — bounded LLM planner, production tool
+registry, live conversation router, HUD progress, Calendar confirmation flow,
+one-shot location, environmental adapters, Places/Routes comparison, and
+decision layer — is connected behind that opt-in feature flag. Weather, Air Quality, and Pollen have all passed
 restricted-key live requests; a successful request with omitted regional
 Pollen indexes remains `available:false`, not an error or a zero-risk claim. No
 Linux deployment or Even Hub package is authorized by this status.

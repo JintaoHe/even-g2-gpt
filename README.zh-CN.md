@@ -137,7 +137,7 @@ npm start
 ## 安全与隐私边界
 
 - 只提交源码、合成测试和文档；不要提交 `.env`、OAuth JSON、CLI 登录、录音、私人对话、生成文件或 runtime database。
-- 精确 GPS 坐标只存在于 session 内存 adapter：最多每 10 秒刷新，两分钟后不再视为可用；不会进入 Luna、search、history、日志、artifact 或眼镜正文。同一可恢复 session 内的 transport 断线不会清除它，明确退出或最终过期时才清除。
+- 精确 GPS 坐标只存在于 session 内存 adapter：由 Even 客户端（Even SDK）最多每 10 秒采样一次，后端在两分钟后不再视为可用；不会进入 Luna、search、history、日志、artifact 或眼镜正文。同一可恢复 session 内的 transport 断线不会清除它，明确退出或最终过期时才清除。
 - Calendar 和 Email 凭证只保存在后端。模型不能任意选择收件人、读取任意服务器文件或直接执行 shell。
 - 认知模式、以前的确认或模型的一句话都不能授权写入；每次副作用都必须重新绑定并校验当前 preview。
 - Calendar／Email 写入结果不确定时先检查远端状态，不自动重放，避免创建重复事件或重复邮件。
