@@ -211,6 +211,19 @@ sudo find /opt/even-agent -type f -exec chmod 0644 {} \;
 
 ## 11. 私密配置
 
+打包后的 Even App 页面可能使用每次启动变化的 `http://127.0.0.1:<port>` Origin。
+需要真机连接时，在私密环境文件里显式设 `EVEN_ALLOW_LOOPBACK_ORIGIN=true`；默认关闭，
+只接受精确的 `true` / `false`，其他值（包括空值、大小写和空白变体）会在打开数据库前拒绝启动。
+这不是任意 Origin 或域名通配符：仅允许规范形式的 HTTP、精确主机 `127.0.0.1`、
+显式端口 1–65535；URL 会规范化掉的默认端口 80 也不接受。localhost、IPv6、HTTPS 回环、
+其他 IP、路径和用户信息均不允许。公网 Host 和原有网页 Origin 检查保持不变。
+本机回环 Origin 不是认证或 Even 身份证明；仍须通过 token／设备认证，保持访客隔离和限流，
+3001 仍只监听本机。多用户共用服务器需要另做账号与数据隔离，不能共享主人 token。
+本次仅处理 WebSocket，不增加 HTTP CORS 响应头；以后插件直接请求 HTTP 接口时，
+CORS 应使用同一条严格 Origin 规则，并保留接口认证。
+握手放行只记录 `origin_accepted`、`kind=loopback` 和端口，不代表认证成功。
+本次无需重打 EHPK；部署后按真机清单验证重开、网络切换和新手机授权，不以离线测试代替。
+
 创建 `/etc/even-agent.env`，所有真实值只存在服务器私密文件或密码管理器：
 
 ```dotenv

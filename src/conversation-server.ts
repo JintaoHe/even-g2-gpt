@@ -64,6 +64,19 @@ export function unhandledRejectionMetadata(reason: unknown) {
 }
 
 type Transcriber = StreamingTranscriber;
+/** Packaged Even WebViews use dynamic loopback ports; this is not authentication.
+ * WebSocket only: future plugin HTTP endpoints must apply the same rule for CORS.
+ */
+export function isEvenLoopbackOrigin(origin: string): boolean {
+  try {
+    const parsed = new URL(origin);
+    const port = Number(parsed.port);
+    return parsed.origin === origin && parsed.protocol === 'http:'
+      && parsed.hostname === '127.0.0.1' && parsed.port !== ''
+      && Number.isInteger(port) && port >= 1 && port <= 65535;
+  } catch { return false; }
+}
+
 export function createConversationServer(options: {
   token: string; model: DialogueModel; transcriber: (delta: (text: string) => void) => Transcriber;
   save?: (id: string, history: Message[]) => Promise<void>; idleMs?: number;
@@ -104,7 +117,7 @@ export function createConversationServer(options: {
   planningEvidenceSelector?: PlanningEvidenceSelector;
   runtimeMetrics?: RuntimeMetrics;
   costSnapshot?: () => Promise<CostSnapshot>;
-  ingress?: { publicHosts?: string[]; allowedOrigins?: string[] };
+  ingress?: { publicHosts?: string[]; allowedOrigins?: string[]; allowLoopbackOrigin?: boolean };
 }) {
   if (options.token.length < 32) throw new Error('G2_CLIENT_TOKEN must have at least 32 characters');
   const localHost = /^(127\.0\.0\.1|localhost):\d+$/;
@@ -127,7 +140,8 @@ export function createConversationServer(options: {
   const hostAllowed = (host: string) => localHost.test(host) || publicHosts.has(host.toLowerCase());
   const originAllowed = (host: string, origin?: string) => !origin
     || (localHost.test(host) && origin === `http://${host}`)
-    || allowedOrigins.has(origin);
+    || allowedOrigins.has(origin)
+    || (options.ingress?.allowLoopbackOrigin === true && isEvenLoopbackOrigin(origin));
   const calendarTasks = new Set<Promise<void>>();
   const runtimeMetrics = options.runtimeMetrics ?? new RuntimeMetrics();
   const files: Record<string, [string, string]> = {
@@ -253,6 +267,9 @@ export function createConversationServer(options: {
     }
     if (!hostAllowed(host) || !originAllowed(host, origin)) {
       rejectUpgrade('403 Forbidden'); return;
+    }
+    if (options.ingress?.allowLoopbackOrigin === true && origin && isEvenLoopbackOrigin(origin)) {
+      console.info(JSON.stringify({ event: 'origin_accepted', kind: 'loopback', port: Number(new URL(origin).port) }));
     }
     wss.handleUpgrade(req, socket, head, client => wss.emit('connection', client, req));
   });
@@ -1226,7 +1243,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     draftGenerator: hybrid.provider === 'api' ? createDraftGenerator(process.env, openaiFetch) : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: stt.configured, speechProvider: stt.name, location: true,
       routes: !!routeProvider, environment: !!planningEvidenceSelector, conditionalTasks: false },
-    ingress: publicHost ? { publicHosts: [publicHost], allowedOrigins: publicOrigin ? [publicOrigin] : undefined } : undefined,
+    ingress: { publicHosts: publicHost ? [publicHost] : undefined,
+      allowedOrigins: publicHost && publicOrigin ? [publicOrigin] : undefined,
+      allowLoopbackOrigin: startup.allowLoopbackOrigin },
     transcriber: delta => stt.create(delta)
   });
   const port = Number(process.env.CONVERSATION_PORT ?? 3001);
