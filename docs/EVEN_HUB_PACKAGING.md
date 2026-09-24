@@ -27,7 +27,7 @@ OpenAI、Google、Gmail 和 OAuth 凭据全部留在 Linux 后端。`.ehpk` 内�
 
 手机伴随页已经包含文字输入框，适合输入邮箱、URL、ID 或在不方便说话时发问；眼镜本身没有键盘。当前 source 在 `0.2.0` 包之后增加自动一次性定位与服务端 Places/Routes：精确坐标绑定当前 WSS 请求，不写入 LLM／对话／日志／MD，完成、失败、中断或退出后清除；失败会请求用户输入出发地址。Google Maps key 只留在后端。任意 To/CC 收件人仍未启用，详见 [伴随输入、定位与安全分发](COMPANION_INPUT_LOCATION_AND_DISTRIBUTION.md)。
 
-Even 的 network whitelist 与浏览器的 Origin/CORS 是两道独立检查。当前后端继续严格校验 Host 与 Origin。真实 `.ehpk` 第一次连接时，如果 WebView 使用了不同的稳定 Origin，先从安全日志确认精确值，再决定是否加入后端 allowlist；不得为了跑通而允许任意 Origin、通配符或公开 3001 端口。
+Even 的 network whitelist 与浏览器的 Origin/CORS 是两道独立检查。后端继续严格校验 Host 与 Origin。真机已观察到内部页面使用 `http://127.0.0.1:<port>`，端口可能每次启动变化。服务端可显式设 `EVEN_ALLOW_LOOPBACK_ORIGIN=true`（默认关闭）兼容：只接受规范 HTTP、精确 `127.0.0.1` 和合法显式非默认端口，不接受 localhost、IPv6、其他 IP、路径或用户信息。这是有界回环来源规则，不是任意 Origin 或域名通配符；它不证明 Even 身份，也不替代 token／设备认证。不得开放公网 3001。只改服务端，无需重打 `.ehpk`；当前不加 HTTP CORS 响应头，未来 HTTP 接口须按同一规则单独处理。
 
 ## 3. 本地验证与打包
 
@@ -91,7 +91,7 @@ Private Testing 能验证真实包、manifest、权限和启动流程，但不�
 - 30 分钟、1 小时、2 小时稳定性、延迟、电量与温度。
 - 退出后能正常启动 Conversate 等第一方应用。
 
-首次 packaged WSS 若失败，优先检查：manifest whitelist、TLS 证书、WebView 实际 Origin、后端 Host/Origin 拒绝记录。不得改成开放 Origin、关闭证书校验或开放公网 3001。
+首次 packaged WSS 若失败，优先检查：manifest whitelist、TLS 证书、WebView 实际 Origin、后端 Host/Origin 拒绝记录。若来源符合上述回环规则，核对服务端显式开关，而不是把某次启动的端口写成精确 allowlist。该有界规则不属于开放任意 Origin；不得扩大为域名通配符、关闭证书校验或开放公网 3001。多用户共用服务仍需单独的账号与数据隔离。
 
 ## 7. 上传前安全复核
 

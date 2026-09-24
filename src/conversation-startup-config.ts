@@ -11,6 +11,10 @@ function booleanSetting(env: NodeJS.ProcessEnv, name: string, fallback = false) 
 }
 
 export function readConversationStartupConfig(env: NodeJS.ProcessEnv) {
+  const loopback = env.EVEN_ALLOW_LOOPBACK_ORIGIN;
+  if (loopback !== undefined && loopback !== 'true' && loopback !== 'false') {
+    throw new Error('EVEN_ALLOW_LOOPBACK_ORIGIN must be exactly true or false');
+  }
   hybridFirstOutputMs(env); // Validate before opening/migrating stores or creating ledgers.
   const recallEnabled = historyRecallEnabled(env);
   // INVOCATION_ID is supplied by systemd, including existing installations whose
@@ -30,6 +34,7 @@ export function readConversationStartupConfig(env: NodeJS.ProcessEnv) {
     throw new Error('EVEN_LOCAL_TEST_WRITE_CONTROLS requires EVEN_LOCAL_TEST_CONTROLS=true');
   }
   return {
+    allowLoopbackOrigin: loopback === 'true',
     historyRecallEnabled: recallEnabled,
     legacyHelloEnabled: booleanSetting(env, 'CONVERSATION_LEGACY_HELLO_ENABLED'),
     resumeWindowMs: resumeMinutes * 60_000,

@@ -3,6 +3,16 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { readConversationStartupConfig } from '../src/conversation-startup-config.js';
 
+test('loopback Origin compatibility is default-off and requires exact boolean configuration', () => {
+  assert.equal(readConversationStartupConfig({}).allowLoopbackOrigin, false);
+  for (const flag of ['true', 'false']) {
+    assert.equal(readConversationStartupConfig({ EVEN_ALLOW_LOOPBACK_ORIGIN: flag }).allowLoopbackOrigin, flag === 'true');
+  }
+  for (const flag of ['', 'yes', 'TRUE', 'False', ' true ', '1', '0']) {
+    assert.throws(() => readConversationStartupConfig({ EVEN_ALLOW_LOOPBACK_ORIGIN: flag }), /EVEN_ALLOW_LOOPBACK_ORIGIN/);
+  }
+});
+
 test('startup configuration is fail-closed and defaults test controls off', () => {
   const value = readConversationStartupConfig({});
   assert.equal(value.resumeWindowMs, 15 * 60_000);
@@ -49,6 +59,7 @@ test('deployment marks production and startup validates before any persistent st
     assert.ok(entry.indexOf(operation) > gate, operation);
   }
   assert.match(entry, /historyRecallEnabled: startup.historyRecallEnabled/);
+  assert.match(entry, /allowLoopbackOrigin: startup.allowLoopbackOrigin/);
 });
 
 test('write test controls require an explicit read-control opt-in', () => {
