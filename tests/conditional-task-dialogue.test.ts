@@ -20,19 +20,19 @@ class TaskBase implements DialogueModel {
   async reply(_history: Message[], _signal: AbortSignal, delta: (value: string) => void) { delta('ordinary'); }
 }
 
-function fixture(calendarItems: any[] = [], confirmError = false, taskSpec = spec, poorAt = '') {
-  let calendarCalls = 0, locationCalls = 0, previewCalls = 0, confirmCalls = 0, providerCalls = 0;
+function fixture(calendarItems: any[] = [], confirmError = false, taskSpec = spec, poorAt = '', onPreview?: () => void) {
+  let calendarCalls = 0, locationCalls = 0, previewCalls = 0, confirmCalls = 0, providerCalls = 0, dismissCalls = 0;
   let environmentActive = 0, environmentPeak = 0, previewStart = '';
   const pause = async () => { providerCalls++; environmentActive++; environmentPeak = Math.max(environmentPeak, environmentActive);
     await new Promise(resolve => setTimeout(resolve, 15)); environmentActive--; };
   const calendar = {
     query: async () => { calendarCalls++; return { items: calendarItems, complete: true }; },
-    preview: async (_kind: string, event: any) => { previewCalls++; previewStart = event.start;
+    preview: async (_kind: string, event: any) => { previewCalls++; previewStart = event.start; onPreview?.();
       return { id: 'preview-id', eventId: 'event-id', phrase: '确认创建', expires: now + 300000,
         preview: `创建·芝加哥时间：带孩子去公园\n${event.start}–${event.end}\n地点：River Park\n说“确认创建”` }; },
     confirm: async () => { confirmCalls++; if (confirmError) throw new Error('network outcome unknown');
       return { state: 'succeeded', kind: 'create', notifyGuests: true }; },
-    dismiss: () => {}
+    dismiss: () => { dismissCalls++; }
   };
   const location = { request: async () => { locationCalls++; return { latitude: 41.58, longitude: -93.62, observedAt: now, receivedAt: now, accuracyM: 10 }; },
     cancel: () => {}, clear: () => {} };
@@ -49,7 +49,8 @@ function fixture(calendarItems: any[] = [], confirmError = false, taskSpec = spe
       distanceMeters: 5000, quality: { adjustedRating: 4.5, reliable: true, risk: false } }] }; } };
   const planner: ConditionalTaskPlanner = async () => ({ action: 'execute', spec: taskSpec });
   const dialogue = new ConditionalTaskDialogue(new TaskBase(), planner, calendar as any, location as any, routes, environment, () => now);
-  return { dialogue, stats: () => ({ calendarCalls, locationCalls, previewCalls, confirmCalls, providerCalls, environmentPeak, previewStart }) };
+  return { dialogue, dismissCount: () => dismissCalls,
+    stats: () => ({ calendarCalls, locationCalls, previewCalls, confirmCalls, providerCalls, environmentPeak, previewStart }) };
 }
 
 async function turn(dialogue: ConditionalTaskDialogue, history: Message[], input: string) {
@@ -132,4 +133,24 @@ test('an uncertain Calendar write is never replayed and tells the user to verify
   const confirmed = await turn(dialogue, history, '确认创建');
   assert.match(confirmed.output, /结果暂时无法确定.*核对日历.*不会自动重试/);
   assert.equal(stats().confirmCalls, 1);
+});
+
+test('a disconnect while a task awaits its preview dismisses it and never revives a connection-bound confirmation', async () => {
+  // Revoke the connection-bound approval mid-flight, exactly as the preview is produced,
+  // mirroring a transport disconnect while the durable turn keeps running to completion.
+  let dialogueRef!: ConditionalTaskDialogue;
+  const { dialogue, stats, dismissCount } = fixture([], false, spec, '', () => dialogueRef.invalidate());
+  dialogueRef = dialogue;
+  const first = await turn(dialogue, [], '如果下午没安排，天气不错就找个公园并帮我安排。');
+  assert.equal(stats().previewCalls, 1);            // a preview was produced by the late turn
+  assert.equal(dismissCount(), 1);                  // ...but revocation dismissed it
+  assert.equal(stats().confirmCalls, 0);
+  assert.doesNotMatch(first.output, /确认创建/);     // no confirmation prompt reaches the user
+  assert.equal((dialogue as unknown as { pending?: unknown }).pending, undefined); // no revived approval
+
+  // The reviewer's repro: a later "confirm" must not reach calendar.confirm via a revived pending.
+  const second = await turn(dialogue, [{ role: 'user', content: 'request' },
+    { role: 'assistant', content: first.output }], '确认创建');
+  assert.equal(stats().confirmCalls, 0);
+  assert.doesNotMatch(second.output, /Google 已保存新日程/);
 });

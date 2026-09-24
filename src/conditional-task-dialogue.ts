@@ -284,13 +284,16 @@ function summarize(spec: ConditionalOutdoorSpec, state: TaskState) {
 export class ConditionalTaskDialogue implements DialogueModel {
   private plans = new WeakMap<AbortSignal, PlanContext>();
   private pending?: Pending;
+  // Bumped by every revocation (disconnect/pause/memory reset). A durable turn started
+  // before a bump must not re-establish a connection-bound approval after it.
+  private revocation = 0;
   constructor(private base: DialogueModel, private planner: ConditionalTaskPlanner,
     private calendar: CalendarTaskService, private location: LocationSource, private routes: RouteProvider,
     private environment: EnvironmentProvider, private now = Date.now) {}
 
-  startSession() { this.clearPending(); }
-  endSession() { this.clearPending(); this.location.cancel(); this.location.clear(); }
-  invalidate() { this.clearPending(); this.location.cancel(); }
+  startSession() { this.revocation++; this.clearPending(); }
+  endSession() { this.revocation++; this.clearPending(); this.location.cancel(); this.location.clear(); }
+  invalidate() { this.revocation++; this.clearPending(); this.location.cancel(); }
   private clearPending() {
     if (this.pending) {
       this.pending.orchestrator.cancel(this.pending.state);
@@ -350,6 +353,7 @@ export class ConditionalTaskDialogue implements DialogueModel {
       return;
     }
     if (context?.plan.taskKind !== 'outdoor_activity') { delta('这个条件任务类型暂未实现。'); return; }
+    const revocation = this.revocation;
     update?.({ type: 'task.status', status: 'planning' });
     const planned = await this.planner(history.slice(0, -1), context?.text ?? history.at(-1)?.content ?? '', signal); signal.throwIfAborted();
     if (planned.action === 'clarify') { delta(planned.question); return; }
@@ -366,8 +370,16 @@ export class ConditionalTaskDialogue implements DialogueModel {
     });
     try {
       await orchestrator.execute(task, state, [], signal); signal.throwIfAborted();
-      const prompt = summarize(planned.spec, state);
       const preview = record(state.nodes.preview?.output);
+      // A disconnect, pause or memory revocation during this durable turn revokes the
+      // connection-bound approval. The turn keeps running, so a late preview must be
+      // dismissed here and must never re-establish a confirmable pending.
+      if (this.revocation !== revocation) {
+        if (text(preview.operationId, 100)) this.calendar.dismiss(text(preview.operationId, 100));
+        orchestrator.cancel(state);
+        return;
+      }
+      const prompt = summarize(planned.spec, state);
       if (state.status === 'waiting_confirmation' && text(preview.operationId, 100) && text(preview.phrase, 30)) {
         this.pending = { plan: task, state, orchestrator, prompt, phrase: text(preview.phrase, 30),
           expires: number(preview.expires) ?? this.now() + 5 * 60_000, previewId: text(preview.operationId, 100) };
