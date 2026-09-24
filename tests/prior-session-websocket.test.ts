@@ -40,6 +40,8 @@ for (const guest of [false, true]) test(`WS ${guest ? 'guest denies prior access
   await once(socket,'open');socket.send(JSON.stringify({type:'hello',protocol_version:2,client_id:clientId,token,
     client_capabilities:{guest_mode:true,location:false},credential_storage:'browser_v1'}));
   const ready=await wait('ready');assert.equal(ready.snapshot.messages.length,0);
+  if (guest) assert.equal(Object.hasOwn(ready, 'memory_boundary'), false);
+  else assert.equal(typeof ready.memory_boundary, 'string');
   socket.send(JSON.stringify({type:'text.submit',message_id:randomUUID(),text:'刚才的备份方案定了吗？'}));await wait('answer.done');
   assert.equal(sends,0);
   assert.doesNotMatch(JSON.stringify(store.listMessages(ready.session_id)),/AmberBridge|只读资料/);

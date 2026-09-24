@@ -11,7 +11,13 @@ export class HybridDialogue implements DialogueModel {
   private original?: Message[];
   private retries = new WeakMap<AbortSignal, Message[]>();
   constructor(private intent: DialogueModel, private answer: DialogueModel, private replyOverride?: DialogueModel['reply'],
-    private diagnostic: (event: ReplyDiagnostic) => void = () => {}, private answerModel = 'gpt-5.6-luna') {}
+    private diagnostic: (event: ReplyDiagnostic) => void = () => {}, private answerModel = 'gpt-5.6-luna',
+    private nestedReplies: DialogueModel[] = []) {}
+  revokeMemoryContext() {
+    this.original = undefined; this.retries = new WeakMap();
+    this.intent.revokeMemoryContext?.(); this.answer.revokeMemoryContext?.();
+    for (const model of this.nestedReplies) model.revokeMemoryContext?.();
+  }
   startSession() { this.original = undefined; this.retries = new WeakMap(); this.intent.startSession?.(); this.answer.startSession?.(); }
   endSession() { this.original = undefined; this.retries = new WeakMap(); this.intent.endSession?.(); this.answer.endSession?.(); }
   async plan(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan> {
@@ -110,6 +116,6 @@ export function createHybridDialogue(key: string, env: NodeJS.ProcessEnv = proce
       { ...overrides, search: false, hybridPrimaryReply: true }).model : undefined;
   const onDiagnostic = overrides.onReplyDiagnostic ?? ((event: ReplyDiagnostic) => console.info(JSON.stringify(event)));
   return { model: new HybridDialogue(intent, reply, ordinary ? createReplyFallback(ordinary, reply, onDiagnostic, firstOutputMs) : undefined,
-    overrides.hybridPrimaryReply ? () => {} : onDiagnostic, replyModel),
+    overrides.hybridPrimaryReply ? () => {} : onDiagnostic, replyModel, ordinary ? [ordinary] : []),
     models: { intent: intentModel, reply: replyModel } };
 }

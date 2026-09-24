@@ -340,7 +340,8 @@ export function createConversationServer(options: {
       const topicId = fallback.at(-1)?.topicId;
       if (!store || !topicId) return activeTopicHistory(fallback);
       const topic = store.listTopics(id).find(item => item.id === topicId);
-      return store.listTopicMessages(id, topicId).map(message => ({
+      const floor = store.isSessionMemorySuppressed(id) ? store.summaryFloor(id) ?? Infinity : 1;
+      return store.listTopicMessages(id, topicId).filter(message => message.sequence >= floor).map(message => ({
         role: message.role === 'system' ? 'assistant' as const : message.role,
         content: message.content,
         ...(message.citations ? { citations: message.citations as any } : {}),
@@ -386,6 +387,17 @@ export function createConversationServer(options: {
       send(event);
     }, store ? undefined : history => options.save?.(id, history) ?? Promise.resolve(), store && initialTopic ? {
       sessionId: id,
+      memoryBoundary: () => store.memoryContextBoundary(id),
+      subscribeMemorySuppression: listener => store.onMemorySuppression(listener),
+      onMemoryContextRevoked: () => {
+        captureStop?.stop();
+        if (runtime) runtime.mailApproval = undefined;
+        calendarControl?.invalidate();
+        delivery?.endSession(); calendarDialogue?.endSession(); locationDialogue?.endSession();
+        planningEvidenceDialogue?.invalidate(); locationBroker.cancel(); locationBroker.clear();
+        options.model.revokeMemoryContext?.();
+        store.deleteRecoveryDraft(id, 'calendar'); store.deleteRecoveryDraft(id, 'delivery');
+      },
       ...(options.historyRecallEnabled !== false ? { recallHistory: async (query: string, signal: AbortSignal) =>
         readHistoryRecall(store, { mode: 'owner', ownerScope: options.ownerScope ?? 'single-user' }, query, signal) } : {}),
       persistence: new StoreConversationPersistence(store, id),
@@ -395,6 +407,10 @@ export function createConversationServer(options: {
         if (!requestsAnswerRecovery(request)) return undefined;
         const prior = store.latestRecoverableTurn(id);
         if (!prior) return { kind: 'missing' };
+        if (store.isSessionMemorySuppressed(id)) {
+          const floor = store.summaryFloor(id);
+          if (floor === undefined || !prior.output || prior.output.sequence < floor) return { kind: 'missing' };
+        }
         if (prior.output?.status === 'committed') return { kind: 'committed', turnId: prior.turn.id,
           content: prior.output.content, citations: prior.output.citations as any };
         return { kind: 'interrupted', turnId: prior.turn.id };
@@ -424,8 +440,16 @@ export function createConversationServer(options: {
             messageId: message.id, sequence: message.sequence, status: message.status,
           };
         }));
-      await delivery?.restoreRecovery(store.getRecoveryDraft(id, 'delivery')?.payload);
-      await calendarDialogue?.restoreRecovery(store.getRecoveryDraft(id, 'calendar')?.payload);
+      if (!store.isSessionMemorySuppressed(id)) {
+        const version = store.memoryContextBoundary(id).version;
+        await delivery?.restoreRecovery(store.getRecoveryDraft(id, 'delivery')?.payload);
+        if (store.memoryContextBoundary(id).version === version) {
+          await calendarDialogue?.restoreRecovery(store.getRecoveryDraft(id, 'calendar')?.payload);
+        }
+        if (store.memoryContextBoundary(id).version !== version) { delivery?.endSession(); calendarDialogue?.endSession(); }
+      } else {
+        store.deleteRecoveryDraft(id, 'calendar'); store.deleteRecoveryDraft(id, 'delivery');
+      }
     }
     const start = () => {
       if (started) return;
@@ -549,6 +573,15 @@ export function createConversationServer(options: {
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 262144) client.send(JSON.stringify(event));
       else client.close(1013, 'Client too slow');
     };
+    // Every fire-and-forget turn terminates here, not in the process fatal handler.
+    const submitTurn = (conversation: Conversation, ...args: Parameters<Conversation['submit']>) => {
+      const failed = (reason: unknown) => {
+        try { conversation.recoverFailedTurn(); } catch { /* cleanup still resets state if storage/transport fails */ }
+        try { console.error(JSON.stringify({ ...unhandledRejectionMetadata(reason), event: 'turn_failed', code: 'TURN_FAILED' })); } catch { /* diagnostics must not reject */ }
+        try { send({ type: 'error', code: 'TURN_FAILED' }); } catch { /* disconnected transport */ }
+      };
+      try { void conversation.submit(...args).catch(failed); } catch (reason) { failed(reason); }
+    };
     const prepareMail = (active: ServerSessionRuntime, id: string, retry = false) => {
       if (!options.jobs || !options.mail) { send({ type: 'notice', text: '邮件发送未启用。' }); return false; }
       active.mailApproval = undefined; active.delivery?.invalidate();
@@ -582,7 +615,7 @@ export function createConversationServer(options: {
       }
       if (text || submitForced) {
         runtimeMetrics.beginTurn(session.id);
-        void session.conversation.submit(text, submitForced);
+        submitTurn(session.conversation, text, submitForced);
       }
       else send({ type: 'notice', text: '没有识别到文字；如误打断，可点“继续上一答”。' });
     };
@@ -762,13 +795,19 @@ export function createConversationServer(options: {
       }
       const lastSeen = protocolV2 && Number.isSafeInteger(msg.last_seen_sequence) && msg.last_seen_sequence >= 0 ? msg.last_seen_sequence : 0;
       const sessionRecord = store?.getSession(binding.sessionId);
-      const recoverable = store?.latestRecoverableTurn(binding.sessionId);
+      // Read version and floor together, then synchronously form the snapshot.
+      // No await is allowed between this boundary read and ready construction.
+      const memoryBoundary = store && !session.guest ? store.memoryContextBoundary(binding.sessionId) : undefined;
+      const floor = memoryBoundary ? memoryBoundary.floor ?? Infinity : 1;
+      const candidateRecovery = store?.latestRecoverableTurn(binding.sessionId);
+      const recoverable = candidateRecovery?.output && candidateRecovery.output.sequence >= floor ? candidateRecovery : undefined;
       const snapshot = store ? (lastSeen === 0 ? store.listRecentMessages(binding.sessionId, 100)
-        : store.listMessages(binding.sessionId, lastSeen, 100)).filter(item => item.status !== 'streaming').map(item => ({
+        : store.listMessages(binding.sessionId, lastSeen, 100)).filter(item => item.status !== 'streaming' && item.sequence >= floor).map(item => ({
         id: item.id, turn_id: item.turnId, topic_id: item.topicId, sequence: item.sequence,
         role: item.role, status: item.status, content: item.content, created_at: item.createdAt,
       })) : [];
       send({ type: 'ready', protocol_version: protocolV2 ? CONVERSATION_PROTOCOL_VERSION : undefined,
+        ...(memoryBoundary ? { memory_boundary: memoryBoundary.version } : {}),
         access_mode: session.guest ? 'guest' : 'owner', guest_mode_enabled: !!guestController && guestSupported,
         connection_id: connectionId, session_id: binding.sessionId, resumed: binding.resumed,
         latest_sequence: sessionRecord?.latestSequence ?? 0, resume_window_minutes: Math.ceil(resumeWindowMs / 60_000),
@@ -979,7 +1018,7 @@ export function createConversationServer(options: {
             if (typeof msg.text !== 'string' || !msg.text.trim() || msg.text.length > 6000) throw new Error('Text');
             if (protocolV2 && !/^[0-9a-f-]{36}$/i.test(String(msg.message_id ?? ''))) throw new Error('Message id');
             if (conversation.acceptsInput) { active.mailApproval = undefined; clearCapture(); runtimeMetrics.beginTurn(active.id);
-              void conversation.submit(msg.text, true, protocolV2 ? { messageId: msg.message_id } : undefined); } break;
+              submitTurn(conversation, msg.text, true, protocolV2 ? { messageId: msg.message_id } : undefined); } break;
           case 'turn.submit':
             if (!conversation.acceptsInput) break;
             forced = true; if (detector.active) detector.finish(); else flush(); break;
@@ -989,7 +1028,7 @@ export function createConversationServer(options: {
           case 'answer.retry':
             if (!conversation.acceptsInput) break;
             clearCapture();
-            if (!store) { void conversation.submit('请继续刚才被打断的回答。', true); break; }
+            if (!store) { submitTurn(conversation, '请继续刚才被打断的回答。', true); break; }
             {
               const prior = store.latestRecoverableTurn(active.id);
               if (!prior) { send({ type: 'notice', text: '当前会话里没有可以恢复的上一轮回答。' }); break; }
@@ -1003,7 +1042,7 @@ export function createConversationServer(options: {
                 send({ type: 'answer.done', id: replayId, session_id: active.id,
                   message_id: prior.output.id, turn_id: prior.turn.id, sequence: prior.output.sequence, replayed: true });
               } else if (prior.output?.status === 'interrupted' || prior.turn.status === 'interrupted') {
-                void conversation.submit('请重新回答刚才被中断的问题。不要执行日历、邮件或其他写操作；如需写入，只生成新的预览并再次等待确认。',
+                submitTurn(conversation, '请重新回答刚才被中断的问题。不要执行日历、邮件或其他写操作；如需写入，只生成新的预览并再次等待确认。',
                   true, { retryOfTurnId: prior.turn.id });
               } else send({ type: 'notice', text: '上一轮没有完整回答。请简短重述问题，我会接着处理。' });
             }

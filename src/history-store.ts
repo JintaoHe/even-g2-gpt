@@ -8,6 +8,7 @@ export type HistoryMessage = { messageId: string; sessionId: string; sequence: n
 const fields = `m.id AS messageId,m.session_id AS sessionId,m.sequence,m.role,m.created_at AS createdAt,
   substr(m.content,1,1200) AS content,length(m.content)>1200 AS truncated`;
 const map = (row: any): HistoryMessage => ({ ...row, truncated: !!row.truncated });
+const recallAllowed = 'NOT EXISTS (SELECT 1 FROM memory_forget_sources f WHERE f.session_id=s.id)';
 
 /** Bounded candidate search, not an exhaustive history oracle. Incomplete must
  * propagate to the caller: absence in a capped scan is not evidence of absence.
@@ -17,14 +18,14 @@ export function searchStoredMessages(db: DatabaseSync, principal: AccessPrincipa
   const q = prepareHistoryQuery(principal, input, now);
   const candidates = db.prepare(`SELECT m.rowid AS rowid,length(CAST(m.content AS BLOB)) AS bytes,m.session_id AS sessionId
     FROM messages m JOIN sessions s ON s.id=m.session_id
-    WHERE s.owner_scope=? AND m.status='committed' AND m.role IN ('user','assistant')
+    WHERE s.owner_scope=? AND ${recallAllowed} AND m.status='committed' AND m.role IN ('user','assistant')
       AND m.created_at>=? AND m.created_at<=? ORDER BY m.created_at DESC,m.id DESC LIMIT ?`)
     .all(q.ownerScope, q.sinceMs, q.untilMs, HISTORY_SCAN_LIMITS.candidates + 1) as any[];
   const match = q.kind === 'fts'
     ? db.prepare('SELECT rowid FROM history_search_fts WHERE rowid=CAST(? AS INTEGER) AND history_search_fts MATCH ?')
     : db.prepare("SELECT rowid FROM messages WHERE rowid=? AND content LIKE ? ESCAPE '\\'");
   const read = db.prepare(`SELECT ${fields} FROM messages m JOIN sessions s ON s.id=m.session_id
-    WHERE m.rowid=? AND s.owner_scope=? AND m.status='committed' AND m.role IN ('user','assistant')`);
+    WHERE m.rowid=? AND s.owner_scope=? AND ${recallAllowed} AND m.status='committed' AND m.role IN ('user','assistant')`);
   const messages: HistoryMessage[] = [], groups = new Set<string>();
   let scanned = 0, bytes = 0, incomplete = false;
   for (const candidate of candidates) {
@@ -45,13 +46,13 @@ export function storedMessageContext(db: DatabaseSync, principal: AccessPrincipa
   const q = prepareHistoryContext(principal, input);
   const window = prepareHistoryQuery(principal, { query: 'context' }, now);
   const anchor = db.prepare(`SELECT m.session_id AS sessionId,m.sequence,s.owner_scope AS ownerScope
-    FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.id=? AND s.owner_scope=?
+    FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.id=? AND s.owner_scope=? AND ${recallAllowed}
       AND m.status='committed' AND m.role IN ('user','assistant') AND m.created_at>=? AND m.created_at<=?`)
     .get(q.messageId, q.ownerScope, window.sinceMs, window.untilMs) as any;
   if (!anchor) throw Error('HISTORY_MESSAGE_UNAVAILABLE');
   requireGuestAccess(principal, 'history_search', { ownerScope: anchor.ownerScope, sessionId: anchor.sessionId });
   const base = `SELECT ${fields} FROM messages m JOIN sessions s ON s.id=m.session_id
-    WHERE m.session_id=? AND s.owner_scope=? AND m.status='committed' AND m.role IN ('user','assistant')
+    WHERE m.session_id=? AND s.owner_scope=? AND ${recallAllowed} AND m.status='committed' AND m.role IN ('user','assistant')
       AND m.created_at>=? AND m.created_at<=? AND m.sequence`;
   const params = [anchor.sessionId, q.ownerScope, window.sinceMs, window.untilMs];
   const before = db.prepare(base + '<? ORDER BY m.sequence DESC LIMIT ?').all(...params, anchor.sequence, q.before).reverse();

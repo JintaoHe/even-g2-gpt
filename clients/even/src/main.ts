@@ -24,6 +24,13 @@ let developmentLocation: { label: string; latitude: number; longitude: number; a
 let connected = false, speech = false, audio = false, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
 let hasReady = false;
+let memorySessionId: string | undefined, memoryBoundary: string | undefined;
+const memoryResetText = '本次对话的上下文已更新，请重新提出需要继续的问题。';
+function resetMemoryView(text = memoryResetText) {
+  answerId = undefined; void stopAudio(); void locationController?.stop();
+  pager.reset(text); last = ''; status = text;
+  (element('text') as HTMLTextAreaElement).value = '';
+}
 let accessMode = 'unknown';
 async function clearPrivateView(text: string) {
   hasReady = false; answerId = undefined; connected = false; state = 'closed';
@@ -147,6 +154,7 @@ function handleConnectionStatus(next: ConnectionStatus) {
 
 function handleServerEvent(event: any) {
     if (event.type === 'access.changed' || event.type === 'transport.cleared') {
+      memorySessionId = undefined; memoryBoundary = undefined;
       const text = event.mode === 'guest' ? '访客模式已锁定，正在连接。'
         : event.mode === 'reauthorize' ? '访客模式已结束，请重新输入主人凭证连接。' : '连接已断开，旧画面已清除。';
       accessMode = event.mode ?? 'unknown'; const clearing = clearPrivateView(text);
@@ -163,12 +171,20 @@ function handleServerEvent(event: any) {
     }
     developmentSessionControls?.handleEvent(event);
     if (event.type === 'ready') {
+      const boundary = typeof event.memory_boundary === 'string' ? event.memory_boundary : undefined;
+      const memoryChanged = hasReady && typeof event.session_id === 'string' && event.session_id === memorySessionId
+        && memoryBoundary !== undefined && boundary !== undefined && memoryBoundary !== boundary;
+      if (memoryChanged) resetMemoryView();
+      if (event.session_id !== memorySessionId) memoryBoundary = undefined;
+      memorySessionId = event.session_id;
+      if (boundary !== undefined) memoryBoundary = boundary;
       accessMode = event.access_mode ?? 'owner';
       element('access-mode').textContent = accessMode === 'guest' ? '访客模式 · 仅本次会话，无主人邮件、日历和历史权限' : '主人模式';
       (element('guest-enter') as HTMLButtonElement).disabled = !event.guest_mode_enabled || accessMode !== 'owner';
       (element('guest-unlock') as HTMLButtonElement).disabled = !event.guest_mode_enabled || accessMode !== 'guest';
-      if (event.resumed === true && Array.isArray(event.snapshot?.messages)) pager.restoreSnapshot(event.snapshot.messages, !hasReady);
+      if (event.resumed === true && Array.isArray(event.snapshot?.messages)) pager.restoreSnapshot(event.snapshot.messages, !hasReady || memoryChanged);
       else if (hasReady && connection.status.reason === 'new_session') pager.reset('原会话已过期，已建立新会话。\n请继续说话或输入文字。');
+      if (memoryChanged) pager.notice(memoryResetText);
       hasReady = true;
       connected = true; speech = event.capabilities?.speech === true;
       locationAvailable = event.capabilities?.location === true;
@@ -232,6 +248,10 @@ function handleServerEvent(event: any) {
     if (event.type === 'exit.confirmation_required') void exitDialog();
     if (event.type === 'error') status = event.code === 'SESSION_UNAVAILABLE' ? '恢复凭证已过期，正在建立新会话' : `错误：${event.code}`;
     if (event.type === 'notice') {
+      if (event.code === 'MEMORY_CONTEXT_RESET') {
+        if (typeof event.memory_boundary === 'string') memoryBoundary = event.memory_boundary;
+        resetMemoryView(event.text);
+      }
       status = event.text;
       if (event.code === 'EXIT_CANCELLED' || event.code === 'GUEST_RUNTIME_BUSY' || event.code === 'PARTIAL_REPLY_RETRY_REQUIRED') pager.notice(event.text);
     }

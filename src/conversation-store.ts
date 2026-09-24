@@ -13,9 +13,11 @@ import { selectSummaryBatch, mergeSummaryLosses, type SummaryLoss } from './summ
 import { parseCalendarRecoveryState, parseDeliveryRecoveryState } from './recovery-drafts.js';
 import { lockedDevicePrincipal, requireGuestAccess, type AccessPrincipal, type DeviceGuestLock } from './guest-access.js';
 import { presentation, type Document } from './document-presentation.js';
+import { installMemoryStore, mutateMemory, listMemories, purgeRetiredMemories } from './memory-store.js';
+import { installMemoryForgetting, sessionIsForgotten, summaryFloorSql } from './memory-forgetting.js';
 
 const DATABASE_NAME = 'assistant-memory.sqlite';
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 16;
 const MAX_RECOVERY_DRAFT_BYTES = 256 * 1024;
 const MAX_RESUME_CREDENTIAL_MS = 16 * 60_000;
 const MAX_DEVICE_CREDENTIAL_MS = 366 * 24 * 60 * 60_000;
@@ -374,6 +376,23 @@ function summaryJobRecord(row: any): SummaryJobRecord {
 /** Single-host, single-process durable conversation storage. It stores no API
  * credentials, raw audio, precise location, or Calendar/Email approval token. */
 export class ConversationStore {
+  private memoryBoundaryStatement?: ReturnType<DatabaseSync['prepare']>;
+  private memoryFloorStatement?: ReturnType<DatabaseSync['prepare']>;
+  private readonly memorySuppressionListeners = new Set<() => void>();
+
+  /** Internal invalidation signal, emitted only after the memory transaction commits. */
+  onMemorySuppression(listener: () => void): () => void {
+    this.ensureOpen(); this.memorySuppressionListeners.add(listener);
+    return () => { this.memorySuppressionListeners.delete(listener); };
+  }
+
+  memoryContextBoundary(sessionId: string): { version: string; floor?: number } {
+    this.ensureOpen();
+    if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
+    const row = (this.memoryBoundaryStatement ??= this.db.prepare(`SELECT COUNT(*) AS n, MAX(through_sequence) AS through_sequence
+      FROM memory_forget_sources WHERE session_id=?`)).get(sessionId) as any;
+    return { version: `${row.n}:${row.through_sequence ?? 0}`, floor: this.summaryFloor(sessionId) };
+  }
   private closed = false;
   private summaryModel = 'gpt-5.6-luna';
   private summaryRecoveryCursor = '';
@@ -671,6 +690,16 @@ export class ConversationStore {
         if (latest >= 13) repairHistoryScopeIndex(db);
         db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (14,?,?)')
           .run('exact-owner-history-scope', Date.now());
+      }
+      if (latest < 15) {
+        installMemoryStore(db);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (15,?,?)')
+          .run('explicit-personal-memory-storage', Date.now());
+      }
+      if (latest < 16) {
+        installMemoryForgetting(db);
+        db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (16,?,?)')
+          .run('memory-source-suppression', Date.now());
       }
     });
   }
@@ -1412,6 +1441,10 @@ export class ConversationStore {
       this.db.prepare(`UPDATE resume_credentials SET revoked_at=?
         WHERE session_id=? AND revoked_at IS NULL`).run(at, sessionId);
       this.db.prepare('DELETE FROM recovery_drafts WHERE session_id=?').run(sessionId);
+      if (this.isSessionMemorySuppressed(sessionId)) {
+        this.db.prepare(`UPDATE summary_jobs SET status='failed',error_code='SUMMARY_FORGOTTEN',updated_at=MAX(updated_at,?)
+          WHERE session_id=? AND status!='completed'`).run(at, sessionId);
+      }
       this.enqueueClosedSummaryInTransaction(sessionId, at);
       return sessionRecord(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId));
     });
@@ -1554,6 +1587,30 @@ export class ConversationStore {
     return searchStoredMessages(this.db, principal, input, now);
   }
 
+  // Internal storage only: product authorization and cross-context forgetting
+  // are not wired yet. Do not expose these methods directly to model tools.
+  mutatePersonalMemory(principal: AccessPrincipal, input: Parameters<typeof mutateMemory>[2], now = Date.now()) {
+    this.ensureOpen();
+    const result = mutateMemory(this.db, principal, input, now);
+    // Do not inspect untrusted input again. A no-op notification is safe; each
+    // subscriber compares its own durable revision and only revokes on change.
+    for (const listener of this.memorySuppressionListeners) {
+      try { listener(); } catch { /* One subscriber cannot prevent other revocations. */ }
+    }
+    return result;
+  }
+  listPersonalMemories(principal: AccessPrincipal, input: Parameters<typeof listMemories>[2] = {}) {
+    this.ensureOpen(); return listMemories(this.db, principal, input);
+  }
+  purgePersonalMemories(principal: AccessPrincipal, now = Date.now(), limit = 100) {
+    this.ensureOpen(); return purgeRetiredMemories(this.db, principal, now, limit);
+  }
+  isSessionMemorySuppressed(sessionId: string): boolean {
+    this.ensureOpen();
+    if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
+    return sessionIsForgotten(this.db, sessionId);
+  }
+
   messageContext(principal: AccessPrincipal, input: { messageId: string; before?: number; after?: number }, now = Date.now()) {
     this.ensureOpen();
     return storedMessageContext(this.db, principal, input, now);
@@ -1579,7 +1636,7 @@ export class ConversationStore {
       WHERE owner_scope=? AND id<>? AND status IN ('ended','expired')
         AND ended_at>=? AND ended_at<=? ORDER BY ended_at DESC,id DESC LIMIT 1`).get(
           ownerScope, currentSessionId, before - withinMs, Math.min(before, current.createdAt)) as any;
-    if (!prior) return undefined;
+    if (!prior || this.isSessionMemorySuppressed(prior.id)) return undefined;
     const summary = this.latestSummary(prior.id);
     const tail = (this.db.prepare(`SELECT role,sequence,substr(content,1,1200) AS content,
         length(content)>1200 AS truncated FROM messages WHERE session_id=? AND sequence>?
@@ -1591,11 +1648,33 @@ export class ConversationStore {
       ...(summary ? { summary } : {}), sourceLosses: !!summary?.sourceLosses.length || (!summary && prior.summary_through_sequence > 0), tail };
   }
 
+  summaryFloor(sessionId: string): number | undefined {
+    this.ensureOpen();
+    if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
+    const row = (this.memoryFloorStatement ??= this.db.prepare(`SELECT ${summaryFloorSql('s.id')} AS floor FROM sessions s WHERE s.id=?`)).get(sessionId) as any;
+    return row?.floor ?? undefined;
+  }
+
+  assertSummaryRangeAllowed(sessionId: string, from: number): void {
+    if (!this.isSessionMemorySuppressed(sessionId)) return;
+    const floor = this.summaryFloor(sessionId), session = this.getSession(sessionId);
+    if (floor === undefined || from < floor || !session || !['active', 'idle'].includes(session.status)) {
+      throw new Error('SUMMARY_FORGOTTEN');
+    }
+  }
+
+  private summaryStart(sessionId: string): number | undefined {
+    const floor = this.summaryFloor(sessionId), session = this.getSession(sessionId);
+    return floor === undefined || !session ? undefined : Math.max(floor, session.summaryThroughSequence + 1);
+  }
+
   latestSummary(sessionId: string): StoredSessionSummary | undefined {
     this.ensureOpen();
     if (!validUuid(sessionId)) throw new Error('Invalid conversation session');
-    const row = this.db.prepare(`SELECT * FROM session_summaries WHERE session_id=?
-      ORDER BY through_sequence DESC LIMIT 1`).get(sessionId) as any;
+    const floor = this.summaryFloor(sessionId);
+    if (floor === undefined) return undefined;
+    const row = this.db.prepare(`SELECT * FROM session_summaries WHERE session_id=? AND through_sequence>=?
+      ORDER BY through_sequence DESC LIMIT 1`).get(sessionId, floor) as any;
     if (!row) return undefined;
     let summary: ContextSummary;
     let invalidSummary = false;
@@ -1610,8 +1689,8 @@ export class ConversationStore {
     try {
       const parsed: unknown = JSON.parse(row.source_losses_json);
       if (!Array.isArray(parsed) || !parsed.every(x => x && typeof x === 'object'
-        && ['message', 'prior_summary', 'metadata_unknown'].includes(x.kind)
-        && Number.isSafeInteger(x.sequence) && x.sequence >= 1 && x.sequence <= row.through_sequence
+        && ['message', 'prior_summary', 'metadata_unknown', 'forgotten'].includes(x.kind)
+        && Number.isSafeInteger(x.sequence) && x.sequence >= (x.kind === 'forgotten' ? 0 : 1) && x.sequence <= row.through_sequence
         && Number.isSafeInteger(x.omittedBytes) && x.omittedBytes >= 0)) throw new Error('Invalid loss metadata');
       sourceLosses = parsed;
     } catch {
@@ -1643,6 +1722,7 @@ export class ConversationStore {
   // Called only inside a write transaction. Coverage, not session status or a
   // second summary flag, is the source of truth. In-flight ranges stay immutable.
   private enqueueClosedSummaryInTransaction(sessionId: string, at: number): void {
+    if (this.isSessionMemorySuppressed(sessionId)) return;
     const session = this.getSession(sessionId);
     if (!session || session.ownerScope.startsWith('guest:') || !['ended', 'expired'].includes(session.status) || this.hasBlockingSummaryJob(sessionId)
       || this.hasTerminalSummaryStart(sessionId, session.summaryThroughSequence + 1, at)) return;
@@ -1657,6 +1737,8 @@ export class ConversationStore {
 
   summaryBatch(sessionId: string, throughSequence: number, maxMessages = 200) {
     this.ensureOpen();
+    const start = this.summaryStart(sessionId);
+    this.assertSummaryRangeAllowed(sessionId, Math.min(start ?? 0, throughSequence));
     const session = this.getSession(sessionId);
     if (!session || !Number.isSafeInteger(throughSequence) || throughSequence < 1
       || !Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 500) throw new Error('SUMMARY_RANGE_INVALID');
@@ -1668,7 +1750,7 @@ export class ConversationStore {
     const next = this.db.prepare(`SELECT * FROM messages WHERE session_id=? AND sequence>? AND sequence<=?
       AND status='committed' ORDER BY sequence LIMIT 1`);
     function* source() {
-      let after = session!.summaryThroughSequence;
+      let after = start! - 1;
       for (let count = 0; count < maxMessages; count++) {
         const row = next.get(sessionId, after, throughSequence);
         if (!row) return;
@@ -1683,16 +1765,18 @@ export class ConversationStore {
   scheduleActiveSummary(sessionId: string, threshold: number, keepRecent: number, maxMessages: number, at: number) {
     return transaction(this.db, () => {
       const session = this.getSession(sessionId);
+      const start = this.summaryStart(sessionId);
+      if (start === undefined) return undefined;
       if (!session || !['active', 'idle'].includes(session.status) || this.hasBlockingSummaryJob(sessionId)) return undefined;
-      if (this.hasTerminalSummaryStart(sessionId, session.summaryThroughSequence + 1, at)) return undefined;
+      if (this.hasTerminalSummaryStart(sessionId, start, at)) return undefined;
       // Read only sequence metadata before the byte-bounded, streaming content read.
       const rows = this.db.prepare(`SELECT sequence FROM messages WHERE session_id=? AND sequence>?
-        AND status='committed' ORDER BY sequence LIMIT 500`).all(sessionId, session.summaryThroughSequence) as { sequence: number }[];
+        AND status='committed' ORDER BY sequence LIMIT 500`).all(sessionId, start - 1) as { sequence: number }[];
       if (rows.length < threshold) return undefined;
       const end = rows[Math.min(rows.length - keepRecent, maxMessages) - 1]?.sequence;
       if (!end) return undefined;
       const batch = this.summaryBatch(sessionId, end, maxMessages);
-      return this.insertSummaryJob(sessionId, session.summaryThroughSequence + 1, batch.messages.at(-1)!.sequence, at);
+      return this.insertSummaryJob(sessionId, start, batch.messages.at(-1)!.sequence, at);
     });
   }
 
@@ -1728,6 +1812,7 @@ export class ConversationStore {
   }
 
   private insertSummaryJob(sessionId: string, from: number, through: number, at: number): SummaryJobRecord {
+    this.assertSummaryRangeAllowed(sessionId, from);
     const terminal = this.db.prepare(`SELECT MAX(generation) AS generation FROM summary_jobs WHERE session_id=? AND from_sequence=?
       AND status='failed' AND error_code IN ('SUMMARY_GAVE_UP','SUMMARY_BUDGET_GAVE_UP','SUMMARY_INPUT_LIMIT')`).get(sessionId, from) as any;
     const generation = terminal.generation === null || this.hasTerminalSummaryStart(sessionId, from, at) ? 0 : terminal.generation + 1;
@@ -1777,12 +1862,13 @@ export class ConversationStore {
       || !Number.isSafeInteger(input.throughSequence) || input.throughSequence < input.fromSequence
       || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0) throw new Error('Invalid summary job');
     return transaction(this.db, () => {
+      this.assertSummaryRangeAllowed(input.sessionId, input.fromSequence);
       const existing = this.db.prepare(`SELECT * FROM summary_jobs WHERE session_id=?
         AND from_sequence=? AND through_sequence=? ORDER BY generation DESC LIMIT 1`).get(input.sessionId, input.fromSequence, input.throughSequence) as any;
       if (existing) return summaryJobRecord(existing);
       const session = this.db.prepare('SELECT latest_sequence,summary_through_sequence FROM sessions WHERE id=?')
         .get(input.sessionId) as { latest_sequence: number; summary_through_sequence: number } | undefined;
-      if (!session || input.fromSequence !== session.summary_through_sequence + 1
+      if (!session || input.fromSequence !== this.summaryStart(input.sessionId)
         || input.throughSequence > session.latest_sequence) throw new Error('Summary range is unavailable');
       if (this.hasBlockingSummaryJob(input.sessionId)) throw new Error('Summary job already active');
       const id = randomUUID();
@@ -1807,7 +1893,7 @@ export class ConversationStore {
         updated_at=MAX(updated_at,?) WHERE
         (status IN ('queued','unknown') OR (status='failed' AND error_code IN (${SUMMARY_RETRY_CODES})))
         AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=summary_jobs.session_id
-          AND (summary_jobs.from_sequence<>s.summary_through_sequence+1
+          AND (summary_jobs.from_sequence<>MAX(s.summary_through_sequence+1,${summaryFloorSql('s.id')})
             OR summary_jobs.through_sequence>s.latest_sequence)) RETURNING id,session_id,from_sequence,through_sequence,error_code`).all(at);
       const exhausted = this.db.prepare(`UPDATE summary_jobs SET status='failed',error_code='SUMMARY_GAVE_UP'
         WHERE status='unknown' AND attempts>=? RETURNING id,session_id,from_sequence,through_sequence,error_code`).all(SUMMARY_RETRY_POLICY.maxAttempts);
@@ -1824,7 +1910,8 @@ export class ConversationStore {
           (status='failed' AND error_code IN (${SUMMARY_RETRY_CODES})))`).run(
             at, at, SUMMARY_RETRY_POLICY.budgetDelayMs, SUMMARY_RETRY_POLICY.maxAttempts);
       const next = this.db.prepare(`SELECT j.* FROM summary_jobs j JOIN sessions s ON s.id=j.session_id
-        WHERE j.from_sequence=s.summary_through_sequence+1 AND (
+        WHERE (NOT EXISTS (SELECT 1 FROM memory_forget_sources f WHERE f.session_id=s.id) OR s.status IN ('active','idle'))
+        AND j.from_sequence=MAX(s.summary_through_sequence+1,${summaryFloorSql('s.id')}) AND (
           j.status='queued' OR
           (j.status='unknown' AND j.attempts<3 AND j.updated_at<=?) OR
           (j.status='failed' AND j.attempts<3 AND j.error_code IN (${SUMMARY_RETRY_CODES})
@@ -1849,20 +1936,23 @@ export class ConversationStore {
     const json = JSON.stringify(input.summary);
     if (Buffer.byteLength(json) > 256 * 1024) throw new Error('Session summary is too large');
     return transaction(this.db, () => {
-      const job = this.db.prepare("SELECT * FROM summary_jobs WHERE id=? AND status='running'").get(input.id) as any;
-      if (!job || input.summary.throughSequence !== job.through_sequence) throw new Error('Summary job is unavailable');
+      const job = this.db.prepare("SELECT * FROM summary_jobs WHERE id=?").get(input.id) as any;
+      if (job) this.assertSummaryRangeAllowed(job.session_id, job.from_sequence);
+      if (!job || job.status !== 'running' || input.summary.throughSequence !== job.through_sequence) throw new Error('Summary job is unavailable');
       const session = this.getSession(job.session_id);
       const boundary = this.db.prepare(`SELECT sequence FROM messages WHERE session_id=? AND sequence=? AND status='committed'`)
         .get(job.session_id, job.through_sequence);
       const count = this.db.prepare(`SELECT COUNT(*) AS n FROM (SELECT sequence FROM messages
         WHERE session_id=? AND sequence>=? AND sequence<=? AND status='committed' LIMIT 501)`)
         .get(job.session_id, job.from_sequence, job.through_sequence) as { n: number };
-      if (!session || job.from_sequence !== session.summaryThroughSequence + 1
+      if (!session || job.from_sequence !== this.summaryStart(job.session_id)
         || job.through_sequence > session.latestSequence || !boundary || count.n > 500) {
         throw new Error('SUMMARY_RANGE_INVALID');
       }
       const id = randomUUID();
-      const sourceLosses = mergeSummaryLosses(this.latestSummary(job.session_id)?.sourceLosses ?? [], input.losses ?? []);
+      const floor = this.summaryFloor(job.session_id)!;
+      const sourceLosses = mergeSummaryLosses(this.latestSummary(job.session_id)?.sourceLosses ?? [], input.losses ?? [],
+        this.isSessionMemorySuppressed(job.session_id) ? [{ kind: 'forgotten', sequence: floor - 1, omittedBytes: 0 }] : []);
       this.db.prepare(`INSERT INTO session_summaries(id,session_id,through_sequence,summary_json,model,created_at,source_losses_json)
         VALUES (?,?,?,?,?,?,?)`).run(id, job.session_id, job.through_sequence, json, input.model.trim(), input.at, JSON.stringify(sourceLosses));
       this.db.prepare(`UPDATE sessions SET summary_through_sequence=?,updated_at=MAX(updated_at,?)
@@ -2013,6 +2103,7 @@ export class ConversationStore {
 
   async close(): Promise<void> {
     if (this.closed) return;
+    this.memorySuppressionListeners.clear();
     this.closed = true;
     try { this.db.prepare('DELETE FROM service_owner WHERE id=1 AND token=?').run(this.ownerToken); }
     finally { this.db.close(); }

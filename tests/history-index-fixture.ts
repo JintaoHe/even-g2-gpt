@@ -1,5 +1,8 @@
 /** Test-only downgrade of disposable fixtures, never a deployment rollback. */
 export const DROP_HISTORY_INDEX_SQL = `
+DROP TABLE IF EXISTS memory_forget_sources;
+DROP TABLE IF EXISTS personal_memory_changes;
+DROP TABLE IF EXISTS personal_memories;
 DROP TRIGGER IF EXISTS history_message_insert;
 DROP TRIGGER IF EXISTS history_message_delete;
 DROP TRIGGER IF EXISTS history_message_before_update;
@@ -13,3 +16,11 @@ DROP INDEX IF EXISTS messages_history_time_idx;
 DROP INDEX IF EXISTS sessions_history_owner_idx;
 DELETE FROM schema_migrations WHERE version>=13;
 `;
+
+/** Only disposable test DBs: restore the actual pre-v16 view before dropping
+ * v16 artifacts, so older migration tests don't leave a dangling SQL view. */
+export function removeForgettingFixture(db: import('node:sqlite').DatabaseSync) {
+  repairHistoryScopeIndex(db);
+  db.exec('DROP TABLE memory_forget_sources; DELETE FROM schema_migrations WHERE version>=16');
+}
+import { repairHistoryScopeIndex } from '../src/history-index.js';

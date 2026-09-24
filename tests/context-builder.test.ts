@@ -26,6 +26,15 @@ const summary: ContextSummary = {
   unresolvedItems: ['真机到达后验证锁屏收音。'],
 };
 
+test('post-forgetting summary describes its restricted interval without implying earlier coverage', () => {
+  const restarted = { ...summary, sourceLosses: [{ kind: 'forgotten', sequence: 82, omittedBytes: 0 }] };
+  const result = new ContextBuilder({ maxCharacters: 4_000 }).build({ messages: history(40), summary: restarted });
+  const block = result.messages.find(message => message.contextKind === 'summary')?.content ?? '';
+  assert.match(block, /从消息序号 83 开始，到 470/);
+  assert.match(block, /之前的部分不在摘要内/);
+  assert.doesNotMatch(block, /已覆盖到消息序号/);
+});
+
 test('builds deterministic bounded context from 120 messages and keeps the latest turn', () => {
   const messages = history(120);
   const builder = new ContextBuilder({ maxCharacters: 5_000, recentMessageCount: 24 });

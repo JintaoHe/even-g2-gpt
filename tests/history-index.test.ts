@@ -65,7 +65,8 @@ test('v13 to v14 repairs omitted owners atomically, preserves messages and rejec
       FROM messages m JOIN sessions s ON s.id=m.session_id
       WHERE m.status='committed' AND m.role IN ('user','assistant') AND lower(trim(s.owner_scope)) NOT GLOB 'guest*:*';
       INSERT INTO history_search_fts(history_search_fts) VALUES('rebuild');
-      DELETE FROM schema_migrations WHERE version=14;
+      DROP TABLE memory_forget_sources; DROP TABLE personal_memory_changes; DROP TABLE personal_memories;
+      DELETE FROM schema_migrations WHERE version>=14;
       CREATE TRIGGER fail_v14 BEFORE INSERT ON schema_migrations WHEN NEW.version=14 BEGIN SELECT RAISE(ABORT,'v14 rollback'); END;`);
     const before = db.prepare('SELECT * FROM messages').all();
     await assert.rejects(ConversationStore.create(root), /v14 rollback/);
@@ -76,14 +77,14 @@ test('v13 to v14 repairs omitted owners atomically, preserves messages and rejec
     for (let i = 0; i < 2; i++) {
       const current = await ConversationStore.create(root);
       try {
-        assert.equal(current.health().schemaVersion, 14);
+        assert.equal(current.health().schemaVersion, 16);
         assert.equal(current.searchMessages({ mode: 'owner', ownerScope: 'guest_room:1' }, { query: 'quartz' }, 200).messages.length, 1);
         assert.equal(current.searchMessages({ mode: 'owner', ownerScope: 'guest_room:1' }, { query: 'qu' }, 200).messages.length, 1);
       } finally { await current.close(); }
     }
     assert.deepEqual(db.prepare('SELECT * FROM messages').all(), before);
     db.exec("INSERT INTO history_search_fts(history_search_fts,rank) VALUES('integrity-check',1)");
-    db.exec("INSERT INTO schema_migrations VALUES(15,'future',0)");
+    db.exec("INSERT INTO schema_migrations VALUES(17,'future',0)");
     await assert.rejects(ConversationStore.create(root), /newer than/);
   } finally { db.close(); }
 });
@@ -169,7 +170,7 @@ test('real store writes and restart preserve filtered external-content integrity
   let store = await ConversationStore.create(root);
   const db = new DatabaseSync(join(root, 'assistant-memory.sqlite'));
   try {
-    assert.equal(store.health().schemaVersion, 14);
+    assert.equal(store.health().schemaVersion, 16);
     const sessionId = randomUUID(), topicId = randomUUID(), turnId = randomUUID(), answerId = randomUUID();
     store.createSession({ id: sessionId, ownerScope: 'single-user', createdAt: 100, initialTopic: { id: topicId, label: 'Repairs' } });
     store.commitUserTurn({ sessionId, topicId, turnId, messageId: randomUUID(), content: '换滤芯的讨论', createdAt: 101 });

@@ -74,6 +74,7 @@ export function normalizeTurnPlan(plan: TurnPlan): TurnPlan {
   return { ...plan, cognitiveMode, assistantMode: cognitiveMode, taskKind, workflows };
 }
 export interface DialogueModel {
+  revokeMemoryContext?(): void;
   startSession?(): void;
   endSession?(): void;
   plan?(history: Message[], text: string, forced: boolean, signal: AbortSignal): Promise<TurnPlan>;
@@ -141,6 +142,10 @@ export type ConversationRuntimeOptions = {
   checkpointMs?: number;
   /** Runs only after the complete assistant answer is durably committed. */
   onTurnCommitted?: () => void;
+  /** Internal, not a client/model-supplied permission. Optional until 3B wiring. */
+  memoryBoundary?: () => { version: string; floor?: number };
+  subscribeMemorySuppression?: (listener: () => void) => () => void;
+  onMemoryContextRevoked?: () => void;
   recallHistory?: (query: string, signal: AbortSignal) => Promise<import('./history-recall.js').HistoryRecall>;
   recoverAnswer?: (request: string) => {
     kind: 'committed' | 'interrupted' | 'missing';
@@ -175,7 +180,10 @@ export class Conversation {
   private currentTopic?: { id: string; label: string };
   private responseTopic?: { id: string; label: string; mode?: CognitiveMode };
   private topicCounter = 0;
-  private durableAnswer?: { turnId: string; messageId: string };
+  private memoryVersion?: string;
+  private memoryUnsubscribe?: () => void;
+  private durableAnswer?: { turnId: string; messageId: string; sequence: number };
+  private memoryResetPending = false;
   private readonly now: () => number;
   private readonly idFactory: () => string;
   private lastCheckpointAt = 0;
@@ -187,6 +195,46 @@ export class Conversation {
     this.now = runtime?.now ?? Date.now;
     this.idFactory = runtime?.idFactory ?? randomUUID;
     if (runtime?.initialTopic) this.currentTopic = { ...runtime.initialTopic };
+    if (runtime?.memoryBoundary) this.memoryVersion = runtime.memoryBoundary().version;
+    this.memoryUnsubscribe = runtime?.subscribeMemorySuppression?.(() => { this.refreshMemoryBoundary(); });
+  }
+
+  /** Revocation never checkpoints a discarded partial or persists an apology.
+   * Raw durable history is retained by policy; this only clears model-side state. */
+  private refreshMemoryBoundary(): boolean {
+    if (!this.runtime?.memoryBoundary) return true;
+    let version: string;
+    try {
+      const boundary = this.runtime.memoryBoundary();
+      if (boundary.version === this.memoryVersion && !this.memoryResetPending) return true;
+      this.memoryVersion = boundary.version;
+      version = boundary.version;
+    } catch {
+      // A failed boundary read cannot grant access to stale context.
+      this.revokeMemoryContext(); return false;
+    }
+    this.revokeMemoryContext(version); return false;
+  }
+
+  private revokeMemoryContext(version?: string) {
+    this.partial = ''; this.citations = []; this.pending = '';
+    this.cancel();
+    this.history = []; this.currentTopic = undefined; this.responseTopic = undefined;
+    this.memoryResetPending = true;
+    try { this.runtime?.onMemoryContextRevoked?.(); this.memoryResetPending = false; }
+    catch { /* A failed wrapper reset blocks subsequent turns until it succeeds. */ }
+    if (['thinking', 'answering'].includes(this.state)) this.status('listening');
+    if (this.state !== 'closed') this.emit({ type: 'notice', code: 'MEMORY_CONTEXT_RESET',
+      ...(version === undefined ? {} : { memory_boundary: version }),
+      text: '本次对话的上下文已更新，请重新提出需要继续的问题。' });
+  }
+
+  private boundMemoryHistory() {
+    if (!this.runtime?.memoryBoundary) return;
+    const { floor } = this.runtime.memoryBoundary();
+    if (this.memoryVersion === '0:0') return;
+    this.history = floor === undefined ? [] : this.history.filter(message =>
+      Number.isSafeInteger(message.sequence) && message.sequence! >= floor);
   }
 
   /** A logical conversation may outlive any individual WebSocket connection. */
@@ -196,6 +244,8 @@ export class Conversation {
     if (history.length > 500 || history.some(message => !['user', 'assistant'].includes(message.role)
       || typeof message.content !== 'string' || message.content.length > 120_000)) throw new Error('Invalid conversation history');
     this.history = history.map(message => ({ ...message, citations: message.citations?.map(citation => ({ ...citation })) }));
+    this.boundMemoryHistory();
+    if (this.runtime?.memoryBoundary && this.memoryVersion !== '0:0') this.currentTopic = undefined;
     const lastTopic = [...this.history].reverse().find(message => message.topicId && message.topicLabel);
     this.currentTopic = lastTopic?.topicId && lastTopic.topicLabel
       ? { id: lastTopic.topicId, label: lastTopic.topicLabel } : this.currentTopic;
@@ -220,7 +270,8 @@ export class Conversation {
       this.emit({ type: 'answer.cancelled', id: this.responseId });
       if (this.partial && !committing) this.history.push({ role: 'assistant', content: this.partial + '\n[回答被用户打断，未完成]', citations: this.citations,
         topicId: this.responseTopic?.id, topicLabel: this.responseTopic?.label, cognitiveMode: this.responseTopic?.mode,
-        assistantMode: this.responseTopic?.mode, messageId: this.durableAnswer?.messageId, status: 'interrupted' });
+        assistantMode: this.responseTopic?.mode, messageId: this.durableAnswer?.messageId,
+        sequence: this.durableAnswer?.sequence, status: 'interrupted' });
       this.responseId = undefined; this.partial = ''; this.citations = [];
       this.responseTopic = undefined; this.durableAnswer = undefined;
     }
@@ -228,6 +279,16 @@ export class Conversation {
   interrupt() {
     if (!this.acceptsInput) return;
     this.cancel(); this.status('listening');
+  }
+  /** Last-resort cleanup for a rejected submit, not normal pause/resume behavior. */
+  recoverFailedTurn() {
+    try { this.cancel(); }
+    finally {
+      this.pending = ''; this.partial = ''; this.citations = [];
+      this.responseId = undefined; this.responseTopic = undefined; this.durableAnswer = undefined;
+      this.committing = false;
+      if (this.state !== 'closed' && this.state !== 'exit_pending') this.status('listening');
+    }
   }
   pause() {
     if (!this.acceptsInput) return;
@@ -247,9 +308,10 @@ export class Conversation {
   }
   confirmExit(confirm: boolean) {
     if (this.state !== 'exit_pending') return;
+    if (confirm) { this.memoryUnsubscribe?.(); this.memoryUnsubscribe = undefined; }
     this.status(confirm ? 'closed' : 'paused');
   }
-  close() { this.cancel(); this.status('closed'); void this.persist(); }
+  close() { this.memoryUnsubscribe?.(); this.memoryUnsubscribe = undefined; this.cancel(); this.status('closed'); void this.persist(); }
   private resolveTopic(plan: TurnPlan) {
     const existing = new Map(this.history.filter(message => message.topicId && message.topicLabel)
       .map(message => [message.topicId!, { id: message.topicId!, label: message.topicLabel! }]));
@@ -264,6 +326,7 @@ export class Conversation {
     return this.currentTopic!;
   }
   async submit(text: string, forced = false, identity?: { messageId?: string; retryOfTurnId?: string }) {
+    if (!this.refreshMemoryBoundary()) return;
     if (!this.acceptsInput) return;
     const clean = text.trim();
     if (clean.length > 6000 || this.pending.length + clean.length > 12000) {
@@ -273,9 +336,11 @@ export class Conversation {
     if (!this.pending) return;
     this.cancel();
     const revision = this.revision, controller = this.work = new AbortController();
-    const current = () => revision === this.revision && !controller.signal.aborted;
+    const turnMemoryVersion = this.memoryVersion;
+    const current = () => this.refreshMemoryBoundary() && revision === this.revision && !controller.signal.aborted;
     this.status('thinking');
     try {
+      this.boundMemoryHistory();
       const text = this.pending;
       const history = this.contextBuilder.build({ messages: this.history,
         currentTopicId: this.currentTopic?.id, pendingUserTurn: true }).messages;
@@ -341,7 +406,7 @@ export class Conversation {
             createdAt: this.now(),
           });
           assistantSequence = acknowledgement.sequence;
-          this.durableAnswer = { turnId: turnId!, messageId: assistantMessageId };
+          this.durableAnswer = { turnId: turnId!, messageId: assistantMessageId, sequence: assistantSequence };
           this.lastCheckpointAt = this.now(); this.lastCheckpointLength = 0;
         } catch (error) { throw new ConversationPersistenceError(String(error)); }
       }
@@ -478,6 +543,12 @@ export class Conversation {
       }
       this.emit({ type: 'error',
         code: error instanceof ConversationPersistenceError ? 'SAVE_FAILED' : 'MODEL_FAILED' });
+    } finally {
+      // A wrapper ignoring abort may repopulate caches after the first reset.
+      if (turnMemoryVersion !== this.memoryVersion) {
+        try { this.runtime?.onMemoryContextRevoked?.(); }
+        catch { this.memoryResetPending = true; }
+      }
     }
   }
 }

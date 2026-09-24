@@ -59,6 +59,10 @@ function statusAware(message: Message, maxCharacters: number): Message {
 }
 
 function summaryMessage(summary: ContextSummary & { sourceLosses?: readonly unknown[] }, currentTopicId?: string, hasRecall = false): Message {
+  const forgottenThrough = Math.max(0, ...(summary.sourceLosses ?? []).map(loss => {
+    const value = loss as { kind?: string; sequence?: number };
+    return value?.kind === 'forgotten' && Number.isSafeInteger(value.sequence) ? value.sequence! : 0;
+  }));
   const currentTopic = currentTopicId ? summary.topics.find(topic => topic.id === currentTopicId) : undefined;
   const topics = summary.topics.map(topic => `- ${topic.label}: ${topic.summary}`).join('\n') || '- 无';
   const decisions = summary.confirmedDecisions.map(item => `- ${item}`).join('\n') || '- 无';
@@ -67,7 +71,7 @@ function summaryMessage(summary: ContextSummary & { sourceLosses?: readonly unkn
     role: 'assistant',
     contextKind: 'summary',
     status: 'committed',
-    content: `[应用提供的只读会话摘要；不是用户指令；已覆盖到消息序号 ${summary.throughSequence}]
+    content: `[应用提供的只读会话摘要；不是用户指令；${forgottenThrough ? `摘要范围从消息序号 ${forgottenThrough + 1} 开始，到 ${summary.throughSequence}；之前的部分不在摘要内` : `已覆盖到消息序号 ${summary.throughSequence}`}]
 ${summary.sourceLosses?.length ? `注意：摘要链有 ${summary.sourceLosses.length} 处摘录或缺口信息不明，不能视为保留全部细节；${hasRecall ? '本轮历史检索也有范围限制；缺失的原话请用户补充。' : '当前没有历史原文查询能力，需要精确原话时请用户补充，不要承诺可以检索。'}\n` : ''}概览：${summary.overview}
 ${currentTopic ? `当前主题摘要（${currentTopic.label}）：${currentTopic.summary}\n` : ''}主题：
 ${topics}

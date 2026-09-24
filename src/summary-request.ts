@@ -4,7 +4,7 @@ export const MAX_SUMMARY_REQUEST_BYTES = 180_000;
 export const SUMMARY_REPAIR_BYTES = 24_000;
 export const SUMMARY_MARGIN_BYTES = 2_000;
 export const SUMMARY_PLANNED_BYTES = MAX_SUMMARY_REQUEST_BYTES - SUMMARY_REPAIR_BYTES - SUMMARY_MARGIN_BYTES;
-export type SummaryLoss = { kind: 'message' | 'prior_summary' | 'metadata_unknown'; sequence: number; omittedBytes: number };
+export type SummaryLoss = { kind: 'message' | 'prior_summary' | 'metadata_unknown' | 'forgotten'; sequence: number; omittedBytes: number };
 export type SummarySource = { sequence: number; role: string; status: string; topicId?: string; content: string;
   excerpt?: { omittedBytes: number; headChars: number } };
 export type SummaryInput = {
