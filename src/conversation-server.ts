@@ -28,6 +28,8 @@ import { createTimezoneProvider, resolveLocationTimezone, type TimezoneFallback,
 import { createTimezoneFallback } from './timezone-fallback.js';
 import { createEnvironmentProvider, type EnvironmentProvider } from './environment.js';
 import { createPlanningEvidenceSelector, PlanningEvidenceDialogue, type PlanningEvidenceSelector } from './planning-evidence-dialogue.js';
+import { ConditionalTaskDialogue } from './conditional-task-dialogue.js';
+import { createConditionalTaskPlanner, type ConditionalTaskPlanner } from './conditional-task-planner.js';
 import { CostLedger } from './cost-ledger.js';
 import { createMeteredOpenAIFetch, openAIPricing, requestMaximum } from './metered-openai.js';
 import { baselineModel, modelProfileBanner } from './model-profile.js';
@@ -115,6 +117,7 @@ export function createConversationServer(options: {
   timezoneFallback?: TimezoneFallback;
   environmentProvider?: EnvironmentProvider;
   planningEvidenceSelector?: PlanningEvidenceSelector;
+  conditionalTaskPlanner?: ConditionalTaskPlanner;
   runtimeMetrics?: RuntimeMetrics;
   costSnapshot?: () => Promise<CostSnapshot>;
   ingress?: { publicHosts?: string[]; allowedOrigins?: string[]; allowLoopbackOrigin?: boolean };
@@ -392,11 +395,19 @@ export function createConversationServer(options: {
     const planningEvidenceDialogue = options.environmentProvider && options.planningEvidenceSelector
       ? new PlanningEvidenceDialogue(locationDialogue ?? calendarDialogue ?? delivery ?? options.model,
         options.planningEvidenceSelector, locationBroker, options.environmentProvider) : undefined;
-    const model = planningEvidenceDialogue ?? locationDialogue ?? calendarDialogue ?? delivery ?? options.model;
+    // Outermost layer: intercepts bounded conditional outdoor tasks (plan → environment →
+    // route → calendar fit → preview). Requires Calendar, Routes and Environment together;
+    // otherwise the base plan's task classification simply falls through to a normal answer.
+    const conditionalTaskDialogue = options.conditionalTaskPlanner && options.calendar
+      && options.routeProvider && options.environmentProvider
+      ? new ConditionalTaskDialogue(planningEvidenceDialogue ?? locationDialogue ?? calendarDialogue ?? delivery ?? options.model,
+        options.conditionalTaskPlanner, options.calendar, locationBroker, options.routeProvider, options.environmentProvider, Date.now) : undefined;
+    const model = conditionalTaskDialogue ?? planningEvidenceDialogue ?? locationDialogue ?? calendarDialogue ?? delivery ?? options.model;
     let runtime!: ServerSessionRuntime;
     const invalidate = () => {
       captureStop?.stop(); delivery?.invalidate(); runtime.mailApproval = undefined;
       calendarControl?.invalidate(); calendarDialogue?.invalidate(); locationDialogue?.invalidate();
+      conditionalTaskDialogue?.invalidate();
     };
     const baseContextBuilder = new ContextBuilder();
     conversation = new Conversation(model, event => {
@@ -411,6 +422,7 @@ export function createConversationServer(options: {
         if (runtime) runtime.mailApproval = undefined;
         calendarControl?.invalidate();
         delivery?.endSession(); calendarDialogue?.endSession(); locationDialogue?.endSession();
+        conditionalTaskDialogue?.endSession();
         planningEvidenceDialogue?.invalidate(); locationBroker.cancel(); locationBroker.clear();
         options.model.revokeMemoryContext?.();
         store.deleteRecoveryDraft(id, 'calendar'); store.deleteRecoveryDraft(id, 'delivery');
@@ -471,10 +483,11 @@ export function createConversationServer(options: {
     const start = () => {
       if (started) return;
       started = true; options.model.startSession?.(); locationDialogue?.startSession();
+      conditionalTaskDialogue?.startSession();
     };
     const finish = (clearRecovery: boolean) => {
       if (!started || ended) return;
-      ended = true; locationDialogue?.endSession();
+      ended = true; locationDialogue?.endSession(); conditionalTaskDialogue?.endSession();
       if (clearRecovery) { delivery?.endSession(); calendarDialogue?.endSession(); }
       options.model.endSession?.();
     };
@@ -659,8 +672,13 @@ export function createConversationServer(options: {
       const job = current; current = undefined; job?.finish(); send({ type: 'speech.ended', segment_id: segmentId });
     });
     const authTimer = setTimeout(() => client.close(1008, 'Auth timeout'), 5000);
-    const accessSweep = setInterval(() => { connectionMayUseOwnerRuntime(); }, 1000);
-    accessSweep.unref();
+    // Silent (no-traffic) owner revocation is driven by the store's device epoch/lock,
+    // which a lock-then-unlock can change even with no guest runtime pool configured, so
+    // the periodic sweep must run whenever a store exists. Without a store there are no
+    // device epochs and connectionMayUseOwnerRuntime early-returns, so it is pure overhead.
+    const accessSweep = store
+      ? setInterval(() => { connectionMayUseOwnerRuntime(); }, 1000) : undefined;
+    accessSweep?.unref();
     const heartbeat = setInterval(() => {
       if (client.readyState !== WebSocket.OPEN || pongDeadline) return;
       try {
@@ -1230,6 +1248,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const planningEvidenceSelector = hybrid.provider === 'api' && key && environmentProvider
     ? createPlanningEvidenceSelector(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',
       process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', openaiFetch) : undefined;
+  // Conditional outdoor tasks orchestrate write-capable Calendar previews on top of
+  // Environment + Routes evidence, so they stay opt-in and require every dependency.
+  const conditionalTaskPlanner = calendar && environmentProvider && routeProvider
+    && hybrid.provider === 'api' && key && process.env.EVEN_CONDITIONAL_TASKS_ENABLED === 'true'
+    ? createConditionalTaskPlanner(key, hybrid.models.reply, 'https://api.openai.com/v1/responses',
+      process.env.CONVERSATION_TIMEZONE ?? 'America/Chicago', openaiFetch) : undefined;
   const publicHost = process.env.EVEN_PUBLIC_HOST?.trim().toLowerCase();
   const publicOrigin = process.env.EVEN_PUBLIC_ORIGIN?.trim();
   const app = createConversationServer({ token, ...hybrid,
@@ -1252,11 +1276,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     timezoneFallback,
     environmentProvider,
     planningEvidenceSelector,
+    conditionalTaskPlanner,
     runtimeMetrics,
     costSnapshot: () => costs.snapshot(),
     draftGenerator: hybrid.provider === 'api' ? createDraftGenerator(process.env, openaiFetch) : undefined,
     capabilities: { provider: hybrid.provider, delivery: hybrid.delivery, webSearch: hybrid.webSearch, speech: stt.configured, speechProvider: stt.name, location: true,
-      routes: !!routeProvider, environment: !!planningEvidenceSelector, conditionalTasks: false },
+      routes: !!routeProvider, environment: !!planningEvidenceSelector, conditionalTasks: !!conditionalTaskPlanner },
     ingress: { publicHosts: publicHost ? [publicHost] : undefined,
       allowedOrigins: publicHost && publicOrigin ? [publicOrigin] : undefined,
       allowLoopbackOrigin: startup.allowLoopbackOrigin },
