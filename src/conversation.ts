@@ -74,6 +74,7 @@ export function normalizeTurnPlan(plan: TurnPlan): TurnPlan {
   return { ...plan, cognitiveMode, assistantMode: cognitiveMode, taskKind, workflows };
 }
 export interface DialogueModel {
+  verifyPlaceHours?(place: import('./place-availability.js').PlaceHoursLookup, signal: AbortSignal): Promise<import('./place-availability.js').PlaceHours | undefined>;
   revokeMemoryContext?(): void;
   startSession?(): void;
   endSession?(): void;

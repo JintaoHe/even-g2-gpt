@@ -44,6 +44,8 @@ export class HybridDialogue implements DialogueModel {
     if (!this.intent.clarifyRoute) throw new Error('Route clarification unavailable');
     return this.intent.clarifyRoute(query, options, history, signal, policy);
   }
+  verifyPlaceHours: NonNullable<DialogueModel['verifyPlaceHours']> = (place, signal) =>
+    this.answer.verifyPlaceHours?.(place, signal) ?? Promise.resolve(undefined);
   resolveRoute(query: string, history: Message[], signal: AbortSignal, update?: (event: ReplyUpdate) => void) {
     if (!this.answer.resolveRoute) return Promise.resolve({ action: 'not_found' as const });
     return this.answer.resolveRoute(query, history, signal, update);

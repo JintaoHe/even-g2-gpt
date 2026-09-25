@@ -64,6 +64,54 @@ import { LocationRequestBroker, parseLocationReport } from '../src/location.js';
 import type { DialogueModel, Message, TurnPlan } from '../src/conversation.js';
 import { RouteError, type RouteComparisonResult, type RouteProvider, type RouteRequest } from '../src/routes.js';
 
+test('lone ancillary result cannot silently satisfy a brand request', async () => {
+  let routed = 0;
+  const base: DialogueModel = { plan: async () => ({ decision: 'respond', locationAction: 'nearby_search', routeDestination: 'Target' }),
+    decide: async () => 'respond', reply: async () => { throw Error('must not use general fallback'); } };
+  const d = new LocationDialogue(base, automaticBroker([]), { discover: async () => ({ query: 'Target',
+    candidates: [{ placeId: 'parking', name: 'Target Parking', primaryType: 'parking_lot' }] }),
+    route: async () => { routed++; return comparison; } });
+  const signal = new AbortController().signal;
+  await d.plan([], '最近的 Target 在哪里', false, signal);
+  let output = ''; await d.reply([{ role: 'user', content: '最近的 Target 在哪里' }], signal, t => { output += t; });
+  assert.equal(routed, 0); assert.doesNotMatch(output, /到Target Parking/); assert.match(output, /没有找到/);
+});
+
+test('whole recommendation follow-up overrides repeated search, but new content and mode do not', async () => {
+  let routeCalls = 0, analyses = 0;
+  const base: DialogueModel = { plan: async () => ({ decision: 'respond', locationAction: 'nearby_search', routeDestination: 'restaurant' }),
+    decide: async () => 'respond', reply: async (history, _signal, delta) => {
+      analyses++; assert.match(history.at(-1)!.content, /displayedOrder/); delta('根据已有评分和车程，我会选第一家。');
+    } };
+  const d = new LocationDialogue(base, automaticBroker([]), { route: async () => { routeCalls++; return comparison; } });
+  const turn = async (text: string) => { const signal = new AbortController().signal;
+    const plan = await d.plan([], text, false, signal); await d.reply([{ role: 'user', content: text }], signal, () => {}); return plan; };
+  await turn('找附近餐馆');
+  assert.equal((await turn('给我一些推荐')).locationAction, 'analyze_places');
+  assert.equal((await turn('which would you recommend?')).locationAction, 'analyze_places');
+  assert.equal(routeCalls, 1); assert.equal(analyses, 2);
+  assert.equal((await turn('再找附近咖啡店')).locationAction, 'nearby_search');
+  assert.equal((await turn('推荐哪家，另外算一下步行时间')).locationAction, 'nearby_search');
+});
+
+test('production-style dialogue verifies hours and preserves refreshed evidence for follow-up', async () => {
+  let checks = 0, at = Date.now(), plans = 0;
+  const base: DialogueModel = { plan: async () => plans++ ? { decision: 'respond', locationAction: 'analyze_places' }
+    : { decision: 'respond', locationAction: 'nearby_search', routeDestination: 'restaurant' },
+    decide: async () => 'respond', reply: async (history, _signal, delta) => {
+      assert.match(history.at(-1)!.content, /openingEvidence/); delta('营业状态已重新核验。');
+    } };
+  const d = new LocationDialogue(base, automaticBroker([]), { route: async () => comparison,
+    verifyPlace: async c => { checks++; return { ...c, hours: { source: 'google', checkedAt: at, openNow: true, closesAt: at + 3600000 } }; } },
+  'America/Chicago', () => at, base);
+  for (const text of ['附近餐馆', '现在还开门吗']) {
+    const signal = new AbortController().signal; await d.plan([], text, false, signal);
+    let output = ''; await d.reply([{ role: 'user', content: text }], signal, t => { output += t; });
+    assert.match(output, /营业/); at += 121000;
+  }
+  assert.equal(checks, 4);
+});
+
 const id = '123e4567-e89b-12d3-a456-426614174000';
 
 test('recommend/specific/delegated enforce bounded clarification even when the model keeps asking', async () => {
@@ -118,7 +166,8 @@ test('invalid model indices fail safely and cannot bypass clarification limits',
     nearby: { mode: 'recommend', taskAction: 'replace', delegated: true, patch: {} } }),
     decide: async () => 'respond', reply: async () => {}, clarifyRoute: async () => ({ action: 'proceed', selectedIndices: [999] }) };
   const dialogue = new LocationDialogue(base, automaticBroker([]), { discover: async () => ({ query: 'Target', candidates: ambiguous.candidates }),
-    route: async request => { assert.equal(request.candidates?.length, ambiguous.candidates.length); return ambiguous; } },
+    route: async request => { assert.equal(request.candidates?.length, 2);
+      assert.ok(request.candidates?.every(c => c.primaryType !== 'parking_lot')); return ambiguous; } },
   'America/Chicago', Date.now, base);
   const signal = new AbortController().signal; await dialogue.plan([], '你选吧', false, signal);
   let answer = ''; await dialogue.reply([{ role: 'user', content: '你选吧' }], signal, value => { answer += value; });

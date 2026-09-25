@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { applyNearbyIntent, type NearbyPreferences } from './nearby-intent.js';
 import type { NearbyMetricObserver } from './runtime-metrics.js';
 import { LocationRequestBroker, LocationUnavailableError } from './location.js';
-import { RouteError, recommendCandidates, type PlaceCandidate, type RouteComparisonResult, type RouteOrigin, type RouteProvider, type RouteRequestKind } from './routes.js';
+import { RouteError, assessCandidate, recommendCandidates, type PlaceCandidate, type RouteComparisonResult, type RouteOrigin, type RouteProvider, type RouteRequestKind } from './routes.js';
+import { availability, intendedFacilities, verifyRecommendations } from './place-availability.js';
 
 type PendingRoute = { destination: string; mode: RouteTravelMode; modeExplicit: boolean; kind: RouteRequestKind; candidates?: PlaceCandidate[]; expires: number; prompt: string };
 type RecentComparison = { query: string; kind: RouteRequestKind; candidates: PlaceCandidate[]; recommendedPlaceId?: string;
@@ -63,7 +64,9 @@ function selectPlaces(candidates: PlaceCandidate[], selectedIndices: number[]) {
 function compactCandidates(result: RouteComparisonResult) {
   const fastest = [...result.candidates].sort((a, b) => a.durationSeconds - b.durationSeconds || a.distanceMeters - b.distanceMeters)[0];
   const recommended = result.candidates.find(candidate => candidate.placeId === result.recommendedPlaceId) ?? fastest;
-  const list = [...result.candidates].sort((a, b) => a.durationSeconds - b.durationSeconds || a.distanceMeters - b.distanceMeters).slice(0, 2);
+  const list = [...result.candidates].sort((a, b) =>
+    (result.availabilityCheckedAt === undefined ? 0 : Number(b.placeId === result.recommendedPlaceId) - Number(a.placeId === result.recommendedPlaceId))
+    || a.durationSeconds - b.durationSeconds || a.distanceMeters - b.distanceMeters).slice(0, 2);
   if (!list.some(candidate => candidate.placeId === recommended.placeId)) list[list.length - 1] = recommended;
   return { fastest, recommended, list };
 }
@@ -118,6 +121,7 @@ function withRecentPlaceContext(history: Message[], recent?: RecentComparison, f
     displayedOrder: recent.displayedPlaceIds.includes(candidate.placeId) ? recent.displayedPlaceIds.indexOf(candidate.placeId) + 1 : null,
     ...recent.routeFacts.find(fact => fact.placeId === candidate.placeId),
     ...(candidate.openNow === undefined ? {} : { openNow: candidate.openNow }),
+    ...(candidate.hours ? { openingEvidence: candidate.hours } : {}),
     ...(candidate.priceLevel ? { priceLevel: candidate.priceLevel } : {}),
     unverifiedAttributes: ['foodService', 'quietness', 'liveliness', ...(!candidate.priceLevel ? ['price'] : [])],
     recommended: candidate.placeId === recent.recommendedPlaceId
@@ -132,6 +136,16 @@ export function routeText(result: RouteComparisonResult, timezone: string, defau
   const labels = candidateLabels(result.candidates);
   const label = (candidate: RouteComparisonResult['candidates'][number]) => labels.get(candidate.placeId) ?? candidate.name;
   const caveats = (candidate: PlaceCandidate) => {
+    if (result.availabilityCheckedAt !== undefined) {
+      const status = availability(candidate, result.availabilityCheckedAt,
+        result.candidates.find(c => c.placeId === candidate.placeId)?.durationSeconds, result.nearbyPreferences?.needsFood);
+      const source = candidate.hours?.source === 'official_web' ? '官网核验' : 'Google 营业资料';
+      const opening = status === 'open' ? `\n   ${source}显示现在营业${candidate.hours?.closesAt === undefined ? '；到达时是否仍营业待确认' : '，预计到达早于关门时间'}。`
+        : '\n   营业状态尚未确认，不作为已确认营业的选择。';
+      return opening + (result.nearbyPreferences?.priceCeiling && !candidate.priceLevel ? '价位待确认。' : '')
+        + ((result.nearbyPreferences?.needsFood || /restaurant|fast food|餐|吃饭/i.test(result.query))
+          && candidate.hours?.foodOpenNow === undefined ? '厨房供餐时间待确认。' : '');
+    }
     if (!result.nearbyPreferences) return '';
     const notes: string[] = [];
     if ((result.nearbyPreferences.visitTime ?? 'now') !== 'now') notes.push('出行时营业时间待确认');
@@ -165,7 +179,11 @@ export function routeText(result: RouteComparisonResult, timezone: string, defau
     const uncertain = caveats(candidate); if (uncertain) lines.push(uncertain.trim());
   });
   const extra = Math.max(0, minutes(recommended.durationSeconds) - minutes(fastest.durationSeconds));
-  if (result.recommendationBasis === 'quality_risk') {
+  if (result.availabilityCheckedAt !== undefined) {
+    const open = availability(recommended, result.availabilityCheckedAt, recommended.durationSeconds, result.nearbyPreferences?.needsFood) === 'open';
+    lines.push(open ? `建议优先考虑 ${label(recommended)}：已核对营业资料，再结合车程和评分比较。`
+      : '这批候选尚未确认现在营业，暂不推荐直接出发。');
+  } else if (result.recommendationBasis === 'quality_risk') {
     lines.push(`建议 ${label(recommended)}：虽多 ${durationMinutesText(extra)}，但 ${label(fastest)} 评分过低。`);
   } else if (result.recommendationBasis === 'balanced') {
     lines.push(`建议 ${label(recommended)}：多 ${durationMinutesText(extra)}，但评分更稳。`);
@@ -209,6 +227,13 @@ export class LocationDialogue implements DialogueModel {
     signal.throwIfAborted();
     const last = history.at(-1);
     if (plan.replyRetry) { this.plans.set(signal, plan); return plan; }
+    // A bounded whole-utterance fallback for recommendation follow-ups, not a keyword router.
+    if (this.recent && !this.pendingPlace && plan.decision === 'respond'
+      && ['none', 'nearby_search', 'recompare', 'analyze_places'].includes(plan.locationAction ?? 'none')
+      && (!plan.calendarAction || plan.calendarAction === 'none') && (!plan.deliveryAction || plan.deliveryAction === 'none')
+      && /^(?:你(?:会|更)?|那你|请|帮我|再)?(?:推荐哪(?:一)?家|建议去哪(?:一)?家|选哪(?:一)?家|给我(?:一些)?推荐|分析一下|详细比较一下|which (?:one|would you recommend)|give me (?:some )?recommendations)[。.!！?？\s]*$/i.test(text.trim())) {
+      plan = { ...plan, locationAction: 'analyze_places', nearby: undefined, cognitiveMode: 'decision_support' };
+    }
     if (this.pendingPlace && last?.role === 'assistant' && last.content === this.pendingPlace.prompt) {
       if ((plan.locationAction === 'route_eta' || plan.locationAction === 'nearby_search') && plan.nearby?.taskAction !== 'replace') {
         // Preserve the original search and use the answer only to select candidates.
@@ -244,6 +269,28 @@ export class LocationDialogue implements DialogueModel {
     const action = plan?.locationAction ?? 'none';
     if (action === 'analyze_places') {
       if (!this.recent) { delta('我现在没有这两家店的可核对资料。能告诉我店名吗？'); return; }
+      if (/现在.*(?:开|营业)|还开|营业时间|open now|still open/i.test(history.at(-1)?.content ?? '') && this.routes.verifyPlace) {
+        const previous = this.recent;
+        const candidates = previous.candidates.flatMap(c => {
+          const route = previous.routeFacts.find(f => f.placeId === c.placeId);
+          return route ? [{ ...c, ...route, quality: assessCandidate(c) }] : [];
+        });
+        if (candidates.length) try {
+          const checked = await verifyRecommendations({ query: previous.query, candidates,
+            recommendedPlaceId: previous.recommendedPlaceId ?? candidates[0].placeId, recommendationBasis: 'fastest',
+            mode: previous.mode, trafficAware: false, nearbyPreferences: { ...this.nearbyTask?.prefs, visitTime: 'now' } },
+          this.routes, this.clarifier?.verifyPlaceHours?.bind(this.clarifier), signal, this.now);
+          signal.throwIfAborted();
+          this.recent = { ...previous, candidates: checked.candidates, recommendedPlaceId: checked.recommendedPlaceId };
+        } catch (error) {
+          signal.throwIfAborted();
+          if (error instanceof RouteError && error.code === 'ROUTE_NO_MATCHING_PLACES') {
+            this.recent = undefined;
+            delta('重新核验后，这些候选已关门或预计到达时已关门，暂不建议出发。'); return;
+          }
+          throw error;
+        }
+      }
       const analysisWorkflows = (workflows ?? []).filter(workflow => workflow.kind !== 'navigation');
       analysisWorkflows.push({ kind: 'navigation', action: 'analyze_places' });
       if (plan?.searchAction === 'search' && !analysisWorkflows.some(workflow => workflow.kind === 'search')) {
@@ -318,6 +365,12 @@ export class LocationDialogue implements DialogueModel {
         }
         return result;
       };
+      const identity = (options: PlaceCandidate[]) => {
+        const kept = intendedFacilities(`${destination} ${history.at(-1)?.role === 'user' ? history.at(-1)!.content : ''}`, options);
+        if (!kept.length) throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');
+        return kept;
+      };
+      if (candidates?.length) candidates = identity(candidates);
       if (candidates?.length && this.pendingPlace && needsPlaceClarification(candidates)) {
         const clarification = await clarify(candidates); clarificationChecked = true;
         if (clarification.action === 'ask') {
@@ -341,7 +394,7 @@ export class LocationDialogue implements DialogueModel {
           update?.({ type: 'route.status', status: 'resolving' });
           discovery = await this.routes.discover({ origin, destination, mode, kind, nearbyPreferences }, signal);
         }
-        signal.throwIfAborted(); candidates = discovery.candidates; excluded = discovery.excluded;
+        signal.throwIfAborted(); candidates = identity(discovery.candidates); excluded = discovery.excluded;
         this.nearbyTask.excluded = excluded; clarificationChecked = true;
         if (needsPlaceClarification(candidates)) {
           update?.({ type: 'route.status', status: 'clarifying' });
@@ -359,19 +412,26 @@ export class LocationDialogue implements DialogueModel {
       }
       const result = await this.routes.route({ origin, destination, mode, kind, nearbyPreferences, ...(candidates?.length ? { candidates } : {}) }, signal);
       signal.throwIfAborted();
-      let resolved = result;
-      if (!clarificationChecked && needsPlaceClarification(result.candidates)) {
+      let resolved = { ...result, candidates: identity(result.candidates) as RouteComparisonResult['candidates'] };
+      if (!resolved.candidates.some(c => c.placeId === resolved.recommendedPlaceId)) {
+        const ranking = recommendCandidates(resolved.candidates); resolved.recommendedPlaceId = ranking.recommended.placeId;
+        resolved.recommendationBasis = ranking.basis;
+      }
+      if (!clarificationChecked && needsPlaceClarification(resolved.candidates)) {
         update?.({ type: 'route.status', status: 'clarifying' });
-        const clarification = await clarify(result.candidates);
+        const clarification = await clarify(resolved.candidates);
         if (clarification.action === 'ask') {
           const prompt = clarification.question;
           this.pending = undefined; this.recent = undefined;
           this.pendingPlace = { destination, mode, modeExplicit: plan?.routeModeExplicit ?? false, kind,
-            expires: this.now() + routeContextMs, prompt, candidates: result.candidates };
+            expires: this.now() + routeContextMs, prompt, candidates: resolved.candidates };
           delta(prompt); return;
         }
-        resolved = selectRouteCandidates(result, clarification.selectedIndices);
+        resolved = selectRouteCandidates(resolved, clarification.selectedIndices);
       }
+      resolved = await verifyRecommendations(resolved, this.routes,
+        this.clarifier?.verifyPlaceHours?.bind(this.clarifier), signal, this.now);
+      signal.throwIfAborted();
       this.pending = undefined;
       this.pendingPlace = undefined;
       this.recent = { query: resolved.query, kind, recommendedPlaceId: resolved.recommendedPlaceId,
@@ -379,18 +439,29 @@ export class LocationDialogue implements DialogueModel {
         routeFacts: resolved.candidates.slice(0, 5).map(({ placeId, durationSeconds, distanceMeters }) => ({ placeId, durationSeconds, distanceMeters })),
         evidenceAt: this.now(), excluded: [...(excluded ?? this.nearbyTask.excluded ?? []), ...(resolved.excluded ?? [])],
         candidates: resolved.candidates.slice(0, 5).map(candidate => ({ placeId: candidate.placeId, name: candidate.name,
+          ...(candidate.hours ? { hours: candidate.hours } : {}), ...(candidate.website ? { website: candidate.website } : {}),
           ...(candidate.location ? { location: candidate.location } : {}), ...(candidate.openNow === undefined ? {} : { openNow: candidate.openNow }),
           ...(candidate.priceLevel ? { priceLevel: candidate.priceLevel } : {}), ...(candidate.businessStatus ? { businessStatus: candidate.businessStatus } : {}),
           ...(candidate.address ? { address: candidate.address } : {}), ...(candidate.rating === undefined ? {} : { rating: candidate.rating }),
           ...(candidate.userRatingCount === undefined ? {} : { userRatingCount: candidate.userRatingCount }),
           ...(candidate.primaryType ? { primaryType: candidate.primaryType } : {}), ...(candidate.types?.length ? { types: candidate.types } : {}) })) };
       const originLabel = origin.kind === 'coordinates' ? '当前位置' : origin.address.replace(/[\r\n\t]+/g, ' ').slice(0, 60);
-      delta(assumption + routeText(resolved, this.timezone, !plan?.routeModeExplicit, originLabel));
+      const text = assumption + routeText(resolved, this.timezone, !plan?.routeModeExplicit, originLabel);
+      delta(text);
+      const labels = candidateLabels(resolved.candidates);
+      const citations = resolved.candidates.flatMap(c => {
+        const label = labels.get(c.placeId) ?? c.name, start = text.indexOf(label);
+        return c.hours?.source === 'official_web' && c.hours.sourceUrl && start >= 0
+          ? [{ start, end: start + label.length, url: c.hours.sourceUrl, title: `${c.name} 官方营业资料` }] : [];
+      });
+      if (citations.length) update?.({ type: 'answer.citations', text, citations });
     } catch (error) {
       signal.throwIfAborted();
       if (error instanceof RouteError && error.code === 'ROUTE_NO_MATCHING_PLACES') {
         this.pending = undefined; this.pendingPlace = undefined; this.recent = undefined;
-        delta(error.excluded?.length && error.excluded.every(item => item.reason === 'closed')
+        delta(error.excluded?.some(item => item.reason === 'closing')
+          ? '候选店铺已关门，或预计到达时已经关门，暂不建议直接出发。'
+          : error.excluded?.length && error.excluded.every(item => item.reason === 'closed')
           ? '这次找到的几家都显示已关门；没有确认到下一次营业时间。'
           : '这批结果没有符合条件的选择，可能受营业状态、价位或类型限制。可以放宽一个条件再找。');
       } else if (error instanceof RouteError && error.code === 'ROUTE_DESTINATION_NOT_FOUND') {

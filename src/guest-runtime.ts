@@ -44,6 +44,9 @@ export class GuestRuntime {
     this.location = new LocationRequestBroker(event => { if (!this.closed) { this.assertAccess(); this.sink?.(event); } }, randomUUID);
     const routes = dependencies.routes;
     const checkedRoutes: RouteProvider | undefined = routes && {
+      ...(routes.verifyPlace ? { verifyPlace: async (...args: Parameters<NonNullable<RouteProvider['verifyPlace']>>) => {
+        this.assertAccess(); const result = await routes.verifyPlace!(...args); this.assertAccess(); return result;
+      } } : {}),
       route: async (...args) => { this.assertAccess(); const result = await routes.route(...args); this.assertAccess(); return result; },
       ...(routes.discover ? { discover: async (...args: Parameters<NonNullable<RouteProvider['discover']>>) => {
         this.assertAccess(); const result = await routes.discover!(...args); this.assertAccess(); return result;
