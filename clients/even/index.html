@@ -13,12 +13,12 @@
 <p><input id="token" type="password" autocomplete="off" placeholder="助手访问 token"><button id="connect">连接后端</button></p>
 <small>只输入后端提供的助手访问 token，不要输入 OpenAI key。主 token 仅保留在内存；浏览器只保存服务器签发的短期会话恢复凭证。模型与服务密钥始终留在后端。</small>
 <p id="status" role="status">未连接</p>
-<button id="audio">开启 / 暂停眼镜麦克风</button><button id="resume">取消退出 / 恢复文字</button><button id="interrupt">打断回答</button><button id="exit">退出（系统确认）</button>
+<button id="audio" style="touch-action:none;user-select:none">按住说话，松手发送</button><button id="resume">取消退出 / 恢复文字</button><button id="interrupt">打断回答</button><button id="exit">退出（系统确认）</button>
 <form id="form"><textarea id="text" maxlength="6000" placeholder="输入问题，回答会显示到眼镜"></textarea><button>发送文字</button></form>
 <p><button id="locate-once">定位一次（不保存）</button><button id="locate-start">开启连续定位</button><button id="locate-stop">停止并清除定位</button></p>
 <p><label for="route-mode">本次对话默认交通方式</label><select id="route-mode"><option value="drive">驾车</option><option value="walk">步行</option><option value="bicycle">骑车</option></select><button id="route-mode-apply">应用</button></p>
 <small>路线问题会自动请求一次性定位，失败时最多尝试 3 次后请你输入出发地。按钮保留为调试／安全兜底。原始坐标不写入对话、日志或 MD，路线完成后立即清除。</small>
 <button id="prev">上滑 / 上一条</button><button id="next">下滑 / 下一条</button><button id="latest">回到最新一条</button><span id="page"></span>
 <pre id="preview"></pre>
-<small>短内容滑动翻页；长内容每次滚动三行并保留两行上下文，到边界后进入上一条／下一条对话。问题与回答均可回看；流式更新不自动移动阅读位置。单击开启/暂停收音；双击请求系统退出。首次收音需要主动操作。</small>
+<small>滑动手动翻页，流式更新不自动跳页。每次打开或 reload 首轮自动开麦；第一轮开始回答后关闭麦克风，之后长按镜腿／戒指说话，松手发送（最多 60 秒）。每次开麦请求一次位置，定位不阻塞录音。双击请求系统退出。</small>
 <script type="module" src="/src/main.ts"></script></html>

@@ -1,4 +1,4 @@
-import { waitForEvenAppBridge, CreateStartUpPageContainer, TextContainerProperty, TextContainerUpgrade,
+import { waitForEvenAppBridge, CreateStartUpPageContainer, RebuildPageContainer, TextContainerProperty, TextContainerUpgrade,
   DeviceConnectType, OsEventTypeList, type EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { ReadingHistory } from './reading-history';
 import { DisplaySession } from './display-session';
@@ -13,10 +13,10 @@ const packagedBackendOrigin = typeof __EVEN_BACKEND_ORIGIN__ === 'string' ? __EV
 const connectionLabel = typeof __EVEN_CONNECTION_LABEL__ === 'string' ? __EVEN_CONNECTION_LABEL__ : '连接配置不可见';
 element('backend-target').textContent = `连接目标：${connectionLabel}`;
 element('recovery-window').textContent = '会话恢复窗口：连接后由服务器确认';
-const pager = new ReadingHistory();
+const pager = new ReadingHistory('manual-pages');
 const display = new DisplaySession();
 let shutdown: Promise<void> | undefined;
-pager.reset('请在伴随页面连接后端。\n连接后可输入文字或开启麦克风。');
+pager.reset('请在伴随页面连接后端。\n首轮自动开麦，之后长按说话、松手发送。');
 let bridge: EvenAppBridge | undefined, audioController: AudioController | undefined;
 let developmentSessionControls: { handleEvent: (event: any) => boolean } | undefined;
 let locationController: LocationController | undefined, locationAvailable = false;
@@ -24,17 +24,25 @@ let developmentLocation: { label: string; latitude: number; longitude: number; a
 let connected = false, speech = false, audio = false, state = 'closed', channel = '?';
 let status = '未连接', answerId: unknown, dirty = true, drawing = false, last = '', disposed = false, exiting = false;
 let hasReady = false;
+let lastHeader = '', viewRevision = 0;
+let startupResumePending = true, startupCapture = true, startupResumeInFlight = false;
+let pushToTalkAvailable = false, holding = false, holdGeneration = 0;
+let holdTimer: ReturnType<typeof setTimeout> | undefined;
 let memorySessionId: string | undefined, memoryBoundary: string | undefined;
 const memoryResetText = '本次对话的上下文已更新，请重新提出需要继续的问题。';
 function resetMemoryView(text = memoryResetText) {
+  viewRevision++; lastHeader = '';
   answerId = undefined; void stopAudio(); void locationController?.stop();
   pager.reset(text); last = ''; status = text;
   (element('text') as HTMLTextAreaElement).value = '';
 }
 let accessMode = 'unknown';
-async function clearPrivateView(text: string) {
+async function clearPrivateView(text: string, preserveMicIntent = false) {
+  viewRevision++; lastHeader = '';
   hasReady = false; answerId = undefined; connected = false; state = 'closed';
-  void stopAudio(); void locationController?.stop();
+  void preserveMicIntent;
+  void stopAudio();
+  void locationController?.stop();
   pager.reset(text); last = ''; status = text;
   element('preview').textContent = text;
   element('connection-meta').textContent = '';
@@ -49,9 +57,11 @@ async function clearPrivateView(text: string) {
   if (bridge && display.open && !disposed && !exiting) {
     drawing = true;
     try {
+      if (!await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 2,
+        containerName: 'status', content: '已清屏 OFF' }))) throw Error('Display clear failed');
       if (!await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1,
         containerName: 'conversation', content: text }))) throw Error('Display clear failed');
-      last = text;
+      last = text; lastHeader = '已清屏 OFF';
     } finally { drawing = false; }
   }
 }
@@ -59,8 +69,18 @@ const active = () => connected && !exiting && !disposed && !['paused', 'exit_pen
 let credentialStore: SessionCredentialStore;
 let connection: ConnectionController;
 function send(event: Record<string, unknown>) { connection?.send(event); }
-function refresh() { dirty = true; element('status').textContent = `${status} · 麦克风${audio ? '开启' : '关闭'}`; }
-function syncAudioAvailability() { void audioController?.setBackendAvailable(active()); }
+function microphoneStatus() {
+  if (connected && speech && !pushToTalkAvailable) return '按住说话需要更新后端；当前仅可输入文字';
+  if (audioController?.state === 'requires_reopen') return '开麦失败：请重新打开应用';
+  if (audioController?.state === 'unavailable') return '麦克风暂时不可用';
+  if (audioController?.state === 'starting') return '正在开启麦克风';
+  if (audio) return status;
+  if (connected && speech && state === 'listening') return audioController?.desired
+    ? '麦克风未就绪，尚未收音' : '麦克风已暂停，长按说话，松手发送';
+  return status;
+}
+function refresh() { dirty = true; element('status').textContent = `${microphoneStatus()} · 麦克风${audio ? '开启' : '关闭'}`; }
+function syncAudioAvailability() { void audioController?.setBackendAvailable(active() && speech && display.open); }
 const locationPermissionKey = 'glass-assistant.location-succeeded.v1';
 function firstLocationRequest() {
   try { return localStorage.getItem(locationPermissionKey) !== '1'; }
@@ -96,29 +116,41 @@ async function automaticLocation(event: any, ws: WebSocket) {
     (attempt, total) => { status = `正在定位 ${attempt}/${total}`; refresh(); });
   if (result.ok) {
     rememberLocationSuccess();
-    // Once permission succeeds, keep the live session context fresh. The SDK
-    // owns actual sampling; our request asks for at most one update per 10s.
-    void locationController.start();
+    // Continuous updates are opt-in; automatic requests only acquire one fix.
   }
   if (connection.socket !== ws || ws.readyState !== WebSocket.OPEN || result.ok || result.reason === 'cancelled') return;
   send({ type: 'location.failed', request_id: event.request_id, reason: result.reason });
 }
 async function stopAudio() {
+  startupCapture = false;
+  holding = false; holdGeneration++; clearTimeout(holdTimer); holdTimer = undefined;
   await audioController?.setDesired(false);
 }
-async function toggleAudio() {
-  if (!bridge || !connected || !speech || exiting || disposed || state === 'exit_pending' || !audioController) { status = '请先连接 SDK 与后端，退出待确认时请先恢复'; refresh(); return; }
-  // A backend pause deliberately preserves microphone intent so reconnect and
-  // foreground restoration can reopen it. Handle that state before the normal
-  // desired=true "pause" branch, otherwise the first temple tap only pauses a
-  // second time and the user has to tap twice.
-  if (state === 'paused') {
-    send({ type: 'resume' });
-    await audioController.setDesired(true);
-    return;
+function beginHold() {
+  if (holding) return;
+  if (!bridge || !connected || !speech || !pushToTalkAvailable || exiting || disposed
+    || state === 'exit_pending' || !display.open || !audioController || audioController.state === 'requires_reopen') {
+    status = '按住说话尚不可用，请确认连接及后端版本'; refresh(); return;
   }
-  if (audioController.desired) { await stopAudio(); send({ type: 'pause' }); return; }
-  await audioController.setDesired(true);
+  holding = true;
+  startupCapture = false;
+  const generation = ++holdGeneration, socket = connection.socket;
+  if (state === 'paused') send({ type: 'resume' });
+  send({ type: 'turn.begin' });
+  holdTimer = setTimeout(() => { endHold(); status = '已到 60 秒录音上限，已停止并提交'; refresh(); }, 60_000);
+  void audioController.setDesired(true);
+  if (locationAvailable && locationController) {
+    if (firstLocationRequest()) pager.notice('首次定位可能在手机上请求权限；定位不会阻塞录音。');
+    void locationController.once(() => holding && generation === holdGeneration && connected
+      && connection.socket === socket).then(ok => { if (ok) rememberLocationSuccess(); }).catch(() => {});
+  }
+  refresh();
+}
+function endHold() {
+  if (!holding) return;
+  void stopAudio(); // PCM gate closes synchronously, before the native close ACK.
+  if (connected) send({ type: 'turn.submit' });
+  status = '已停止收音，正在提交识别'; refresh();
 }
 function exitDialog() {
   if (shutdown) return shutdown;
@@ -157,7 +189,8 @@ function handleServerEvent(event: any) {
       memorySessionId = undefined; memoryBoundary = undefined;
       const text = event.mode === 'guest' ? '访客模式已锁定，正在连接。'
         : event.mode === 'reauthorize' ? '访客模式已结束，请重新输入主人凭证连接。' : '连接已断开，旧画面已清除。';
-      accessMode = event.mode ?? 'unknown'; const clearing = clearPrivateView(text);
+      const recoverable = event.type === 'transport.cleared' && event.recoverable === true;
+      accessMode = event.mode ?? 'unknown'; const clearing = clearPrivateView(text, recoverable);
       element('access-mode').textContent = text;
       if (event.type === 'access.changed') return clearing;
       void clearing.catch(() => { status = '眼镜清屏未确认，请重新打开应用'; refresh(); }); return;
@@ -171,6 +204,7 @@ function handleServerEvent(event: any) {
     }
     developmentSessionControls?.handleEvent(event);
     if (event.type === 'ready') {
+      const startupReady = !hasReady && startupResumePending;
       const boundary = typeof event.memory_boundary === 'string' ? event.memory_boundary : undefined;
       const memoryChanged = hasReady && typeof event.session_id === 'string' && event.session_id === memorySessionId
         && memoryBoundary !== undefined && boundary !== undefined && memoryBoundary !== boundary;
@@ -187,7 +221,24 @@ function handleServerEvent(event: any) {
       if (memoryChanged) pager.notice(memoryResetText);
       hasReady = true;
       connected = true; speech = event.capabilities?.speech === true;
+      pushToTalkAvailable = event.capabilities?.push_to_talk === true;
+      // A fresh launch (including glasses-menu launch with a locked phone)
+      // expresses intent to talk, even if the restored session was paused.
+      // Consume this once: later reconnects/pauses must not undo a manual mute.
+      startupResumePending = false;
+      if (typeof event.snapshot?.state === 'string') state = event.snapshot.state;
+      if (startupReady && speech && state === 'paused' && audioController?.desired && !exiting) {
+        startupResumeInFlight = true;
+        send({ type: 'resume' });
+      }
+      syncAudioAvailability();
       locationAvailable = event.capabilities?.location === true;
+      if (startupReady && startupCapture && speech && locationAvailable && locationController) {
+        const socket = connection.socket, generation = holdGeneration;
+        if (firstLocationRequest()) pager.notice('首次定位可能在手机上请求权限；定位不会阻塞录音。');
+        void locationController.once(() => startupCapture && connected && connection.socket === socket
+          && generation === holdGeneration).then(ok => { if (ok) rememberLocationSuccess(); }).catch(() => {});
+      }
       channel = event.capabilities?.provider === 'api' ? 'API' : event.capabilities?.provider === 'codex-cli' ? 'CLI' : '?';
       const stt = event.capabilities?.speechProvider === 'soniox' ? 'Soniox' : event.capabilities?.speechProvider === 'openai' ? 'OpenAI' : 'STT';
       element('channel').textContent = `当前测试：${channel} · 模型 ${event.models?.reply ?? '?'} · 语音 ${stt}`;
@@ -198,15 +249,18 @@ function handleServerEvent(event: any) {
       // not only when the conversation session itself was resumed.
       if (event.capabilities?.email === true) connection.send({ type: 'jobs.list' });
       if (event.capabilities?.calendar === true) connection.send({ type: 'calendar.list' });
-      if (!event.resumed) pager.reset('已连接。\n可输入文字，或主动开启麦克风。');
+      if (!event.resumed) pager.reset('已连接。\n首轮自动开麦，之后长按说话、松手发送。');
     }
     pager.event(event);
     if (event.type === 'state') {
       state = event.state;
+      if (state === 'listening') startupResumeInFlight = false;
+      if (['paused', 'exit_pending', 'closed'].includes(state)
+        && !(state === 'paused' && startupCapture && startupResumeInFlight)) void stopAudio();
       status = ({ listening: '等待说话 / 追问', thinking: '判断意图中', answering: '正在回答', paused: '已暂停', exit_pending: '等待系统退出确认', closed: '已结束' } as Record<string, string>)[state] ?? state;
       syncAudioAvailability();
     }
-    if (event.type === 'answer.start') answerId = event.id;
+    if (event.type === 'answer.start') { answerId = event.id; if (startupCapture) void stopAudio(); }
     if (event.type === 'answer.cancelled' && event.id === answerId) { answerId = undefined; status = '已打断'; }
     if (event.type === 'answer.done' && event.id === answerId) answerId = undefined;
     if (event.type === 'search.status' && event.id === answerId) {
@@ -253,7 +307,7 @@ function handleServerEvent(event: any) {
         resetMemoryView(event.text);
       }
       status = event.text;
-      if (event.code === 'EXIT_CANCELLED' || event.code === 'GUEST_RUNTIME_BUSY' || event.code === 'PARTIAL_REPLY_RETRY_REQUIRED') pager.notice(event.text);
+      if (event.code !== 'MEMORY_CONTEXT_RESET') pager.notice(event.text);
     }
     if (event.type === 'location.status') {
       status = event.state === 'available'
@@ -283,7 +337,11 @@ element('form').onsubmit = event => {
   if (!active()) { status = '请先连接或恢复对话'; refresh(); return; }
   if (input.value.trim()) { send({ type: 'text.submit', text: input.value.trim() }); input.value = ''; }
 };
-element('audio').onclick = () => void toggleAudio();
+element('audio').onpointerdown = event => { event.preventDefault();
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId); beginHold(); };
+element('audio').onpointerup = () => endHold();
+element('audio').onpointercancel = () => { void stopAudio(); send({ type: 'pause' }); };
+element('audio').onlostpointercapture = () => endHold();
 element('guest-enter').onclick = () => send({ type: 'guest.enter' });
 element('guest-unlock').onclick = () => send({ type: 'guest.unlock.begin' });
 element('resume').onclick = async () => {
@@ -342,12 +400,25 @@ element('preview').onwheel = event => {
 const timer = setInterval(async () => {
   if (!dirty || drawing || disposed) return;
   dirty = false; drawing = true;
-  const text = `${accessMode === 'guest' ? '访客' : channel} | ${status.slice(0, 18)} | ${audio ? 'MIC' : 'OFF'}\n${pager.label}\n${pager.current}`;
+  const revision = viewRevision;
+  const micLabel = audioController?.state === 'requires_reopen' ? '开麦失败 OFF'
+    : audioController?.state === 'starting' ? '开麦中 OFF' : audio ? 'MIC' : 'OFF';
+  const header = `${accessMode === 'guest' ? '访客' : '助手'} ${micLabel} ${pager.label}`;
+  const body = pager.selected?.pending && !pager.selected.raw ? status : pager.current || '等待说话';
+  const text = `${header}\n${body}`;
   element('preview').textContent = text; element('page').textContent = `记录 ${pager.index + 1}/${pager.entries.length} · ${pager.label}`;
   try {
-    if (bridge && display.open && !exiting && text !== last) {
-      if (!await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'conversation', content: text }))) throw Error('Display update failed');
-      last = text;
+    if (bridge && display.open && !exiting) {
+      if (header !== lastHeader) {
+        if (!await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 2, containerName: 'status', content: header }))) throw Error('Display update failed');
+        if (revision !== viewRevision) { dirty = true; return; }
+        lastHeader = header;
+      }
+      if (body !== last && revision === viewRevision) {
+        if (!await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'conversation', content: body }))) throw Error('Display update failed');
+        if (revision !== viewRevision) { dirty = true; return; }
+        last = body;
+      }
     }
   } catch { element('bridge').textContent = 'SDK 更新失败；请重新打开模拟器'; }
   finally { drawing = false; }
@@ -360,18 +431,19 @@ async function restoreDisplay() {
   try {
   const initialContent = 'Glass Assistant\n请在伴随页面连接后端。';
   const ok = await display.restore(async () => {
-    const created = await bridge!.createStartUpPageContainer(new CreateStartUpPageContainer({ containerTotalNum: 1,
-      textObject: [new TextContainerProperty({ containerID: 1, containerName: 'conversation', xPosition: 8, yPosition: 4,
-        width: 560, height: 280, paddingLength: 4, borderWidth: 0, isEventCapture: 1, content: initialContent })] }));
+    const layout = { containerTotalNum: 2, textObject: [
+      new TextContainerProperty({ containerID: 1, containerName: 'conversation', xPosition: 0, yPosition: 44,
+        width: 576, height: 236, paddingLength: 2, borderWidth: 0, isEventCapture: 1, content: initialContent }),
+      new TextContainerProperty({ containerID: 2, containerName: 'status', xPosition: 8, yPosition: 4,
+        width: 560, height: 36, paddingLength: 4, borderWidth: 0, isEventCapture: 0, content: '助手 OFF' })] };
+    const created = await bridge!.createStartUpPageContainer(new CreateStartUpPageContainer(layout));
     if (created === 0) return true;
-    // Vite can reload the companion WebView while the simulator keeps container 1.
-    // Adopt that existing container instead of leaving Browser and Glasses Display split.
-    return await bridge!.textContainerUpgrade(new TextContainerUpgrade({
-      containerID: 1, containerName: 'conversation', content: initialContent
-    })).catch(() => false);
+    // Hot reload may retain the old single-container layout; rebuild both containers.
+    return await bridge!.rebuildPageContainer(new RebuildPageContainer(layout)).catch(() => false);
   });
   if (!ok || disposed) throw Error('Startup page rejected');
-  exiting = false; last = ''; dirty = true;
+  exiting = false; last = ''; lastHeader = ''; dirty = true;
+  syncAudioAvailability();
   element('bridge').textContent = 'Even SDK 已连接 · 576 × 288 显示';
   return true;
   } catch {
@@ -383,6 +455,13 @@ void (async () => {
   const candidate = await waitForEvenAppBridge();
   if (disposed) return;
   bridge = candidate;
+  const startupAt = Date.now();
+  // Only fixed labels, booleans and elapsed time. Never log SDK payloads.
+  candidate.onLaunchSource(source => {
+    if (source === 'appMenu' || source === 'glassesMenu') console.info('[even-audio]', {
+      event: 'launch', source, elapsedMs: Math.max(0, Date.now() - startupAt),
+    });
+  });
   credentialStore = await SessionCredentialStore.open(candidate, localStorage);
   connection = new ConnectionController({
     url: () => conversationWebSocketUrl(location, packagedBackendOrigin),
@@ -393,16 +472,33 @@ void (async () => {
     onStatus: handleConnectionStatus,
   });
   audioController = new AudioController({
-    bridge: candidate,
+    bridge: { audioControl: async enabled => {
+      try {
+        const result = await candidate.audioControl(enabled);
+        console.info('[even-audio]', { event: 'sdk_result', enabled, ok: result === true,
+          elapsedMs: Math.max(0, Date.now() - startupAt) });
+        return result;
+      } catch (error) {
+        console.info('[even-audio]', { event: 'sdk_error', enabled,
+          elapsedMs: Math.max(0, Date.now() - startupAt) });
+        throw error;
+      }
+    } },
     onState: next => { audio = next === 'streaming'; status = next === 'starting' ? '正在开启麦克风'
       : next === 'streaming' ? '正在听' : next === 'requires_reopen' ? '麦克风需重新打开应用'
-        : next === 'unavailable' ? '麦克风暂时不可用' : status; refresh(); },
-    onUnavailable: () => { status = '麦克风暂时不可用，请稍后重试'; refresh(); },
-    onRequiresReopen: () => { status = '麦克风通道已卡住，请重新打开应用'; refresh(); },
+        : next === 'unavailable' ? '麦克风暂时不可用' : status;
+      console.info('[even-audio]', { event: 'state', audioState: next, desired: audioController?.desired === true,
+        connected, speech, displayReady: display.open, elapsedMs: Math.max(0, Date.now() - startupAt) });
+      refresh(); },
+    onUnavailable: () => { void stopAudio(); send({ type: 'pause' }); status = '麦克风暂时不可用，请稍后重试'; refresh(); },
+    onRequiresReopen: () => { void stopAudio(); send({ type: 'pause' }); status = '麦克风通道已卡住，请重新打开应用'; refresh(); },
   });
   locationController = new LocationController(candidate, report => send(report));
+  // Exactly one automatic listening phase per page launch/reload, never reconnect.
+  await audioController.setDesired(true);
   candidate.onDeviceStatusChanged(device => {
     const available = device.connectType === DeviceConnectType.Connected;
+    if (!available) { void stopAudio(); if (connected) send({ type: 'pause' }); }
     void audioController?.setDeviceAvailable(available);
     if (!available) { status = device.connectType === DeviceConnectType.Connecting ? '眼镜正在重新连接'
       : device.connectType === DeviceConnectType.ConnectionFailed ? '眼镜连接失败' : '眼镜已断开'; refresh(); }
@@ -411,12 +507,10 @@ void (async () => {
   candidate.onEvenHubEvent(event => {
     const system = event.sysEvent?.eventType;
     if (system === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
-      void audioController?.setVisible(false);
       locationController?.cancelAutomatic(); void locationController?.stop();
       return;
     }
     if (system === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
-      void audioController?.setVisible(true);
       if (!connected) connection.networkAvailable();
       dirty = true; refresh(); return;
     }
@@ -428,7 +522,7 @@ void (async () => {
       void stopAudio(); void locationController?.stop();
       status = '眼镜页面已退出；可重新连接或恢复画面'; refresh(); return;
     }
-    if (event.audioEvent && audio && active() && connection.socket?.readyState === WebSocket.OPEN) {
+    if (event.audioEvent && (holding || startupCapture) && audio && active() && connection.socket?.readyState === WebSocket.OPEN) {
       const pcm = event.audioEvent.audioPcm;
       if ((connection.socket.bufferedAmount ?? 0) > 64000) { void stopAudio(); send({ type: 'pause' }); return; }
       for (let offset = 0; offset < pcm.length; offset += 3200) connection.sendBinary(pcm.slice(offset, offset + 3200));
@@ -440,7 +534,9 @@ void (async () => {
     if (type === OsEventTypeList.SCROLL_TOP_EVENT) pager.move(-1);
     else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) pager.move(1);
     else if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) { if (connected) send({ type: 'exit.request' }); else void exitDialog(); }
-    else if (event.textEvent && (type === OsEventTypeList.CLICK_EVENT || type === undefined)) void toggleAudio();
+    else if (type === OsEventTypeList.LONG_PRESS_EVENT) beginHold();
+    else if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) endHold();
+    // Ignore click after release: it must not reopen capture.
     refresh();
   });
   await restoreDisplay();
@@ -451,10 +547,9 @@ window.addEventListener('pagehide', () => {
   // pagehide may mean a reversible iOS background/navigation transition. Do
   // not destroy the resumable connection controller or mark the app disposed;
   // native FOREGROUND_ENTER_EVENT is the supported restoration signal.
-  void audioController?.setVisible(false);
+  // Do not stop glasses capture merely because the companion UI is hidden.
   locationController?.cancelAutomatic(); void locationController?.stop();
 });
-document.addEventListener('visibilitychange', () => { void audioController?.setVisible(!document.hidden); });
 if (import.meta.env.DEV) {
   void import('../dev/session-controls').then(({ installSessionControls }) => { developmentSessionControls = installSessionControls({
     backendUrl: conversationWebSocketUrl(location, packagedBackendOrigin),

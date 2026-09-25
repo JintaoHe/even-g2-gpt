@@ -550,6 +550,8 @@ export function createConversationServer(options: {
     let authenticatedEpoch: number | undefined;
     let guestSupported = false;
     let current: Transcriber | undefined, lastActivity = Date.now(), totalBytes = 0, forced = false, segmentId = 0;
+    let manualCapture = false, held = false;
+    let holdTimer: ReturnType<typeof setTimeout> | undefined;
     let budgetStart = Date.now(), budgetFrames = 0;
     let slots: { text?: string; job: Transcriber }[] = [];
     let unsubscribeCalendarHealth: (() => void) | undefined;
@@ -617,12 +619,13 @@ export function createConversationServer(options: {
       return true;
     };
     const clearCapture = () => {
+      held = false; clearTimeout(holdTimer); holdTimer = undefined;
       generation++; detector.reset(); current = undefined; forced = false;
       for (const slot of slots) slot.job.cancel(); slots = [];
     };
     const flush = () => {
       if (!connectionMayUseOwnerRuntime()) return;
-      if (closed || !session || detector.active || !session.conversation.acceptsInput || slots.some(s => s.text === undefined)) return;
+      if (held || closed || !session || detector.active || !session.conversation.acceptsInput || slots.some(s => s.text === undefined)) return;
       const text = slots.map(s => s.text).filter(Boolean).join('\n'); slots = [];
       const submitForced = forced; forced = false;
       if (!session.guest && requestsGuestMode(text)) {
@@ -838,7 +841,7 @@ export function createConversationServer(options: {
           delivery: session.delivery?.recoveryManifest() ?? null,
           uncertainMail: session.guest ? 0 : options.jobs?.list().filter(job => ['sending', 'unknown'].includes(job.mail_state ?? '')).length ?? 0,
           uncertainCalendar: session.guest ? 0 : (options.calendar?.list().operations ?? []).filter(operation => ['sending', 'unknown'].includes(operation.state)).length },
-        models: options.models, capabilities: { ...options.capabilities, ...(session.guest ? { provider: 'api' } : {}),
+        models: options.models, capabilities: { ...options.capabilities, push_to_talk: true, ...(session.guest ? { provider: 'api' } : {}),
           email: !session.guest && !!options.mail, calendar: !session.guest && !!options.calendar } });
       pendingDeviceCredentialId = deviceCredential?.id;
       if (protocolV2 && store) {
@@ -892,7 +895,7 @@ export function createConversationServer(options: {
           if (!session?.conversation.acceptsInput) return; // Drop queued audio after pause/exit.
           const pcm = Buffer.from(raw as Buffer); totalBytes += pcm.length;
           if (!pcm.length || pcm.length % 2 || pcm.length > 6400 || totalBytes > 32000 * 1800) throw new Error('Audio limit');
-          detector.push(pcm); return;
+          if (!manualCapture || held) detector.push(pcm, held); return;
         }
         let msg = JSON.parse(raw.toString());
         if (!authenticated) {
@@ -912,7 +915,7 @@ export function createConversationServer(options: {
           }
           return;
         }
-        if (protocolV2 && ['text.submit', 'turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry',
+        if (protocolV2 && ['text.submit', 'turn.begin', 'turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry',
           'credential.persisted',
           'exit.request', 'exit.confirm', 'test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
           'test.storage.cleanup_preview', 'test.storage.cleanup_apply'].includes(String(msg.type))) msg = parseCoreClientMessage(msg, {
@@ -927,7 +930,7 @@ export function createConversationServer(options: {
           if (!guestController || !guestSupported) { send({ type: 'notice', text: '访客模式尚未启用，没有切换身份。' }); return; }
           await guestController.enter(connectionId); return;
         }
-        if (active.guest && !['text.submit','turn.submit','pause','resume','interrupt','answer.retry','exit.request','exit.confirm',
+        if (active.guest && !['text.submit','turn.begin','turn.submit','pause','resume','interrupt','answer.retry','exit.request','exit.confirm',
           'credential.persisted','location.report','location.failed','location.clear','route.mode'].includes(String(msg.type))) {
           send({ type: 'notice', text: '访客模式不能访问主人的日历、邮件、文件或私人记录。' }); return;
         }
@@ -1036,8 +1039,19 @@ export function createConversationServer(options: {
             if (protocolV2 && !/^[0-9a-f-]{36}$/i.test(String(msg.message_id ?? ''))) throw new Error('Message id');
             if (conversation.acceptsInput) { active.mailApproval = undefined; clearCapture(); runtimeMetrics.beginTurn(active.id);
               submitTurn(conversation, msg.text, true, protocolV2 ? { messageId: msg.message_id } : undefined); } break;
+          case 'turn.begin':
+            if (!conversation.acceptsInput || held || options.capabilities?.speech === false) break;
+            clearCapture(); manualCapture = true; held = true;
+            // Independent server bound: a lost release never leaves an open STT job.
+            holdTimer = setTimeout(() => { clearCapture(); conversation.pause();
+              send({ type: 'notice', code: 'RECORDING_TIMEOUT', text: '录音超时已停止，请重新长按说话。' }); }, 65_000);
+            holdTimer.unref();
+            break;
           case 'turn.submit':
             if (!conversation.acceptsInput) break;
+            if (manualCapture && !held) break;
+            held = false; clearTimeout(holdTimer); holdTimer = undefined;
+            if (manualCapture && !slots.length) { clearCapture(); break; }
             forced = true; if (detector.active) detector.finish(); else flush(); break;
           case 'pause': conversation.pause(); break;
           case 'resume': conversation.resume(); break;

@@ -39,6 +39,7 @@ export class LocationController {
   private bridge: LocationBridge;
   private report: (value: LocationReport) => void;
   private automaticGeneration = 0;
+  private onceGeneration = 0;
   private pause: (ms: number) => Promise<void>;
   private timezoneHint: () => string | undefined;
   private now: () => number;
@@ -55,8 +56,10 @@ export class LocationController {
     this.now = now;
   }
 
-  async once() {
+  async once(current: () => boolean = () => true) {
+    const generation = ++this.onceGeneration;
     const value = await this.bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: 10_000 });
+    if (generation !== this.onceGeneration || !current()) return false;
     const report = value && locationReport('once', value, undefined, this.timezoneHint());
     if (report) this.report(report);
     return !!report;
@@ -108,6 +111,7 @@ export class LocationController {
   }
 
   async stop() {
+    this.onceGeneration++;
     this.cancelAutomatic();
     if (!this.active && !this.unsubscribe) return true;
     const stopped = await this.bridge.stopAppLocationUpdates().catch(() => false);

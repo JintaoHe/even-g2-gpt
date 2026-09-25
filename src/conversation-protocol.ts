@@ -73,7 +73,7 @@ export type TextSubmitMessageV2 = {
   text: string;
 };
 
-export type CommandType = 'turn.submit' | 'pause' | 'resume' | 'interrupt' | 'answer.retry' | 'exit.request';
+export type CommandType = 'turn.begin' | 'turn.submit' | 'pause' | 'resume' | 'interrupt' | 'answer.retry' | 'exit.request';
 export type CommandMessageV2 = { type: CommandType; command_id: string };
 export type ExitConfirmMessageV2 = { type: 'exit.confirm'; command_id: string; confirm: boolean };
 export type LocalTestControlType = 'test.session.expire' | 'test.storage.inspect' | 'test.storage.seed_expired'
@@ -169,6 +169,7 @@ export const CLIENT_MESSAGE_POLICY = {
   hello: { persistence: 'none', idempotency: 'credential', replay: 'authenticate-once' },
   'text.submit': { persistence: 'durable-before-ack', idempotency: 'message_id', replay: 'return-original-ack' },
   'turn.submit': { persistence: 'session-state', idempotency: 'command_id', replay: 'safe-state-command' },
+  'turn.begin': { persistence: 'session-state', idempotency: 'command_id', replay: 'never-replay-automatically' },
   pause: { persistence: 'session-state', idempotency: 'command_id', replay: 'safe-state-command' },
   resume: { persistence: 'session-state', idempotency: 'command_id', replay: 'safe-state-command' },
   interrupt: { persistence: 'session-state', idempotency: 'command_id', replay: 'safe-state-command' },
@@ -202,7 +203,7 @@ type ParseOptions = { allowLocalTestControls?: boolean };
 type JsonRecord = Record<string, unknown>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const COMMAND_TYPES = new Set<CommandType>(['turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry', 'exit.request']);
+const COMMAND_TYPES = new Set<CommandType>(['turn.begin', 'turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry', 'exit.request']);
 const LOCAL_TEST_CONTROL_TYPES = new Set<LocalTestControlType>([
   'test.session.expire', 'test.storage.inspect', 'test.storage.seed_expired',
   'test.storage.cleanup_preview', 'test.storage.cleanup_apply',

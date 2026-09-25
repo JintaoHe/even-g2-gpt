@@ -13,9 +13,10 @@ function fixture() {
   const nodes = new Map<string, any>();
   const reading = new ReadingHistory();
   const context: any = {
-    hasReady: false, memorySessionId: undefined, memoryBoundary: undefined,
+    hasReady: false, startupResumePending: true, startupCapture: true, startupResumeInFlight: false,
+    memorySessionId: undefined, memoryBoundary: undefined,
     memoryResetText: '本次对话的上下文已更新，请重新提出需要继续的问题。',
-    accessMode: 'owner', answerId: undefined, last: '', status: '', connected: false, speech: false,
+    accessMode: 'owner', answerId: undefined, last: '', lastHeader: '', viewRevision: 0, status: '', connected: false, speech: false,
     locationAvailable: false, channel: '', state: 'listening', developmentSessionControls: undefined,
     stopAudio: () => { context.stops++; }, locationController: { stop: () => { context.locations++; } },
     stops: 0, locations: 0, resets: 0, replacements: [] as boolean[],
@@ -24,7 +25,7 @@ function fixture() {
     pager: { reset: (text: string) => { context.resets++; reading.reset(text); },
       restoreSnapshot: (m: any[], replace: boolean) => { context.replacements.push(replace); reading.restoreSnapshot(m, replace); },
       notice: (text: string) => reading.notice(text), event: (event: any) => reading.event(event) },
-    connection: { status: { reason: 'reconnecting' }, send() {} }, refresh() {},
+    connection: { status: { reason: 'reconnecting' }, send() {} }, refresh() {}, syncAudioAvailability() {},
   };
   runInNewContext(ts.transpileModule(functions, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
     + '\nglobalThis.receive=handleServerEvent;', context);
