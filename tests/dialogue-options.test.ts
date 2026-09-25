@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { OpenAIDialogue } from '../src/dialogue-model.js';
+import { unverifiedAlternativeText } from '../src/alternative-policy.js';
 
-test('venue evidence rules reach ordinary, analysis and fallback replies without censoring qualified statements', async () => {
+test('ordinary qualified statements remain allowed; disabled search cannot produce verified alternatives', async () => {
   for (const workflows of [[], [{ kind: 'navigation' as const, action: 'analyze_places' }],
     [{ kind: 'navigation' as const, action: 'fallback_search' }]]) {
     const text = '建议 Juniper，车程短；供餐及安静程度未确认。';
@@ -20,7 +21,7 @@ test('venue evidence rules reach ordinary, analysis and fallback replies without
     let answer = '';
     await model.reply([{ role: 'user', content: '只用已有资料，替同事选一家面试前能坐的地方。' }], new AbortController().signal,
       value => { answer += value; }, undefined, 'low', 'decision_support', workflows);
-    assert.equal(answer, text);
+    assert.equal(answer, workflows.some(w => w.action === 'fallback_search') ? unverifiedAlternativeText : text);
   }
 });
 

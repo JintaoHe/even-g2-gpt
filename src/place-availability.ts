@@ -103,7 +103,7 @@ export async function verifyRecommendations(result: RouteComparisonResult, route
   signal.throwIfAborted();
   const kept = prioritizedOpen(candidates, now(), food);
   if (!kept.length) throw new RouteError('ROUTE_NO_MATCHING_PLACES', 'ROUTE_NO_MATCHING_PLACES', 'places', undefined, false,
-    undefined, candidates.map(c => ({ placeId: c.placeId, name: c.name,
+    undefined, candidates.map(c => ({ placeId: c.placeId, name: c.name, ...(c.address ? { address: c.address } : {}),
       reason: availability(c, now(), c.durationSeconds, food) === 'closing' ? 'closing' as const : 'closed' as const })));
   const open = kept.filter(c => availability(c, now(), c.durationSeconds, food) === 'open');
   const { recommended, basis } = recommendCandidates(open.length ? open : kept);

@@ -49,7 +49,7 @@ export type RouteRequest = {
   candidates?: PlaceCandidate[];
   nearbyPreferences?: NearbyPreferences;
 };
-export type NearbyExclusion = { placeId: string; name: string; reason: 'closed' | 'closing' | 'price' | 'type' };
+export type NearbyExclusion = { placeId: string; name: string; address?: string; reason: 'closed' | 'closing' | 'price' | 'type' };
 export type RouteDiscovery = { query: string; candidates: PlaceCandidate[]; excluded?: NearbyExclusion[] };
 
 export interface RouteProvider {
@@ -123,7 +123,7 @@ export function prefilterNearby(candidates: PlaceCandidate[], prefs: NearbyPrefe
         || candidate.businessStatus === 'CLOSED_TEMPORARILY' || candidate.businessStatus === 'FUTURE_OPENING')) ? 'closed'
       : prefs.priceCeiling && candidate.priceLevel && priceLevels.indexOf(candidate.priceLevel) > priceLevels.indexOf(prefs.priceCeiling) ? 'price'
       : [candidate.primaryType, ...(candidate.types ?? [])].some(type => type && prefs.excludeTypes?.includes(type)) ? 'type' : undefined;
-    if (reason) excluded.push({ placeId: candidate.placeId, name: candidate.name, reason }); else kept.push(candidate);
+    if (reason) excluded.push({ placeId: candidate.placeId, name: candidate.name, ...(candidate.address ? { address: candidate.address } : {}), reason }); else kept.push(candidate);
   }
   return { candidates: kept, excluded };
 }

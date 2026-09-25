@@ -139,6 +139,7 @@ export class PlanningEvidenceDialogue implements DialogueModel {
     }
     if (!request) { await this.base.reply(history, signal, delta, update, effort, mode, workflows); return; }
     update?.({ type: 'task.status', status: 'locating' });
+    let replyStarted = false;
     try {
       const location = await this.location.request(signal); signal.throwIfAborted();
       const input: EnvironmentRequest = { location, ...request, language: 'zh-CN' };
@@ -150,10 +151,12 @@ export class PlanningEvidenceDialogue implements DialogueModel {
       ]); signal.throwIfAborted();
       const missing = [weather, air, pollen].some(value => !value.available);
       const assessment = assessOutdoor(weather as WeatherEvidence, air as AirQualityEvidence, pollen as PollenEvidence);
+      replyStarted = true;
       await this.base.reply(evidenceHistory(history, { interval: request, weather, air_quality: air, pollen, assessment }), signal,
-        delta, update, effort, mode, missing ? fallbackWorkflows(workflows) : workflows);
-    } catch {
+        delta, update, effort, mode, missing || assessment.suitability === 'poor' ? fallbackWorkflows(workflows) : workflows);
+    } catch (error) {
       signal.throwIfAborted();
+      if (replyStarted) throw error;
       await this.base.reply(history, signal, delta, update, effort, mode, fallbackWorkflows(workflows));
     }
   }
