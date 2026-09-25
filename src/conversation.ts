@@ -74,6 +74,9 @@ export function normalizeTurnPlan(plan: TurnPlan): TurnPlan {
   return { ...plan, cognitiveMode, assistantMode: cognitiveMode, taskKind, workflows };
 }
 export interface DialogueModel {
+  findFoodAlternatives?(query: string, area: import('./search-area.js').SearchArea, preferences: import('./nearby-intent.js').NearbyPreferences,
+    at: number, signal: AbortSignal, excluded?: import('./verified-food-alternatives.js').AlternativeBranch[]): Promise<import('./verified-food-alternatives.js').AlternativeBranch[]>;
+  verifyFoodService?(place: import('./routes.js').PlaceCandidate, at: number, signal: AbortSignal): Promise<import('./verified-food-alternatives.js').FoodServiceEvidence | undefined>;
   verifyPlaceHours?(place: import('./place-availability.js').PlaceHoursLookup, signal: AbortSignal): Promise<import('./place-availability.js').PlaceHours | undefined>;
   revokeMemoryContext?(): void;
   startSession?(): void;

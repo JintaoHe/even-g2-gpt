@@ -7,6 +7,7 @@ import { RouteError, assessCandidate, recommendCandidates, type PlaceCandidate, 
 import { availability, intendedFacilities, verifyRecommendations } from './place-availability.js';
 import { needsLocalVerification } from './alternative-policy.js';
 import { searchArea } from './search-area.js';
+import { verifiedFoodAlternatives, foodAlternativeText } from './verified-food-alternatives.js';
 
 type PendingRoute = { destination: string; mode: RouteTravelMode; modeExplicit: boolean; kind: RouteRequestKind; candidates?: PlaceCandidate[]; expires: number; prompt: string };
 type RecentComparison = { query: string; kind: RouteRequestKind; candidates: PlaceCandidate[]; recommendedPlaceId?: string;
@@ -519,6 +520,25 @@ export class LocationDialogue implements DialogueModel {
       delta(prompt); return;
     }
     this.pending = undefined;
+    const food = this.nearbyTask?.prefs.needsFood === true || /restaurant|fast food|餐|吃饭|吃的|吃点|吃點/i.test(query);
+    if (food && !needsLocalVerification(query) && (this.nearbyTask?.prefs.visitTime ?? 'now') === 'now'
+      && this.clarifier?.findFoodAlternatives && origin) {
+      update?.({ type: 'search.status', status: 'searching' });
+      const options = await verifiedFoodAlternatives(`${query}; ${history.at(-1)?.content ?? ''}`.slice(0, 300), area, origin, routeMode, this.nearbyTask?.prefs ?? {},
+        this.clarifier, this.routes, signal, this.now);
+      signal.throwIfAborted();
+      this.recent = options.length ? { query, kind, mode: routeMode, evidenceAt: this.now(),
+        recommendedPlaceId: options[0].place.placeId, displayedPlaceIds: options.map(o => o.place.placeId),
+        candidates: options.map(o => o.place),
+        routeFacts: options.map(({place:{placeId,durationSeconds,distanceMeters}}) => ({placeId,durationSeconds,distanceMeters})),
+        excluded: exclusions } : undefined;
+      const text = foodAlternativeText(options, area, routeMode);
+      delta(text);
+      update?.({ type: 'answer.citations', text, citations: options.map(o => ({
+        start: text.indexOf(o.place.name), end: text.indexOf(o.place.name) + o.place.name.length,
+        title: o.place.name, url: o.service.sourceUrl })) });
+      return;
+    }
     // Public branch evidence only: never copy provider errors, GPS or a RouteOrigin into model input.
     const evidence = { query, searchArea: area, outcome: error?.code ?? 'suitability_unverified', checkedAt: this.now(),
       constraints: this.nearbyTask?.prefs,

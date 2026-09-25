@@ -29,6 +29,12 @@ const bounded: typeof fetch = async (url, init) => {
     hasSyntheticCoordinates: input.includes('41.570') || input.includes('-93.711'),
     hasSyntheticCity: input.includes('West Des Moines'), hasAlternativeEvidence: input.includes('alternative evidence') }));
   const response = await fetch(url, init);
+  if (process.argv.includes('--inspect-final') && !body.stream && ['food_alternative_candidates', 'branch_food_service'].includes(body.text?.format?.name)) {
+    const result: any = await response.clone().json();
+    console.log(JSON.stringify({event:'synthetic_structured_evidence',schema:body.text.format.name,status:result.status,
+      output:result.output?.filter((x:any)=>x.type==='message').flatMap((x:any)=>x.content??[]),
+      sources:result.output?.filter((x:any)=>x.type==='web_search_call').flatMap((x:any)=>x.action?.sources??[])}));
+  }
   if (process.argv.includes('--inspect-final') && body.stream) {
     const raw = await response.clone().text();
     for (const line of raw.split('\n')) {

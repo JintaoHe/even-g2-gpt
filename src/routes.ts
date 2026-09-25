@@ -20,6 +20,7 @@ export type PlaceCandidate = {
   openNow?: boolean;
   hours?: PlaceHours;
   website?: string;
+  timeZone?: string;
   priceLevel?: 'free' | 'inexpensive' | 'moderate' | 'expensive' | 'very_expensive';
   businessStatus?: 'OPERATIONAL' | 'CLOSED_TEMPORARILY' | 'CLOSED_PERMANENTLY' | 'FUTURE_OPENING';
 };
@@ -309,14 +310,15 @@ export class GoogleRoutesProvider implements RouteProvider {
     const response = await this.fetcher(endpoint.href, { method: 'GET',
       signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
       headers: { 'X-Goog-Api-Key': this.key,
-        'X-Goog-FieldMask': 'id,displayName,formattedAddress,primaryType,types,businessStatus,websiteUri,currentOpeningHours,currentSecondaryOpeningHours' } });
+        'X-Goog-FieldMask': 'id,displayName,formattedAddress,primaryType,types,businessStatus,websiteUri,timeZone,currentOpeningHours,currentSecondaryOpeningHours' } });
     if (!response.ok) { await reservation?.settle(0); throw new RouteError('ROUTE_UNAVAILABLE', 'ROUTE_UNAVAILABLE', 'places', response.status); }
     const raw: any = await response.json(); await reservation?.settle(1); signal.throwIfAborted();
     if (raw?.id !== candidate.placeId) throw new RouteError('ROUTE_INVALID');
     const updated = sanitizeCandidate(raw);
     if (!updated) throw new RouteError('ROUTE_INVALID');
     const hours = parseGoogleHours(raw, Date.now());
-    return { ...candidate, ...updated, openNow: hours.openNow, hours, website: publicWebsite(raw.websiteUri) };
+    return { ...candidate, ...updated, openNow: hours.openNow, hours, website: publicWebsite(raw.websiteUri),
+      ...(typeof raw.timeZone?.id === 'string' ? { timeZone: raw.timeZone.id } : {}) };
   }
 
   async route(request: RouteRequest, signal: AbortSignal): Promise<RouteComparisonResult> {
