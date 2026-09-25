@@ -3,6 +3,7 @@ import type { EphemeralLocation } from './location.js';
 import type { CostLedger, GoogleSku } from './cost-ledger.js';
 import type { ProviderMetricObserver, NearbyMetricObserver } from './runtime-metrics.js';
 import type { NearbyPreferences } from './nearby-intent.js';
+import { freshHours, parseGoogleHours, publicWebsite, type PlaceHours } from './place-availability.js';
 
 export type RouteOrigin = { kind: 'coordinates'; location: EphemeralLocation } | { kind: 'address'; address: string };
 export type RouteRequestKind = 'destination' | 'nearby';
@@ -16,6 +17,8 @@ export type PlaceCandidate = {
   types?: string[];
   location?: { latitude: number; longitude: number };
   openNow?: boolean;
+  hours?: PlaceHours;
+  website?: string;
   priceLevel?: 'free' | 'inexpensive' | 'moderate' | 'expensive' | 'very_expensive';
   businessStatus?: 'OPERATIONAL' | 'CLOSED_TEMPORARILY' | 'CLOSED_PERMANENTLY' | 'FUTURE_OPENING';
 };
@@ -27,6 +30,7 @@ export type RouteCandidate = PlaceCandidate & {
   quality: CandidateQuality;
 };
 export type RouteComparisonResult = {
+  availabilityCheckedAt?: number;
   query: string;
   candidates: RouteCandidate[];
   recommendedPlaceId: string;
@@ -45,10 +49,11 @@ export type RouteRequest = {
   candidates?: PlaceCandidate[];
   nearbyPreferences?: NearbyPreferences;
 };
-export type NearbyExclusion = { placeId: string; name: string; reason: 'closed' | 'price' | 'type' };
+export type NearbyExclusion = { placeId: string; name: string; address?: string; reason: 'closed' | 'closing' | 'price' | 'type' };
 export type RouteDiscovery = { query: string; candidates: PlaceCandidate[]; excluded?: NearbyExclusion[] };
 
 export interface RouteProvider {
+  verifyPlace?(candidate: PlaceCandidate, signal: AbortSignal): Promise<PlaceCandidate>;
   discover?(request: RouteRequest, signal: AbortSignal): Promise<RouteDiscovery>;
   route(request: RouteRequest, signal: AbortSignal): Promise<RouteComparisonResult>;
 }
@@ -106,6 +111,7 @@ function sanitizeCandidate(value: any): PlaceCandidate | undefined {
     ...(count === undefined ? {} : { userRatingCount: Math.round(count) }), ...(primaryType ? { primaryType } : {}),
     ...(types.length ? { types } : {}), ...(latitude === undefined || longitude === undefined ? {} : { location: { latitude, longitude } }),
     ...(typeof openNow === 'boolean' ? { openNow } : {}), ...(priceLevel ? { priceLevel } : {}),
+    ...(value?.hours ? { hours: value.hours } : {}), ...(publicWebsite(value?.website) ? { website: publicWebsite(value.website) } : {}),
     ...(businessStatus ? { businessStatus } : {}) };
 }
 
@@ -117,7 +123,7 @@ export function prefilterNearby(candidates: PlaceCandidate[], prefs: NearbyPrefe
         || candidate.businessStatus === 'CLOSED_TEMPORARILY' || candidate.businessStatus === 'FUTURE_OPENING')) ? 'closed'
       : prefs.priceCeiling && candidate.priceLevel && priceLevels.indexOf(candidate.priceLevel) > priceLevels.indexOf(prefs.priceCeiling) ? 'price'
       : [candidate.primaryType, ...(candidate.types ?? [])].some(type => type && prefs.excludeTypes?.includes(type)) ? 'type' : undefined;
-    if (reason) excluded.push({ placeId: candidate.placeId, name: candidate.name, reason }); else kept.push(candidate);
+    if (reason) excluded.push({ placeId: candidate.placeId, name: candidate.name, ...(candidate.address ? { address: candidate.address } : {}), reason }); else kept.push(candidate);
   }
   return { candidates: kept, excluded };
 }
@@ -234,7 +240,9 @@ export class GoogleRoutesProvider implements RouteProvider {
 
   private async findCandidates(request: RouteRequest, destination: string, signal: AbortSignal): Promise<PlaceCandidate[]> {
     if (request.candidates?.length) {
-      return request.candidates.slice(0, PLACE_SEARCH_CANDIDATES).map(sanitizeCandidate).filter((value): value is PlaceCandidate => !!value);
+      return request.candidates.slice(0, PLACE_SEARCH_CANDIDATES).map(sanitizeCandidate).filter((value): value is PlaceCandidate => !!value)
+        .map(c => c.hours && !freshHours(c.hours, Date.now()) ? { ...c, openNow: undefined,
+          businessStatus: c.businessStatus === 'CLOSED_PERMANENTLY' ? c.businessStatus : undefined } : c);
     }
     const nearby = request.kind === 'nearby';
     const textQuery = nearby && request.origin.kind === 'address' ? `${destination} near ${boundedText(request.origin.address, 240)}` : destination;
@@ -245,10 +253,11 @@ export class GoogleRoutesProvider implements RouteProvider {
       const places = await this.post('places', this.placesEndpoint, { textQuery, pageSize: PLACE_SEARCH_CANDIDATES,
         ...(nearby ? { rankPreference: 'DISTANCE' } : {}), ...bias },
       'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.types'
-        + (nearby ? ',places.location,places.currentOpeningHours.openNow,places.priceLevel,places.businessStatus' : ''), signal,
+        + ',places.location,places.currentOpeningHours.openNow,places.currentOpeningHours.nextCloseTime,places.priceLevel,places.businessStatus', signal,
       'places-text-search-enterprise') as any;
       return (Array.isArray(places?.places) ? places.places : []).slice(0, PLACE_SEARCH_CANDIDATES)
-        .map(sanitizeCandidate).filter((value: PlaceCandidate | undefined): value is PlaceCandidate => !!value);
+        .map((raw: any) => { const c = sanitizeCandidate(raw); return c && { ...c, hours: parseGoogleHours(raw, Date.now()) }; })
+        .filter((value: PlaceCandidate | undefined): value is PlaceCandidate => !!value);
     };
     // locationBias is a soft ranking hint, not a geographic restriction. Google
     // caps a Text Search circle at 50 km; explicit locality text can override it.
@@ -282,6 +291,26 @@ export class GoogleRoutesProvider implements RouteProvider {
     const { candidates, excluded } = this.prepareCandidates(request, found);
     if (!candidates.length) throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');
     return { query: destination, candidates, ...(excluded.length ? { excluded } : {}) };
+  }
+
+  /** One exact Place-ID read, no retry: caller owns the per-turn limit/deadline. */
+  async verifyPlace(candidate: PlaceCandidate, signal: AbortSignal): Promise<PlaceCandidate> {
+    signal.throwIfAborted();
+    const reservation = await this.costs?.reserveGoogle('places-details-enterprise', 1);
+    signal.throwIfAborted();
+    const endpoint = new URL(this.placesEndpoint);
+    endpoint.pathname = `/v1/places/${encodeURIComponent(candidate.placeId)}`; endpoint.search = '';
+    const response = await this.fetcher(endpoint.href, { method: 'GET',
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      headers: { 'X-Goog-Api-Key': this.key,
+        'X-Goog-FieldMask': 'id,displayName,formattedAddress,primaryType,types,businessStatus,websiteUri,currentOpeningHours,currentSecondaryOpeningHours' } });
+    if (!response.ok) { await reservation?.settle(0); throw new RouteError('ROUTE_UNAVAILABLE', 'ROUTE_UNAVAILABLE', 'places', response.status); }
+    const raw: any = await response.json(); await reservation?.settle(1); signal.throwIfAborted();
+    if (raw?.id !== candidate.placeId) throw new RouteError('ROUTE_INVALID');
+    const updated = sanitizeCandidate(raw);
+    if (!updated) throw new RouteError('ROUTE_INVALID');
+    const hours = parseGoogleHours(raw, Date.now());
+    return { ...candidate, ...updated, openNow: hours.openNow, hours, website: publicWebsite(raw.websiteUri) };
   }
 
   async route(request: RouteRequest, signal: AbortSignal): Promise<RouteComparisonResult> {

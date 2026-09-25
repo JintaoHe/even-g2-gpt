@@ -64,6 +64,55 @@ import { LocationRequestBroker, parseLocationReport } from '../src/location.js';
 import type { DialogueModel, Message, TurnPlan } from '../src/conversation.js';
 import { RouteError, type RouteComparisonResult, type RouteProvider, type RouteRequest } from '../src/routes.js';
 
+test('lone ancillary result cannot silently satisfy a brand request', async () => {
+  let routed = 0;
+  const base: DialogueModel = { plan: async () => ({ decision: 'respond', locationAction: 'nearby_search', routeDestination: 'Target' }),
+    decide: async () => 'respond', reply: async (_h, _s, delta, _u, _e, _m, workflows) => {
+      assert.ok(workflows?.some(w => w.kind === 'search')); delta('没有找到匹配门店，改查可核实的备选。'); } };
+  const d = new LocationDialogue(base, automaticBroker([]), { discover: async () => ({ query: 'Target',
+    candidates: [{ placeId: 'parking', name: 'Target Parking', primaryType: 'parking_lot' }] }),
+    route: async () => { routed++; return comparison; } });
+  const signal = new AbortController().signal;
+  await d.plan([], '最近的 Target 在哪里', false, signal);
+  let output = ''; await d.reply([{ role: 'user', content: '最近的 Target 在哪里' }], signal, t => { output += t; });
+  assert.equal(routed, 0); assert.doesNotMatch(output, /到Target Parking/); assert.match(output, /没有找到/);
+});
+
+test('whole recommendation follow-up overrides repeated search, but new content and mode do not', async () => {
+  let routeCalls = 0, analyses = 0;
+  const base: DialogueModel = { plan: async () => ({ decision: 'respond', locationAction: 'nearby_search', routeDestination: 'restaurant' }),
+    decide: async () => 'respond', reply: async (history, _signal, delta) => {
+      analyses++; assert.match(history.at(-1)!.content, /displayedOrder/); delta('根据已有评分和车程，我会选第一家。');
+    } };
+  const d = new LocationDialogue(base, automaticBroker([]), { route: async () => { routeCalls++; return comparison; } });
+  const turn = async (text: string) => { const signal = new AbortController().signal;
+    const plan = await d.plan([], text, false, signal); await d.reply([{ role: 'user', content: text }], signal, () => {}); return plan; };
+  await turn('找附近餐馆');
+  assert.equal((await turn('给我一些推荐')).locationAction, 'analyze_places');
+  assert.equal((await turn('which would you recommend?')).locationAction, 'analyze_places');
+  assert.equal(routeCalls, 1); assert.equal(analyses, 2);
+  assert.equal((await turn('再找附近咖啡店')).locationAction, 'nearby_search');
+  assert.equal((await turn('推荐哪家，另外算一下步行时间')).locationAction, 'nearby_search');
+});
+
+test('production-style dialogue verifies hours and preserves refreshed evidence for follow-up', async () => {
+  let checks = 0, at = Date.now(), plans = 0;
+  const base: DialogueModel = { plan: async () => plans++ ? { decision: 'respond', locationAction: 'analyze_places' }
+    : { decision: 'respond', locationAction: 'nearby_search', routeDestination: 'restaurant' },
+    decide: async () => 'respond', reply: async (history, _signal, delta) => {
+      assert.match(history.at(-1)!.content, /openingEvidence/); delta('营业状态已重新核验。');
+    } };
+  const d = new LocationDialogue(base, automaticBroker([]), { route: async () => comparison,
+    verifyPlace: async c => { checks++; return { ...c, hours: { source: 'google', checkedAt: at, openNow: true, closesAt: at + 3600000 } }; } },
+  'America/Chicago', () => at, base);
+  for (const text of ['附近餐馆', '现在还开门吗']) {
+    const signal = new AbortController().signal; await d.plan([], text, false, signal);
+    let output = ''; await d.reply([{ role: 'user', content: text }], signal, t => { output += t; });
+    assert.match(output, /营业/); at += 121000;
+  }
+  assert.equal(checks, 4);
+});
+
 const id = '123e4567-e89b-12d3-a456-426614174000';
 
 test('recommend/specific/delegated enforce bounded clarification even when the model keeps asking', async () => {
@@ -118,29 +167,36 @@ test('invalid model indices fail safely and cannot bypass clarification limits',
     nearby: { mode: 'recommend', taskAction: 'replace', delegated: true, patch: {} } }),
     decide: async () => 'respond', reply: async () => {}, clarifyRoute: async () => ({ action: 'proceed', selectedIndices: [999] }) };
   const dialogue = new LocationDialogue(base, automaticBroker([]), { discover: async () => ({ query: 'Target', candidates: ambiguous.candidates }),
-    route: async request => { assert.equal(request.candidates?.length, ambiguous.candidates.length); return ambiguous; } },
+    route: async request => { assert.equal(request.candidates?.length, 2);
+      assert.ok(request.candidates?.every(c => c.primaryType !== 'parking_lot')); return ambiguous; } },
   'America/Chicago', Date.now, base);
   const signal = new AbortController().signal; await dialogue.plan([], '你选吧', false, signal);
   let answer = ''; await dialogue.reply([{ role: 'user', content: '你选吧' }], signal, value => { answer += value; });
   assert.match(answer, /如果不对，请纠正我/); assert.doesNotMatch(answer, /999|无法/);
 });
 
-test('mixed exclusion reasons never claim all shops are closed and do not invoke web fallback', async () => {
+test('exclusions enter alternative research without relaxing or relabeling the reason', async () => {
   for (const reason of ['price', 'closed'] as const) {
     const base: DialogueModel = { plan: async () => ({ decision: 'respond', locationAction: 'nearby_search', routeDestination: 'cafe' }),
-      decide: async () => 'respond', reply: async () => { assert.fail('must not research around an exclusion'); } };
+      decide: async () => 'respond', reply: async (history, _signal, delta, _update, _effort, _mode, workflows) => {
+        const evidence = JSON.parse(history.at(-1)!.content.split('\n').at(-1)!);
+        assert.equal(evidence.excluded[0].reason, reason);
+        assert.equal(evidence.outcome, 'ROUTE_NO_MATCHING_PLACES');
+        assert.deepEqual(workflows, [{ kind: 'navigation', action: 'fallback_search' }, { kind: 'search', action: 'read' }]);
+        delta(reason === 'closed' ? '已关门，正在核实其他方案。' : '价位不符合，正在核实其他方案。');
+      } };
     const dialogue = new LocationDialogue(base, automaticBroker([]), { route: async () => { throw new RouteError(
       'ROUTE_NO_MATCHING_PLACES', 'ROUTE_NO_MATCHING_PLACES', 'places', undefined, false, undefined,
       [{ placeId: 'test', name: 'Synthetic shop', reason }]); } });
     const signal = new AbortController().signal; await dialogue.plan([], 'cafe', false, signal);
     let answer = ''; await dialogue.reply([], signal, value => { answer += value; });
-    if (reason === 'price') assert.doesNotMatch(answer, /都显示已关门/); else assert.match(answer, /这次找到的几家都显示已关门/);
+    if (reason === 'price') assert.doesNotMatch(answer, /关门/); else assert.match(answer, /已关门/);
   }
 });
 
 test('nearby display shows unknown hours/price and does not claim weak atmosphere priors as fact', () => {
   const output = routeText({ ...single, nearbyPreferences: { vibe: 'quiet', needsFood: true, priceCeiling: 'moderate' } }, 'America/Chicago', true);
-  assert.match(output, /营业时间待确认/); assert.match(output, /价位待确认/); assert.match(output, /仍需向店家确认/);
+  assert.match(output, /营业时间待确认/); assert.match(output, /价位待确认/); assert.match(output, /评分不能证明/);
   assert.doesNotMatch(output, /很安静|保证|4\.9★/);
 });
 
@@ -452,4 +508,38 @@ test('route failure reports safe diagnostics and falls back to Luna web research
   assert.deepEqual(events.find(event => event.status === 'failed'), { type: 'route.status', status: 'failed', stage: 'places',
     provider_status: 403, provider_reason: 'API_KEY_IP_ADDRESS_BLOCKED' });
   assert.ok(!JSON.stringify(events).includes('41.58'));
+});
+
+test('empty maps results research alternatives once, without raw GPS or write workflows', async () => {
+  let calls = 0;
+  const base: DialogueModel = { plan: async () => ({ decision: 'respond', locationAction: 'nearby_search', routeDestination: 'late dinner' }),
+    decide: async () => 'respond', reply: async (history, _signal, delta, _update, _effort, _mode, workflows) => {
+      calls++; const content = history.at(-1)!.content;
+      assert.match(content, /ROUTE_DESTINATION_NOT_FOUND/);assert.doesNotMatch(content, /41\.58|-93\.62|latitude|longitude/);
+      assert.deepEqual(workflows, [{kind:'navigation',action:'fallback_search'},{kind:'search',action:'read'}]);delta('已查询备选。');
+    } };
+  const d = new LocationDialogue(base, automaticBroker([]), {route:async()=>{throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');}});
+  const signal=new AbortController().signal;await d.plan([], '找晚餐',false,signal);
+  await d.reply([{role:'user',content:'找晚餐'}],signal,()=>{},undefined,undefined,undefined,[{kind:'calendar',action:'create'}]);
+  assert.equal(calls,1);
+});
+
+test('open alcohol shop still requires activity/local-rule verification; fallback failure is not retried', async () => {
+  let calls=0;const now=Date.now();
+  const base:DialogueModel={plan:async()=>({decision:'respond',locationAction:'nearby_search',routeDestination:'beer'}),
+    decide:async()=> 'respond',reply:async(history)=>{calls++;assert.match(history.at(-1)!.content,/suitability_unverified/);throw Error('research failed');}};
+  const d=new LocationDialogue(base,automaticBroker([]),{route:async()=>({...single,query:'beer',candidates:[{...single.candidates[0],
+    address:'10 Example Street, Test City',hours:{checkedAt:now,openNow:true,closesAt:now+3600000,source:'google'}}]}),verifyPlace:async c=>c});
+  const signal=new AbortController().signal;await d.plan([], '买啤酒',false,signal);
+  await assert.rejects(d.reply([{role:'user',content:'买啤酒'}],signal,()=>{}),/research failed/);assert.equal(calls,1);
+});
+
+test('unknown restaurant kitchen evidence is researched instead of asking user to check it', async()=>{
+  let calls=0;const now=Date.now();
+  const base:DialogueModel={plan:async()=>({decision:'respond',locationAction:'nearby_search',routeDestination:'restaurant'}),
+    decide:async()=> 'respond',reply:async(_h,_s,delta)=>{calls++;delta('核验厨房与备选。');}};
+  const d=new LocationDialogue(base,automaticBroker([]),{route:async()=>({...single,query:'restaurant',candidates:[{...single.candidates[0],
+    hours:{checkedAt:now,openNow:true,closesAt:now+3600000,source:'google'}}]}),verifyPlace:async c=>c});
+  const signal=new AbortController().signal;await d.plan([], '找餐馆',false,signal);let answer='';
+  await d.reply([{role:'user',content:'找餐馆'}],signal,t=>answer+=t);assert.equal(calls,1);assert.doesNotMatch(answer,/向店家确认/);
 });

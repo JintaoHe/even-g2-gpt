@@ -34,6 +34,8 @@ export class GuestDialogue implements DialogueModel {
     if (!this.base.clarifyRoute) throw new Error('ROUTE_UNAVAILABLE');
     return this.base.clarifyRoute(...args);
   };
+  verifyPlaceHours: NonNullable<DialogueModel['verifyPlaceHours']> = (...args) =>
+    this.base.verifyPlaceHours?.(...args) ?? Promise.resolve(undefined);
   resolveRoute: NonNullable<DialogueModel['resolveRoute']> = (...args) => {
     if (!this.base.resolveRoute) throw new Error('ROUTE_UNAVAILABLE');
     return this.base.resolveRoute(...args);

@@ -91,3 +91,21 @@ test('environment provider failure retries once then activates bounded Luna rese
   assert.match(seenHistory.at(-1)?.content ?? '', /ENVIRONMENT_UNAVAILABLE/);
   assert.doesNotMatch(JSON.stringify(seenHistory), /41\.58|-93\.62/);
 });
+
+test('known unsafe outdoor plan researches alternatives without overriding the hazard or retrying a failed reply', async () => {
+  let replies=0;
+  const environment:EnvironmentProvider={
+    weather:async()=>({available:true,hourCount:1,conditions:['Thunderstorm'],thunderstormMaxPercent:90}),
+    airQuality:async()=>({available:true,hourCount:1,aqiMax:30}),
+    pollen:async()=>({available:true,date:'2026-09-19',tree:{indexAvailable:true,value:0},grass:{indexAvailable:true,value:0},weed:{indexAvailable:true,value:0}})
+  };
+  const base:DialogueModel={plan:async()=>({decision:'respond',cognitiveMode:'planning'}),decide:async()=> 'respond',
+    reply:async(history,_s,_d,_u,_e,_m,workflows)=>{
+      replies++;assert.match(history.at(-1)!.content,/thunderstorm_risk/);assert.match(history.at(-1)!.content,/"suitability":"poor"/);
+      assert.ok(workflows?.some(w=>w.kind==='environment'&&w.action==='fallback_search'));throw Error('reply failed');
+    }};
+  const d=new PlanningEvidenceDialogue(base,async()=>({start:'2026-09-19T16:30-05:00',end:'2026-09-19T18:00-05:00',timezone:'America/Chicago'}),broker(),environment);
+  const signal=new AbortController().signal;await d.plan([],'明天去公园',false,signal);
+  await assert.rejects(d.reply([{role:'user',content:'明天去公园'}],signal,()=>{},undefined,'medium','planning'),/reply failed/);
+  assert.equal(replies,1);
+});

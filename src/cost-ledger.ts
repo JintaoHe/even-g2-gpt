@@ -3,7 +3,7 @@ import { replaceLedgerFile } from './atomic-ledger-rename.js';
 import { dirname, resolve } from 'node:path';
 
 export type CostProvider = 'openai' | 'soniox' | 'google';
-export type GoogleSku = 'places-text-search-enterprise' | 'route-matrix-pro' | 'route-matrix-essentials'
+export type GoogleSku = 'places-text-search-enterprise' | 'places-details-enterprise' | 'route-matrix-pro' | 'route-matrix-essentials'
   | 'time-zone' | 'weather' | 'air-quality' | 'pollen';
 
 export type CostAlert = {
@@ -35,6 +35,7 @@ export type CostSnapshot = {
 
 type SkuDefinition = { label: string; freeUnits: number; usdPerThousand: number; thresholds: number[] };
 export const GOOGLE_SKUS: Record<GoogleSku, SkuDefinition> = {
+  'places-details-enterprise': { label: 'Places Details Enterprise', freeUnits: 1_000, usdPerThousand: 20, thresholds: [50, 95] },
   'places-text-search-enterprise': { label: 'Places Text Search Enterprise', freeUnits: 1_000, usdPerThousand: 35, thresholds: [50, 95] },
   'route-matrix-pro': { label: 'Routes Compute Route Matrix Pro', freeUnits: 5_000, usdPerThousand: 10, thresholds: [95] },
   'route-matrix-essentials': { label: 'Routes Compute Route Matrix Essentials', freeUnits: 10_000, usdPerThousand: 5, thresholds: [95] },
