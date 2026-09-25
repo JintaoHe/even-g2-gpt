@@ -47,6 +47,8 @@ test('opt-in reasoning profile adjusts budgets without changing default requests
     assert.match(bodies[3].instructions, /five-line glasses display/);
     assert.match(bodies[3].instructions, /user preferences are requirements, not verified venue facts/);
     assert.match(bodies[3].instructions, /Missing priceLevel means price is unknown/);
+    assert.match(bodies[3].instructions, /Friday 01:00 is NOT within Friday 22:00/);
+    assert.match(bodies[3].instructions, /weekday:/);
     assert.match(bodies[3].instructions, /hard maximum of 120 Chinese characters or 60 English words/);
     assert.ok(bodies.every(b => b.tools === undefined));
     assert.throws(() => new OpenAIDialogue('fake', 'test', url, false, 1, 'America/Chicago', undefined, { intentTokens: -1 }));

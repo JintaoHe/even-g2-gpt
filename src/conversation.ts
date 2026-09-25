@@ -33,7 +33,7 @@ export type LocationAction = 'none' | 'route_eta' | 'nearby_search' | 'recompare
 export type TaskKind = 'outdoor_activity';
 export type TaskAction = 'none' | 'conditional_task' | 'confirm_conditional' | 'cancel_conditional';
 export type WorkflowKind = 'search' | 'navigation' | 'environment' | 'calendar' | 'document' | 'email' | 'memory' | 'list' | 'conditional_task';
-export type WorkflowSelection = { kind: WorkflowKind; action: string; taskKind?: TaskKind };
+export type WorkflowSelection = { kind: WorkflowKind; action: string; taskKind?: TaskKind; searchArea?: import('./search-area.js').SearchArea };
 export type SearchAction = 'none' | 'search';
 export type RouteTravelMode = 'drive' | 'walk' | 'bicycle';
 export type RoutePlaceOption = { name: string; address?: string; primaryType?: string; types?: string[] };
@@ -74,6 +74,9 @@ export function normalizeTurnPlan(plan: TurnPlan): TurnPlan {
   return { ...plan, cognitiveMode, assistantMode: cognitiveMode, taskKind, workflows };
 }
 export interface DialogueModel {
+  findFoodAlternatives?(query: string, area: import('./search-area.js').SearchArea, preferences: import('./nearby-intent.js').NearbyPreferences,
+    at: number, signal: AbortSignal, excluded?: import('./verified-food-alternatives.js').AlternativeBranch[]): Promise<import('./verified-food-alternatives.js').AlternativeBranch[]>;
+  verifyFoodService?(place: import('./routes.js').PlaceCandidate, at: number, signal: AbortSignal): Promise<import('./verified-food-alternatives.js').FoodServiceEvidence | undefined>;
   verifyPlaceHours?(place: import('./place-availability.js').PlaceHoursLookup, signal: AbortSignal): Promise<import('./place-availability.js').PlaceHours | undefined>;
   revokeMemoryContext?(): void;
   startSession?(): void;

@@ -4,6 +4,7 @@ import type { CostLedger, GoogleSku } from './cost-ledger.js';
 import type { ProviderMetricObserver, NearbyMetricObserver } from './runtime-metrics.js';
 import type { NearbyPreferences } from './nearby-intent.js';
 import { freshHours, parseGoogleHours, publicWebsite, type PlaceHours } from './place-availability.js';
+import { resolveSearchArea, type SearchArea } from './search-area.js';
 
 export type RouteOrigin = { kind: 'coordinates'; location: EphemeralLocation } | { kind: 'address'; address: string };
 export type RouteRequestKind = 'destination' | 'nearby';
@@ -19,6 +20,7 @@ export type PlaceCandidate = {
   openNow?: boolean;
   hours?: PlaceHours;
   website?: string;
+  timeZone?: string;
   priceLevel?: 'free' | 'inexpensive' | 'moderate' | 'expensive' | 'very_expensive';
   businessStatus?: 'OPERATIONAL' | 'CLOSED_TEMPORARILY' | 'CLOSED_PERMANENTLY' | 'FUTURE_OPENING';
 };
@@ -53,6 +55,7 @@ export type NearbyExclusion = { placeId: string; name: string; address?: string;
 export type RouteDiscovery = { query: string; candidates: PlaceCandidate[]; excluded?: NearbyExclusion[] };
 
 export interface RouteProvider {
+  searchArea?(location: EphemeralLocation, signal: AbortSignal): Promise<SearchArea | undefined>;
   verifyPlace?(candidate: PlaceCandidate, signal: AbortSignal): Promise<PlaceCandidate>;
   discover?(request: RouteRequest, signal: AbortSignal): Promise<RouteDiscovery>;
   route(request: RouteRequest, signal: AbortSignal): Promise<RouteComparisonResult>;
@@ -238,6 +241,10 @@ export class GoogleRoutesProvider implements RouteProvider {
     throw lastError ?? new RouteError('ROUTE_UNAVAILABLE', 'ROUTE_UNAVAILABLE', stage);
   }
 
+  searchArea(location: EphemeralLocation, signal: AbortSignal) {
+    return resolveSearchArea(this.key, location, signal, this.fetcher, this.costs);
+  }
+
   private async findCandidates(request: RouteRequest, destination: string, signal: AbortSignal): Promise<PlaceCandidate[]> {
     if (request.candidates?.length) {
       return request.candidates.slice(0, PLACE_SEARCH_CANDIDATES).map(sanitizeCandidate).filter((value): value is PlaceCandidate => !!value)
@@ -303,14 +310,15 @@ export class GoogleRoutesProvider implements RouteProvider {
     const response = await this.fetcher(endpoint.href, { method: 'GET',
       signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
       headers: { 'X-Goog-Api-Key': this.key,
-        'X-Goog-FieldMask': 'id,displayName,formattedAddress,primaryType,types,businessStatus,websiteUri,currentOpeningHours,currentSecondaryOpeningHours' } });
+        'X-Goog-FieldMask': 'id,displayName,formattedAddress,primaryType,types,businessStatus,websiteUri,timeZone,currentOpeningHours,currentSecondaryOpeningHours' } });
     if (!response.ok) { await reservation?.settle(0); throw new RouteError('ROUTE_UNAVAILABLE', 'ROUTE_UNAVAILABLE', 'places', response.status); }
     const raw: any = await response.json(); await reservation?.settle(1); signal.throwIfAborted();
     if (raw?.id !== candidate.placeId) throw new RouteError('ROUTE_INVALID');
     const updated = sanitizeCandidate(raw);
     if (!updated) throw new RouteError('ROUTE_INVALID');
     const hours = parseGoogleHours(raw, Date.now());
-    return { ...candidate, ...updated, openNow: hours.openNow, hours, website: publicWebsite(raw.websiteUri) };
+    return { ...candidate, ...updated, openNow: hours.openNow, hours, website: publicWebsite(raw.websiteUri),
+      ...(typeof raw.timeZone?.id === 'string' ? { timeZone: raw.timeZone.id } : {}) };
   }
 
   async route(request: RouteRequest, signal: AbortSignal): Promise<RouteComparisonResult> {
