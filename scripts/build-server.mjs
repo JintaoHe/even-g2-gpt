@@ -1,6 +1,6 @@
 // Build only the server entry point and its imports. Never copy the repository.
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, copyFile, readFile, writeFile, readdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,9 +21,11 @@ for (const path of ['src/codex-instructions.md', 'src/codex-intent.schema.json',
   'deploy/even-agent-soak@.service',
   'deploy/verify-backup.mjs', 'deploy/Caddyfile', 'deploy/site/calendar/index.html', 'deploy/site/calendar/privacy.html']) {
   await mkdir(dirname(join(output, path)), { recursive: true });
-  // All copied assets are UTF-8 text. Canonical LF makes Windows and Linux
-  // releases byte-identical regardless of the checkout's core.autocrlf setting.
-  await writeFile(join(output, path), (await readFile(join(root, path), 'utf8')).replaceAll('\r\n', '\n'));
+  // Canonicalize informational text only. Do not rewrite managed operational
+  // files or dependency metadata as part of an application-only release.
+  if (path === 'src/codex-instructions.md' || path.startsWith('deploy/site/')) {
+    await writeFile(join(output, path), (await readFile(join(root, path), 'utf8')).replaceAll('\r\n', '\n'));
+  } else await copyFile(join(root, path), join(output, path));
 }
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 // Keep dependency metadata aligned with the lockfile; install with --omit=dev.
