@@ -69,7 +69,7 @@ test('lone ancillary result cannot silently satisfy a brand request', async () =
   const base: DialogueModel = { plan: async () => ({ decision: 'respond', locationAction: 'nearby_search', routeDestination: 'Target' }),
     decide: async () => 'respond', reply: async (_h, _s, delta, _u, _e, _m, workflows) => {
       assert.ok(workflows?.some(w => w.kind === 'search')); delta('没有找到匹配门店，改查可核实的备选。'); } };
-  const d = new LocationDialogue(base, automaticBroker([]), { discover: async () => ({ query: 'Target',
+  const d = new LocationDialogue(base, automaticBroker([]), { searchArea: async () => ({source:'google_locality', labels:['Test City, Iowa, USA']}), discover: async () => ({ query: 'Target',
     candidates: [{ placeId: 'parking', name: 'Target Parking', primaryType: 'parking_lot' }] }),
     route: async () => { routed++; return comparison; } });
   const signal = new AbortController().signal;
@@ -182,12 +182,13 @@ test('exclusions enter alternative research without relaxing or relabeling the r
         const evidence = JSON.parse(history.at(-1)!.content.split('\n').at(-1)!);
         assert.equal(evidence.excluded[0].reason, reason);
         assert.equal(evidence.outcome, 'ROUTE_NO_MATCHING_PLACES');
-        assert.deepEqual(workflows, [{ kind: 'navigation', action: 'fallback_search' }, { kind: 'search', action: 'read' }]);
+        assert.ok(workflows?.[0].searchArea);
+        assert.deepEqual(workflows?.map(({searchArea, ...w}) => w), [{ kind: 'navigation', action: 'fallback_search' }, { kind: 'search', action: 'read' }]);
         delta(reason === 'closed' ? '已关门，正在核实其他方案。' : '价位不符合，正在核实其他方案。');
       } };
     const dialogue = new LocationDialogue(base, automaticBroker([]), { route: async () => { throw new RouteError(
       'ROUTE_NO_MATCHING_PLACES', 'ROUTE_NO_MATCHING_PLACES', 'places', undefined, false, undefined,
-      [{ placeId: 'test', name: 'Synthetic shop', reason }]); } });
+      [{ placeId: 'test', name: 'Synthetic shop', address: '10 Example Street, Test City, Iowa', reason }]); } });
     const signal = new AbortController().signal; await dialogue.plan([], 'cafe', false, signal);
     let answer = ''; await dialogue.reply([], signal, value => { answer += value; });
     if (reason === 'price') assert.doesNotMatch(answer, /关门/); else assert.match(answer, /已关门/);
@@ -208,7 +209,7 @@ test('comparison may suggest a store but never claims user selection or executed
 });
 const single: RouteComparisonResult = { query: 'West Des Moines Costco', recommendedPlaceId: 'costco', recommendationBasis: 'fastest',
   mode: 'drive', trafficAware: true, candidates: [{ placeId: 'costco', name: 'West Des Moines Costco', durationSeconds: 1200,
-    staticDurationSeconds: 1020, distanceMeters: 16093, rating: 4.4, userRatingCount: 800,
+    address: '10 Example Street, Test City, Iowa', staticDurationSeconds: 1020, distanceMeters: 16093, rating: 4.4, userRatingCount: 800,
     quality: { adjustedRating: 4.38, reliable: true, risk: false } }] };
 const comparison: RouteComparisonResult = { query: 'Target', recommendedPlaceId: 'waukee', recommendationBasis: 'fastest',
   mode: 'drive', trafficAware: true, candidates: [
@@ -498,13 +499,14 @@ test('route failure reports safe diagnostics and falls back to Luna web research
     reply: async (_history, _signal, delta, _update, _effort, _mode, workflows) => {
       fallbackWorkflows = workflows; delta('Google 路线暂不可核实；我可以查公共地点信息，但不会冒充实时 ETA。');
     } };
-  const dialogue = new LocationDialogue(base, automaticBroker([]), { route: async () => {
+  const dialogue = new LocationDialogue(base, automaticBroker([]), { searchArea: async () => ({source:'google_locality', labels:['Test City, Iowa, USA']}), route: async () => {
     throw new RouteError('ROUTE_UNAVAILABLE', 'ROUTE_UNAVAILABLE', 'places', 403, false, 'API_KEY_IP_ADDRESS_BLOCKED');
   } });
   const signal = new AbortController().signal; await dialogue.plan([], '去 Target 多久', false, signal);
   let answer = ''; await dialogue.reply([{ role: 'user', content: '去 Target 多久' }], signal, text => { answer += text; }, event => events.push(event));
   assert.match(answer, /不会冒充实时 ETA/);
-  assert.deepEqual(fallbackWorkflows, [{ kind: 'navigation', action: 'fallback_search' }, { kind: 'search', action: 'read' }]);
+  assert.ok(fallbackWorkflows?.[0].searchArea);
+  assert.deepEqual(fallbackWorkflows?.map(({searchArea, ...w}) => w), [{ kind: 'navigation', action: 'fallback_search' }, { kind: 'search', action: 'read' }]);
   assert.deepEqual(events.find(event => event.status === 'failed'), { type: 'route.status', status: 'failed', stage: 'places',
     provider_status: 403, provider_reason: 'API_KEY_IP_ADDRESS_BLOCKED' });
   assert.ok(!JSON.stringify(events).includes('41.58'));
@@ -516,9 +518,10 @@ test('empty maps results research alternatives once, without raw GPS or write wo
     decide: async () => 'respond', reply: async (history, _signal, delta, _update, _effort, _mode, workflows) => {
       calls++; const content = history.at(-1)!.content;
       assert.match(content, /ROUTE_DESTINATION_NOT_FOUND/);assert.doesNotMatch(content, /41\.58|-93\.62|latitude|longitude/);
-      assert.deepEqual(workflows, [{kind:'navigation',action:'fallback_search'},{kind:'search',action:'read'}]);delta('已查询备选。');
+      assert.ok(workflows?.[0].searchArea);
+      assert.deepEqual(workflows?.map(({searchArea, ...w}) => w), [{kind:'navigation',action:'fallback_search'},{kind:'search',action:'read'}]);delta('已查询备选。');
     } };
-  const d = new LocationDialogue(base, automaticBroker([]), {route:async()=>{throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');}});
+  const d = new LocationDialogue(base, automaticBroker([]), {searchArea:async()=>({source:'google_locality',labels:['Test City, Iowa, USA']}), route:async()=>{throw new RouteError('ROUTE_DESTINATION_NOT_FOUND');}});
   const signal=new AbortController().signal;await d.plan([], '找晚餐',false,signal);
   await d.reply([{role:'user',content:'找晚餐'}],signal,()=>{},undefined,undefined,undefined,[{kind:'calendar',action:'create'}]);
   assert.equal(calls,1);

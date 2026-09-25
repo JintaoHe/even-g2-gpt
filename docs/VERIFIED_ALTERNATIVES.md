@@ -25,3 +25,28 @@ Offline tests use synthetic data and fake tools only: no match, mixed exclusions
 Local gates: targeted 62/62; full backend 787 total, 785 passed, 2 skipped, 0 failed; Even 106/106; both TypeScript checks, server build, 387-file public audit and diff-check passed. No production database or real API used. Changes remain local pending review/release.
 
 OpenAI Docs checked: https://developers.openai.com/api/docs/guides/tools-web-search (required search and returned source receipts).
+
+## Location handoff repair (PR follow-up)
+
+Real OpenAI + Google Maps reproduced a regression: Places and Routes succeeded, but fallback research asked for a city because precise GPS was deliberately omitted and public branch addresses were not designated as a usable search scope.
+
+Fallback now receives a typed, turn-local `searchArea`: a user-supplied area takes precedence, otherwise public candidate/excluded-branch addresses are explicit search anchors. They are **not** evidence of user residence, current jurisdiction, or actual proximity (Places bias is soft). Research must name the area and verify each venue's jurisdiction, opening and service separately; no invented route/arrival claims. The closed-set city question is unavailable once scope is supplied. No precise GPS enters model input, snapshots or logs.
+
+If no address anchor exists, the existing Google key can make one metered reverse-geocoding request (5-second timeout, no retry). Only city/county, region and country components are returned; street addresses, coordinates and raw provider errors are discarded. This optional path requires Geocoding API permission. Denial/empty results/cost refusal fails safely to a single explicit location clarification **without a reply-model call**. The pending task retains the original destination and travel mode, so a bare city reply continues that task. Session reset/cancellation clears pending state. No key permissions are changed by this PR.
+
+Live validation with a public synthetic West Des Moines location:
+
+- Original Chinese hunger request and a different hot-food follow-up: real Places/Routes/Details and real model/search completed; both returned sourced alternatives instead of asking for city (about 17.1 s and 10.9 s).
+- Forced empty Maps result + real geocoding returned `REQUEST_DENIED` with the current key. The one location clarification was expected, **not** a successful geocoding test. A bare `West Des Moines, Iowa` then resumed the original restaurant request and produced a sourced alternative (~15.0 s), without repeating the city question.
+- Successful reverse-geocoding, missing components, provider failures, cancellation, cost reservation and GPS stripping are covered offline. Live geocoding success remains unverified until API access is explicitly enabled by the administrator.
+- These two live runs used temporary ledgers, synthetic conversations, no business DB, mail or Calendar. OpenAI settled approximately $0.064; Google units were recorded (2 Text Search, 1 Matrix element, 1 Details; denied geocoding settled to zero). Temporary-ledger Google free-tier accounting is **not** proof of the account's actual Google bill. Each harness run independently caps conservative reservation at $1.
+
+References: Google reverse geocoding https://developers.google.com/maps/documentation/geocoding/guides-v3/requests-reverse-geocoding ; pricing https://developers.google.com/maps/billing-and-pricing/pricing . No schema, env, client or model-profile changes.
+
+### Release status: location fix validated; recommendation quality NOT accepted
+
+Do not treat the harness's no-city-question assertions as factual recommendation acceptance. Subsequent live runs found an overnight-day error (Friday 22:00 opening presented as feasible on Friday at 01:00). The prompt now explicitly explains previous-day overnight intervals and provides the weekday; this is mitigation, **not a deterministic hours validator**.
+
+Further live validation with the configured search-call cap still produced an exact Domino's closing-time claim not established by the cited branch page. Other runs fell back to the fixed uncertainty message. Therefore the overall verified-alternatives behavior has **not** passed live quality acceptance. A source-URL receipt alone cannot establish that the cited page entails an opening-hours claim. Before rollout acceptance, the researched alternatives need structured, per-branch current-hours/service evidence validation rather than only citation membership. Keep this repair PR draft/unmerged pending that work and retest; do not deploy on the strength of the location-only assertions.
+
+Latest local validation: backend 793 total / 791 passed / 2 skipped / 0 failed (two runs), focused location/routes/answer-options 55/55, Even 106/106, both typechecks and builds passed. The final weekday prompt addition was included in the focused run; CI must check the final full tree. Public scan: 390 files. This round's live calls used synthetic data and temporary ledgers; OpenAI settled approximately $0.20 total across diagnostic and validation runs. No production writes or key-permission changes.

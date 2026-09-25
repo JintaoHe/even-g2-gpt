@@ -4,6 +4,7 @@ import type { CostLedger, GoogleSku } from './cost-ledger.js';
 import type { ProviderMetricObserver, NearbyMetricObserver } from './runtime-metrics.js';
 import type { NearbyPreferences } from './nearby-intent.js';
 import { freshHours, parseGoogleHours, publicWebsite, type PlaceHours } from './place-availability.js';
+import { resolveSearchArea, type SearchArea } from './search-area.js';
 
 export type RouteOrigin = { kind: 'coordinates'; location: EphemeralLocation } | { kind: 'address'; address: string };
 export type RouteRequestKind = 'destination' | 'nearby';
@@ -53,6 +54,7 @@ export type NearbyExclusion = { placeId: string; name: string; address?: string;
 export type RouteDiscovery = { query: string; candidates: PlaceCandidate[]; excluded?: NearbyExclusion[] };
 
 export interface RouteProvider {
+  searchArea?(location: EphemeralLocation, signal: AbortSignal): Promise<SearchArea | undefined>;
   verifyPlace?(candidate: PlaceCandidate, signal: AbortSignal): Promise<PlaceCandidate>;
   discover?(request: RouteRequest, signal: AbortSignal): Promise<RouteDiscovery>;
   route(request: RouteRequest, signal: AbortSignal): Promise<RouteComparisonResult>;
@@ -236,6 +238,10 @@ export class GoogleRoutesProvider implements RouteProvider {
       await delay(attempt ? 750 : 250, signal);
     }
     throw lastError ?? new RouteError('ROUTE_UNAVAILABLE', 'ROUTE_UNAVAILABLE', stage);
+  }
+
+  searchArea(location: EphemeralLocation, signal: AbortSignal) {
+    return resolveSearchArea(this.key, location, signal, this.fetcher, this.costs);
   }
 
   private async findCandidates(request: RouteRequest, destination: string, signal: AbortSignal): Promise<PlaceCandidate[]> {
