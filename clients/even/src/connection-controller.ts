@@ -40,7 +40,7 @@ type ControllerOptions = {
 const OPEN = 1;
 const CLOSING = 2;
 const BACKOFF_MS = [500, 1_000, 2_000, 5_000, 10_000, 30_000] as const;
-const COMMAND_TYPES = new Set(['turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry', 'exit.request']);
+const COMMAND_TYPES = new Set(['turn.begin', 'turn.submit', 'pause', 'resume', 'interrupt', 'answer.retry', 'exit.request']);
 
 export function reconnectDelay(attempt: number, random = Math.random) {
   const base = BACKOFF_MS[Math.min(Math.max(0, attempt), BACKOFF_MS.length - 1)];
@@ -165,7 +165,7 @@ export class ConnectionController {
         this.accessToken = ''; this.ending = true;
         void this.options.credentials.clearSession(); void this.options.credentials.clearDevice();
       }
-      this.options.onEvent({ type: 'transport.cleared' });
+      this.options.onEvent({ type: 'transport.cleared', recoverable: !this.disposed && !this.ending });
       if (this.disposed || this.ending) {
         this.cancelRetry();
         this.update({ state: 'disconnected', reason: this.disposed ? 'disposed' : undefined });

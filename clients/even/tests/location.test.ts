@@ -2,6 +2,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LocationController, locationReport } from '../src/location.ts';
 
+test('one-shot results cannot outlive a hold, disconnect or a newer acquisition', async () => {
+  const reports: unknown[] = [], pending: ((v: any) => void)[] = [];
+  const controller = new LocationController({
+    getAppLocation: () => new Promise<any>(resolve => pending.push(resolve)),
+    startAppLocationUpdates: async () => true, stopAppLocationUpdates: async () => true,
+    onAppLocationChanged: () => () => {},
+  }, r => reports.push(r));
+  let held = true;
+  const first = controller.once(() => held); held = false;
+  pending.shift()!({ latitude: 41, longitude: -93 }); assert.equal(await first, false);
+  const second = controller.once(); await controller.stop();
+  pending.shift()!({ latitude: 41, longitude: -93 }); assert.equal(await second, false);
+  const old = controller.once(), latest = controller.once();
+  pending.shift()!({ latitude: 41, longitude: -93 }); assert.equal(await old, false);
+  pending.shift()!({ latitude: 42, longitude: -94 }); assert.equal(await latest, true);
+  assert.equal(reports.length, 1);
+});
+
 test('location report keeps only the bounded route fields', () => {
   assert.deepEqual(locationReport('once', {
     latitude: 41.5868, longitude: -93.625, accuracy: 8.2, altitude: 300, heading: 90, speed: 10, timestamp: 1_789_741_200_000

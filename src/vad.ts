@@ -11,7 +11,7 @@ export class TurnDetector {
   active = false;
   constructor(private onStart: () => void, private onAudio: (pcm: Buffer) => void,
     private onEnd: () => void, private threshold = 0.018, private silenceMs = 1200) {}
-  push(pcm: Buffer) {
+  push(pcm: Buffer, held = false) {
     if (pcm.length % 2) throw new Error('Invalid PCM');
     this.rest = Buffer.concat([this.rest, pcm]);
     while (this.rest.length >= 640) {
@@ -22,12 +22,12 @@ export class TurnDetector {
       if (!this.active) {
         this.prefix.push(frame); if (this.prefix.length > this.prefixFrames) this.prefix.shift();
         this.loudMs = loud ? this.loudMs + 20 : 0;
-        if (this.loudMs < 160) continue;
+        if (!held && this.loudMs < 160) continue;
         this.active = true; this.durationMs = 0; this.quietMs = 0;
         this.onStart(); this.onAudio(Buffer.concat(this.prefix)); this.prefix = [];
       } else this.onAudio(frame);
       this.durationMs += 20; this.quietMs = loud ? 0 : this.quietMs + 20;
-      if (this.quietMs >= this.silenceMs || this.durationMs >= 60000) {
+      if ((!held && this.quietMs >= this.silenceMs) || this.durationMs >= 60000) {
         this.active = false; this.prefix = []; this.loudMs = 0; this.quietMs = 0; this.durationMs = 0;
         this.onEnd();
       }
