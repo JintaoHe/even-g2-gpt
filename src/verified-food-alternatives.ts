@@ -1,13 +1,13 @@
 import type { DialogueModel, RouteTravelMode } from './conversation.js';
 import type { NearbyPreferences } from './nearby-intent.js';
 import type { SearchArea } from './search-area.js';
-import { prefilterNearby, type PlaceCandidate, type RouteCandidate, type RouteOrigin, type RouteProvider } from './routes.js';
+import { prefilterNearby, recommendCandidates, assessCandidate, type PlaceCandidate, type RouteCandidate, type RouteOrigin, type RouteProvider } from './routes.js';
 import { freshHours, publicWebsite } from './place-availability.js';
 
 export type AlternativeBranch = { name: string; address: string; sourceUrl: string };
 export type ServicePeriod = { day: number; openMinute: number; closeMinute: number };
 export type FoodServiceEvidence = {
-  kind: 'kitchen' | 'takeout' | 'drive_through'; sourceUrl: string; periods: ServicePeriod[];
+  kind: 'kitchen' | 'takeout' | 'drive_through' | 'restaurant_hours'; sourceUrl: string; periods: ServicePeriod[];
 };
 export const FOOD_ALTERNATIVE_LIMITS = Object.freeze({ rounds: 2, candidates: 2, timeoutMs: 60_000, arrivalMarginMs: 10 * 60_000 });
 const clean = (s: unknown, n: number): s is string => typeof s === 'string' && s.trim().length > 0
@@ -23,13 +23,19 @@ export function parseAlternativeBranches(raw: any, sources: string[]): Alternati
 export function parseFoodService(raw: any, sources: string[], website: string): FoodServiceEvidence | undefined {
   const url = publicWebsite(raw?.source_url), official = publicWebsite(website);
   if (raw?.branch_matches !== true || raw?.exceptions_conflict !== false || !url || !official
-    || new URL(url).hostname !== new URL(official).hostname || !sources.includes(url)
-    || !['kitchen', 'takeout', 'drive_through'].includes(raw?.kind)
+    || new URL(url).hostname.replace(/^www\./, '') !== new URL(official).hostname.replace(/^www\./, '') || !sources.includes(url)
+    || !['kitchen', 'takeout', 'drive_through', 'restaurant_hours'].includes(raw?.kind)
     || !Array.isArray(raw?.periods) || !raw.periods.length || raw.periods.length > 21) return;
   if (!raw.periods.every((p: any) => Number.isInteger(p?.day) && p.day >= 0 && p.day <= 6
     && Number.isInteger(p.open_minute) && p.open_minute >= 0 && p.open_minute < 1440
     && Number.isInteger(p.close_minute) && p.close_minute > p.open_minute
     && p.close_minute <= p.open_minute + 1440)) return;
+  // A generic Hours heading is never kitchen evidence, whatever kind the model chose.
+  if (!clean(raw.schedule_label, 120)) return;
+  const explicit = {kitchen:/\b(kitchen|food service|food served|dining|lunch|dinner)\b|厨房|供餐|午餐|晚餐/iu,
+    takeout:/\b(takeout|take-out|takeaway|pickup|pick-up)\b|取餐|外带/iu,
+    drive_through:/\b(drive[- ]?thru|drive[- ]?through)\b|得来速/iu};
+  if (raw.kind !== 'restaurant_hours' && !explicit[raw.kind as keyof typeof explicit].test(raw.schedule_label)) return;
   return { kind: raw.kind, sourceUrl: url, periods: raw.periods.map((p: any) => ({
     day: p.day, openMinute: p.open_minute, closeMinute: p.close_minute })) };
 }
@@ -59,59 +65,83 @@ const norm = (s: string) => s.normalize('NFKC').toLowerCase().replace(/\b(street
 export function sameBranch(a: AlternativeBranch, b: PlaceCandidate) {
   const x = a.address.split(','), y = b.address?.split(',') ?? [];
   const nameParts = a.name.split(/\s+[—–]\s+/);
-  const sameName = norm(a.name) === norm(b.name) || (nameParts.length === 2 && norm(nameParts[0]) === norm(b.name)
+  const name = (s: string) => norm(s.replace(/&/g, ' and '));
+  const sameName = name(a.name) === name(b.name) || (nameParts.length === 2 && name(nameParts[0]) === name(b.name)
     && norm(nameParts[1]) === norm(x[0]));
   return sameName && x.length >= 3 && y.length >= 3
     && x.slice(0, 2).every((s, i) => norm(s) === norm(y[i]))
     && norm(x[2]).replace(/\d/g, '') === norm(y[2]).replace(/\d/g, '');
 }
 export type VerifiedFoodOption = { place: RouteCandidate; service: FoodServiceEvidence; checkedAt: number };
+export type FoodVerificationReport = {
+  outcome: 'unsupported_constraints' | 'unavailable' | 'timeout' | 'no_candidates' | 'unverified' | 'verified' | 'qualified';
+  candidates: number; checked: number; failures: Partial<Record<'identity'|'hours'|'preferences'|'route'|'service'|'arrival'|'provider', number>>;
+};
 export async function verifiedFoodAlternatives(query: string, area: SearchArea, origin: RouteOrigin,
   mode: RouteTravelMode, prefs: NearbyPreferences, model: DialogueModel, routes: RouteProvider,
-  signal: AbortSignal, now = Date.now): Promise<VerifiedFoodOption[]> {
-  if (!model.findFoodAlternatives || !model.verifyFoodService || !routes.discover || !routes.verifyPlace) return [];
+  signal: AbortSignal, now = Date.now, report: FoodVerificationReport = {outcome:'unverified',candidates:0,checked:0,failures:{}}, seeds: PlaceCandidate[] = []): Promise<VerifiedFoodOption[]> {
+  const miss = (reason: keyof FoodVerificationReport['failures']) => { report.failures[reason] = (report.failures[reason] ?? 0) + 1; };
+  if (!model.findFoodAlternatives || !model.verifyFoodService || !routes.discover || !routes.verifyPlace) { report.outcome='unavailable'; return []; }
   // These requirements need evidence beyond hours; never silently relax them.
-  if (prefs.unhandledExclusions || (prefs.vibe && prefs.vibe !== 'any')) return [];
+  if (prefs.unhandledExclusions || (prefs.vibe && prefs.vibe !== 'any')) { report.outcome='unsupported_constraints'; return []; }
   const local = new AbortController(), timer = setTimeout(() => local.abort(new Error('ALTERNATIVE_TIMEOUT')), FOOD_ALTERNATIVE_LIMITS.timeoutMs);
   const combined = AbortSignal.any([signal, local.signal]);
   const run = async () => {
     const options: VerifiedFoodOption[] = [], seen = new Set<string>(), attempted: AlternativeBranch[] = [];
     for (let round = 0; round < FOOD_ALTERNATIVE_LIMITS.rounds && !options.length; round++) {
-      const found = await model.findFoodAlternatives!(query, area, prefs, now(), combined, attempted);
+      // Google already identified these exact branches. Verify them before paying for web discovery.
+      const seeded = round === 0 ? prefilterNearby(seeds, prefs).candidates.filter(c => c.address).slice(0, FOOD_ALTERNATIVE_LIMITS.candidates) : [];
+      const found = seeded.length ? seeded.map(c => ({name:c.name,address:c.address!,sourceUrl:c.website ?? ''}))
+        : await model.findFoodAlternatives!(query, area, prefs, now(), combined, attempted);
+      report.candidates += Math.min(found.length, FOOD_ALTERNATIVE_LIMITS.candidates);
       combined.throwIfAborted();
       for (const branch of found.slice(0, FOOD_ALTERNATIVE_LIMITS.candidates)) {
         if (attempted.some(b => norm(b.name) === norm(branch.name) && norm(b.address) === norm(branch.address))) continue;
         attempted.push(branch);
+        report.checked++;
         try {
           combined.throwIfAborted();
           const request = { origin, mode, kind: 'nearby' as const, nearbyPreferences: prefs, destination: `${branch.name}, ${branch.address}` };
-          const discovery = await routes.discover!(request, combined); combined.throwIfAborted();
+          const discovery = seeded.length ? {candidates:seeded} : await routes.discover!(request, combined); combined.throwIfAborted();
           const matches = discovery.candidates.filter(c => sameBranch(branch, c));
-          if (matches.length !== 1 || seen.has(matches[0].placeId)) continue;
+          if (matches.length !== 1 || seen.has(matches[0].placeId)) { miss('identity'); continue; }
           seen.add(matches[0].placeId);
           const detail = await routes.verifyPlace!(matches[0], combined); combined.throwIfAborted();
           if (detail.placeId !== matches[0].placeId || !sameBranch(branch, detail) || !detail.website || !detail.timeZone
             || !freshHours(detail.hours, now()) || detail.hours?.source !== 'google' || detail.hours.openNow !== true
-            || !Number.isFinite(detail.hours.closesAt) || (detail.businessStatus && detail.businessStatus !== 'OPERATIONAL')) continue;
-          if (!prefilterNearby([detail], prefs).candidates.length || (prefs.priceCeiling && !detail.priceLevel)) continue;
+            || !Number.isFinite(detail.hours.closesAt) || (detail.businessStatus && detail.businessStatus !== 'OPERATIONAL')) { miss('hours'); continue; }
+          if (!prefilterNearby([detail], prefs).candidates.length || (prefs.priceCeiling && !detail.priceLevel)) { miss('preferences'); continue; }
           const route = await routes.route({ ...request, candidates: [detail] }, combined); combined.throwIfAborted();
           const routed = route.candidates.find(c => c.placeId === detail.placeId);
-          if (!routed || !Number.isFinite(routed.durationSeconds) || routed.durationSeconds < 0 || routed.durationSeconds > 6600) continue;
+          if (!routed || !Number.isFinite(routed.durationSeconds) || routed.durationSeconds < 0 || routed.durationSeconds > 6600) { miss('route'); continue; }
           const service = await model.verifyFoodService!(detail, now(), combined); combined.throwIfAborted();
-          if (!service || (service.kind === 'drive_through' && mode !== 'drive')) continue;
+          if (!service || (service.kind === 'drive_through' && mode !== 'drive')) { miss('service'); continue; }
+          // Generic opening hours support a qualified restaurant candidate, not a food-service assertion.
+          // A bar/store with restaurant among secondary types is insufficient.
+          if (service.kind === 'restaurant_hours' && !(detail.primaryType === 'restaurant'
+            || detail.primaryType?.endsWith('_restaurant') || ['steak_house','meal_takeaway'].includes(detail.primaryType ?? ''))) {
+            miss('service'); continue;
+          }
           const checkedAt = now(), through = checkedAt + routed.durationSeconds * 1000 + FOOD_ALTERNATIVE_LIMITS.arrivalMarginMs;
           if (!freshHours(detail.hours, checkedAt) || detail.hours.closesAt! <= through
             || detail.hours.foodOpenNow === false || (detail.hours.foodClosesAt !== undefined && detail.hours.foodClosesAt <= through)
-            || !serviceCovers(service.periods, detail.timeZone, checkedAt, through)) continue;
-          options.push({ place: { ...routed, ...detail }, service, checkedAt });
-        } catch { combined.throwIfAborted(); /* Unknown evidence excludes only this branch. */ }
+            || !serviceCovers(service.periods, detail.timeZone, checkedAt, through)) { miss('arrival'); continue; }
+          options.push({ place: { ...routed, ...detail, quality: assessCandidate(detail) }, service, checkedAt });
+        } catch { combined.throwIfAborted(); miss('provider'); /* Unknown evidence excludes only this branch. */ }
       }
     }
-    return options.filter(o => {
+    const current = options.filter(o => {
       const at = now(), through = at + o.place.durationSeconds * 1000 + FOOD_ALTERNATIVE_LIMITS.arrivalMarginMs;
       return freshHours(o.place.hours, at) && o.place.hours!.closesAt! > through
         && serviceCovers(o.service.periods, o.place.timeZone!, at, through);
     });
+    report.outcome = current.length ? (current.some(o => o.service.kind === 'restaurant_hours') ? 'qualified' : 'verified')
+      : report.candidates ? 'unverified' : 'no_candidates';
+    if (current.length > 1) {
+      const recommended = recommendCandidates(current.map(o => o.place)).recommended.placeId;
+      current.sort((a,b) => Number(b.place.placeId === recommended) - Number(a.place.placeId === recommended));
+    }
+    return current;
   };
   let abort!: () => void;
   try {
@@ -119,14 +149,20 @@ export async function verifiedFoodAlternatives(query: string, area: SearchArea, 
       abort = () => reject(combined.reason); combined.addEventListener('abort', abort, {once:true});
       if (combined.aborted) abort();
     })]);
-  } catch { signal.throwIfAborted(); return []; }
+  } catch { signal.throwIfAborted(); report.outcome = local.signal.aborted ? 'timeout' : 'unavailable'; return []; }
   finally { clearTimeout(timer); combined.removeEventListener('abort', abort); }
 }
 
-export function foodAlternativeText(options: VerifiedFoodOption[], area: SearchArea, mode: RouteTravelMode) {
-  if (!options.length) return `目前还没拿到${area.labels[0]}同时满足“现在供餐”和“到达后仍来得及”的完整证据，所以没有把未核实的店当作可去推荐。可以继续讨论扩大范围，或改查稍晚有明确供餐时段的选择。`;
+export function foodAlternativeText(options: VerifiedFoodOption[], area: SearchArea, mode: RouteTravelMode, report?: FoodVerificationReport) {
+  if (!options.length) {
+    if (report?.outcome === 'unsupported_constraints') return '你补充的条件里，有些还不能可靠核实；这次没有完成餐馆核实，并不代表附近没有吃的。请告诉我这些条件中哪一项是必须满足的，我不会擅自忽略它。';
+    if (report?.outcome === 'timeout' || report?.outcome === 'unavailable') return '这次餐馆核实超时或查询服务暂时不可用，不是附近没有餐馆。我保留了你的偏好，你可以说“再找一次”，我会继续查。';
+    return `我按你的偏好查了${area.labels[0]}，但这次有限范围的查询${report?.candidates ? `找到的${report.candidates}个候选未能完成营业、供餐和到达时间核实` : '没有返回可进一步核实的候选'}；不能据此说附近没有吃的。是否扩大范围继续找？我会保留你已排除的店和菜系偏好。`;
+  }
   const travel = {drive:'驾车',walk:'步行',bicycle:'骑行'}[mode];
-  return `我另外核对了具体分店，以下选择有营业与供餐依据：\n` + options.map((o, i) =>
-    `${i + 1}. ${o.place.name}（${o.place.address}）：${travel}约${Math.ceil(o.place.durationSeconds / 60)}分钟；Google 当前营业状态与官网${{kitchen:'厨房',takeout:'取餐',drive_through:'得来速'}[o.service.kind]}时段相符，预计到达后至少留有10分钟。`)
+  return `我核对了具体分店，以下候选按证据分别说明：\n` + options.map((o, i) =>
+    `${i + 1}. ${o.place.name}（${o.place.address}）：${travel}约${Math.ceil(o.place.durationSeconds / 60)}分钟；${o.place.rating === undefined ? '暂无评分依据' : `Google评分${o.place.rating}（${o.place.userRatingCount ?? 0}条评价）`}；${o.service.kind === 'restaurant_hours'
+      ? 'Google 显示营业，官网餐厅营业时段覆盖预计到达后至少10分钟；厨房截止时间未单独确认，属于营业候选，不是已确认供餐。'
+      : `Google 当前营业状态与官网${{kitchen:'厨房',takeout:'取餐',drive_through:'得来速'}[o.service.kind]}时段相符，预计到达后至少留有10分钟。`}`)
     .join('\n') + '\n这是刚查到的状态，不保证临时停餐或售罄。你可以选一家，也可以继续讨论。';
 }

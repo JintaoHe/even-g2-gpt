@@ -3,11 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { applyNearbyIntent, type NearbyPreferences } from './nearby-intent.js';
 import type { NearbyMetricObserver } from './runtime-metrics.js';
 import { LocationRequestBroker, LocationUnavailableError } from './location.js';
-import { RouteError, assessCandidate, recommendCandidates, type PlaceCandidate, type RouteComparisonResult, type RouteOrigin, type RouteProvider, type RouteRequestKind } from './routes.js';
+import { RouteError, assessCandidate, recommendCandidates, rankNearbyCoarse, prefilterNearby, type PlaceCandidate, type RouteComparisonResult, type RouteOrigin, type RouteProvider, type RouteRequestKind } from './routes.js';
 import { availability, intendedFacilities, verifyRecommendations } from './place-availability.js';
 import { needsLocalVerification } from './alternative-policy.js';
 import { searchArea } from './search-area.js';
-import { verifiedFoodAlternatives, foodAlternativeText } from './verified-food-alternatives.js';
+import { verifiedFoodAlternatives, foodAlternativeText, type FoodVerificationReport } from './verified-food-alternatives.js';
 
 type PendingRoute = { destination: string; mode: RouteTravelMode; modeExplicit: boolean; kind: RouteRequestKind; candidates?: PlaceCandidate[]; expires: number; prompt: string };
 type RecentComparison = { query: string; kind: RouteRequestKind; candidates: PlaceCandidate[]; recommendedPlaceId?: string;
@@ -337,6 +337,10 @@ export class LocationDialogue implements DialogueModel {
     }
     this.nearbyTask.expires = this.now() + routeContextMs;
     const nearbyPreferences = kind === 'nearby' ? this.nearbyTask.prefs : undefined;
+    if (nearbyPreferences?.unhandledExclusions) {
+      delta('部分排除条件无法可靠核实，或条件之间有冲突；我还没有开始新的餐馆查询，也不会擅自忽略条件。你可以澄清一下必须满足的是哪一项吗？');
+      return;
+    }
     const pending = this.pending;
     let candidates: PlaceCandidate[] | undefined;
     let excluded: RouteComparisonResult['excluded'];
@@ -393,7 +397,26 @@ export class LocationDialogue implements DialogueModel {
       if (!candidates?.length && this.routes.discover) {
         let discovery;
         try {
-          discovery = await this.routes.discover({ origin, destination, mode, kind, nearbyPreferences }, signal);
+          if (kind === 'nearby' && nearbyPreferences?.cuisineTypes?.length) {
+            // Query OR choices separately: a single combined Places text query can become an AND.
+            const found: PlaceCandidate[] = [], rejected: NonNullable<RouteComparisonResult['excluded']> = [];
+            for (const cuisine of nearbyPreferences.cuisineTypes.slice(0, 3)) {
+              const category = cuisine === 'chicken_restaurant' ? 'fried chicken restaurant' : cuisine.replaceAll('_', ' ');
+              try {
+                const part = await this.routes.discover({ origin, destination: category, mode, kind,
+                  nearbyPreferences: { ...nearbyPreferences, cuisineTypes: [cuisine] } }, signal);
+                found.push(...part.candidates); rejected.push(...(part.excluded ?? []));
+              } catch (error) {
+                signal.throwIfAborted();
+                if (!(error instanceof RouteError) || !['ROUTE_NO_MATCHING_PLACES','ROUTE_DESTINATION_NOT_FOUND'].includes(error.code)) throw error;
+                rejected.push(...(error.excluded ?? []));
+              }
+            }
+            const filtered = prefilterNearby(found.filter((c,i) => found.findIndex(x => x.placeId === c.placeId) === i), nearbyPreferences);
+            rejected.push(...filtered.excluded);
+            if (!filtered.candidates.length) throw new RouteError('ROUTE_NO_MATCHING_PLACES', 'ROUTE_NO_MATCHING_PLACES', 'places', undefined, false, undefined, rejected);
+            discovery = { query: destination, candidates: rankNearbyCoarse(filtered.candidates, nearbyPreferences, origin).slice(0,5), excluded: rejected };
+          } else discovery = await this.routes.discover({ origin, destination, mode, kind, nearbyPreferences }, signal);
         } catch (error) {
           if (!(error instanceof RouteError) || error.code !== 'ROUTE_DESTINATION_NOT_FOUND'
             || kind !== 'destination' || !this.clarifier?.resolveRoute) throw error;
@@ -524,15 +547,18 @@ export class LocationDialogue implements DialogueModel {
     if (food && !needsLocalVerification(query) && (this.nearbyTask?.prefs.visitTime ?? 'now') === 'now'
       && this.clarifier?.findFoodAlternatives && origin) {
       update?.({ type: 'search.status', status: 'searching' });
+      const report: FoodVerificationReport = { outcome: 'unverified', candidates: 0, checked: 0, failures: {} };
+      const started = this.now();
       const options = await verifiedFoodAlternatives(`${query}; ${history.at(-1)?.content ?? ''}`.slice(0, 300), area, origin, routeMode, this.nearbyTask?.prefs ?? {},
-        this.clarifier, this.routes, signal, this.now);
+        this.clarifier, this.routes, signal, this.now, report, candidates);
       signal.throwIfAborted();
+      console.info(JSON.stringify({ event: 'food_verification', ...report, elapsedMs: this.now() - started }));
       this.recent = options.length ? { query, kind, mode: routeMode, evidenceAt: this.now(),
         recommendedPlaceId: options[0].place.placeId, displayedPlaceIds: options.map(o => o.place.placeId),
         candidates: options.map(o => o.place),
         routeFacts: options.map(({place:{placeId,durationSeconds,distanceMeters}}) => ({placeId,durationSeconds,distanceMeters})),
         excluded: exclusions } : undefined;
-      const text = foodAlternativeText(options, area, routeMode);
+      const text = foodAlternativeText(options, area, routeMode, report);
       delta(text);
       update?.({ type: 'answer.citations', text, citations: options.map(o => ({
         start: text.indexOf(o.place.name), end: text.indexOf(o.place.name) + o.place.name.length,

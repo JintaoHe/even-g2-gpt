@@ -100,6 +100,14 @@ function provider(responses: unknown[], requests: { url: string; body: any; mask
   }, 'http://127.0.0.1:3009/places', 'http://127.0.0.1:3009/routes');
 }
 
+test('single cuisine search sends strict Google type filter before nearest-result truncation',async()=>{
+  const requests:{url:string;body:any;mask:string|null}[]=[];
+  await provider([{places:[{id:'sushi',displayName:{text:'Sushi House'},types:['sushi_restaurant']}]}],requests)
+    .discover({origin:{kind:'coordinates',location:fix},destination:'sushi restaurant',mode:'drive',kind:'nearby',
+      nearbyPreferences:{cuisineTypes:['sushi_restaurant']}},new AbortController().signal);
+  assert.equal(requests[0].body.includedType,'sushi_restaurant');assert.equal(requests[0].body.strictTypeFiltering,true);
+});
+
 test('place discovery returns legal candidate types without spending a Routes call', async () => {
   const requests: { url: string; body: any; mask: string | null }[] = [];
   const returned = [
