@@ -95,14 +95,14 @@ test('whole recommendation follow-up overrides repeated search, but new content 
   assert.equal((await turn('推荐哪家，另外算一下步行时间')).locationAction, 'nearby_search');
 });
 
-test('production-style dialogue verifies hours and preserves refreshed evidence for follow-up', async () => {
+test('basic restaurant search defers hours refresh until explicit opening follow-up', async () => {
   let checks = 0, at = Date.now(), plans = 0;
   const base: DialogueModel = { plan: async () => plans++ ? { decision: 'respond', locationAction: 'analyze_places' }
     : { decision: 'respond', locationAction: 'nearby_search', routeDestination: 'restaurant' },
     decide: async () => 'respond', reply: async (history, _signal, delta) => {
-      assert.match(history.at(-1)!.content, /openingEvidence/); delta('营业状态已重新核验。');
+      assert.match(history.at(-1)!.content, plans===1 ? /maps_results/ : /openingEvidence/); delta('营业资料已查询。');
     } };
-  const d = new LocationDialogue(base, automaticBroker([]), { route: async () => comparison,
+  const d = new LocationDialogue(base, automaticBroker([]), { route: async () => ({...comparison,candidates:comparison.candidates.map(c=>({...c,address:'Test City, IA'}))}),
     verifyPlace: async c => { checks++; return { ...c, hours: { source: 'google', checkedAt: at, openNow: true, closesAt: at + 3600000 } }; } },
   'America/Chicago', () => at, base);
   for (const text of ['附近餐馆', '现在还开门吗']) {
@@ -110,7 +110,7 @@ test('production-style dialogue verifies hours and preserves refreshed evidence 
     let output = ''; await d.reply([{ role: 'user', content: text }], signal, t => { output += t; });
     assert.match(output, /营业/); at += 121000;
   }
-  assert.equal(checks, 4);
+  assert.equal(checks, 2);
 });
 
 const id = '123e4567-e89b-12d3-a456-426614174000';
