@@ -86,7 +86,7 @@ try {
     ['opinion','这两家评分一样但一家评论更多，详细比较一下。',p=>p.locationAction==='analyze_places'],
     ['cancel','不用找了，给我讲个关于猫的笑话。',p=>p.locationAction==='cancel'||p.locationAction==='none'],
   ];
-  for(const [id,text,check]of (process.argv.includes('--full-only')?[]:process.argv.includes('--probe')?matrix.slice(0,1):matrix)){
+  for(const [id,text,check]of (process.argv.includes('--full-only')||process.argv.includes('--simple')?[]:process.argv.includes('--probe')?matrix.slice(0,1):matrix)){
     if(budgetBlocked)break;
     const {model}=make();const at=Date.now();
     try{const p=await model.plan(seed,text,true,AbortSignal.timeout(45000));const pass=!!check(p);if(!pass)failed++;
@@ -95,7 +95,9 @@ try {
   }
   const {broker,model}=make();const history=[...seed];
   const varied=process.argv.includes('--varied');
-  const full=varied ? [
+  const simple=process.argv.includes('--simple');
+  const full=simple ? ['附近有没有 all you can eat 的寿司店？查一下评分和菜单。',
+    '不吃寿司了，改吃麦当劳，看看附近哪家开着。'] : varied ? [
     '现在有点饿，附近找开着的披萨店，不要IHOP，评分和评论数量都考虑。',
     'Changed my mind，不要披萨了，改吃泰国菜，其他要求不变。',
     '先别找店了，我对花生严重过敏，你必须保证绝对没有交叉污染，不能只是猜。',
@@ -121,7 +123,10 @@ try {
       history.push({role:'user',content:text});let answer='';
       await model.reply(history,signal,t=>answer+=t,undefined,plan.reasoningEffort,plan.assistantMode,plan.workflows);
       const switching=process.argv.includes('--switching'), ordinary=index===(varied?3:switching?5:2),contradiction=(switching&&index===3)||(varied&&index===2);
-      const pass=!!answer.trim()&&!/哪个城市|哪个地区|无法从地图数据核实/.test(answer)&&((ordinary||contradiction)?google===before:google>before&&/以下候选按证据分别说明/.test(answer)&&!/IHOP/i.test(answer));
+      const pass=simple ? !!answer.trim()&&google>before&&!plan.nearby?.patch.unhandledExclusions
+        && !/还没有开始新的餐馆查询|部分排除条件|哪个城市|完全证据|还没核实到符合条件的可行方案/.test(answer)
+        && (index!==1 || plan.nearby?.taskAction==='replace')
+        : !!answer.trim()&&!/哪个城市|哪个地区|无法从地图数据核实/.test(answer)&&((ordinary||contradiction)?google===before:google>before&&/以下候选按证据分别说明/.test(answer)&&!/IHOP/i.test(answer));
       if(!pass)failed++;
       console.log(JSON.stringify({event:'live_turn',index,pass,action:plan.locationAction,nearby:plan.nearby,googleCalls:google-before,elapsedMs:Date.now()-at,answer}));
       history.push({role:'assistant',content:answer});

@@ -2,6 +2,16 @@
 
 ## Behavior
 
+### Ordinary restaurant search (supersedes the strict food pipeline below)
+
+Ordinary restaurant requests now use Maps candidates (name, cuisine, rating/review count, address and opening fields) followed by one bounded web-search reply for basic menu, AYCE and hours information. They no longer require separate per-branch kitchen schedules or an arrival-margin proof before offering candidates. Missing facts remain unknown, not closed; explicitly closed branches must not be recommended as open. AYCE needs menu/site evidence, and a 24-hour branch listing is not a guarantee about dine-in or each menu item. Exact closing/ETA claims still need evidence.
+
+AYCE terms remain in the Maps query. Explicitly abandoning a cuisine for a named brand starts a replacement task and clears obsolete cuisine/AYCE constraints. Actual contradictions, allergy guarantees and alcohol/local-law requests retain their separate safeguards. No schema, client, budget, model routing or production configuration change. Tool receipts and citations remain required for researched claims; this does not prove semantic accuracy. Real-device acceptance is still required.
+
+Synthetic live smoke (`tests/live-food-followup.ts --simple`): AYCE sushi then switching to McDonald's both invoked Maps and produced sourced answers without the old constraint refusal or a repeated city question (15.6 s / 15.0 s). The second plan was `replace` with cuisine restrictions cleared. This verifies control flow, not every live business fact. OpenAI settled $0.02914762; cumulative conservative reservations including previous runs reached $7.9390896 of the existing $10 cap. Google temporary-ledger free-tier figures are not the actual account bill. No business DB or write APIs were used. A subsequent prompt-only refinement discourages generic 'confirm before departure' advice; that exact wording change has not had another paid smoke run.
+
+Local regression: focused 61/61; backend 819 total / 817 passed / 2 skipped / 0 failed; Even 106/106; both TypeScript checks, server build, 395-file public audit and diff-check passed. Not deployed.
+
 When Maps returns no match, all candidates are excluded, arrival is after closing, or current suitability is unknown, continue through the existing bounded read-only web workflow instead of stopping at an empty-result message. Carry public branch addresses and exact exclusion reasons, never GPS or raw provider failures. Preserve user constraints: price/type exclusions are not silently relaxed.
 
 Alcohol-related place requests require further local/activity verification even when the shop is open. Restaurant door hours alone do not establish kitchen service. Missing current hours, closing time or required kitchen evidence enters research. Follow-up opening checks that rule out all candidates also enter research. If jurisdiction or takeaway/on-premise intent is genuinely missing, ask one short question; timezone is not location evidence.

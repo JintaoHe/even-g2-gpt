@@ -132,17 +132,19 @@ test('explicit restrictions never become a verified option without corresponding
     assert.equal((await verifiedFoodAlternatives('food',area,{kind:'address',address:'Test City'},'drive',prefs,model,r,signal(),()=>at)).length,0);
   }
 });
-test('LocationDialogue delivers only code-formatted verified options, not raw web recommendations',async()=>{
+test('basic restaurant search uses one bounded web reply without the strict food verifier',async()=>{
   let finds=0, searches=0, freeReplies=0; const updates:any[]=[];
   const base:DialogueModel={...model,plan:async()=>({decision:'respond',locationAction:'nearby_search',routeDestination:'restaurants',routeOrigin:'Test City, IA'}),
-    reply:async()=>{freeReplies++;throw Error('must not use raw fallback answer');},
+    reply:async(_h,_s,delta,update,_e,_m,workflows)=>{freeReplies++;
+      assert.ok(workflows?.some(w=>w.action==='restaurant_search')); delta('Test Kitchen');
+      update?.({type:'answer.citations',text:'Test Kitchen',citations:[{url,title:'Menu',start:0,end:12}]});},
     findFoodAlternatives:async(q,a)=>{finds++;assert.match(q,/restaurants/);assert.deepEqual(a.labels,['Test City, IA']);return [branch];}};
   const provider:RouteProvider={...routes,discover:async()=>{if(searches++===0)throw new RouteError('ROUTE_NO_MATCHING_PLACES');return {query:'food',candidates:[place]};}};
   const broker=new LocationRequestBroker(()=>{},()=>crypto.randomUUID());
   const d=new LocationDialogue(base,broker,provider,'America/Chicago',()=>at,base), s=signal();
   await d.plan([],'现在附近有吃的吗？',true,s); let text='';
   await d.reply([{role:'user',content:'现在附近有吃的吗？'}],s,t=>text+=t,e=>updates.push(e));
-  assert.equal(finds,1);assert.equal(freeReplies,0);assert.match(text,/Test Kitchen/);assert.doesNotMatch(text,/哪个城市|几点关门/);
+  assert.equal(finds,0);assert.equal(freeReplies,1);assert.equal(searches,1);assert.match(text,/Test Kitchen/);assert.doesNotMatch(text,/哪个城市|几点关门/);
   assert.equal(updates.find(e=>e.type==='answer.citations').citations[0].url,url);
 });
 test('failed candidate triggers one bounded different-candidate search, never an endless retry',async()=>{

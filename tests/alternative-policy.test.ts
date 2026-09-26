@@ -27,6 +27,17 @@ test('alternative research requires tools and receipt-backed citations before re
   assert.match(requests[0].instructions,/official government\/regulator/);assert.match(requests[0].instructions,/Do not delegate verification/);
   assert.ok(events.some(e=>e.type==='answer.citations'));
 });
+
+test('simple restaurant reply searches basic facts without strict feasibility policy',async()=>{
+  const {model,requests,answer}=fixture();let text='';
+  await model.reply([{role:'user',content:'all you can eat sushi'}],new AbortController().signal,t=>text+=t,undefined,undefined,undefined,
+    [{kind:'navigation',action:'restaurant_search',searchArea:{source:'requested_area',labels:['Test City']}},{kind:'search',action:'read'}]);
+  assert.equal(text,answer);assert.equal(requests[0].tool_choice,'required');
+  assert.match(requests[0].instructions,/missing kitchen schedules or exact arrival margins do NOT block/i);
+  assert.doesNotMatch(requests[0].instructions,/If the day\/overnight interpretation or kitchen service cannot be established/);
+  assert.doesNotMatch(requests[0].instructions,/Present only evidence-supported feasible options/);
+  assert.match(requests[0].instructions,/AYCE must have menu\/site evidence/);
+});
 test('no tool receipt, no citations, or forged citation source cannot become a verified alternative', async () => {
   for(const options of [{calls:false},{citation:false},{source:'https://unrelated.example/'}]){
     const {model}=fixture(options);let text='';const events:ReplyUpdate[]=[];

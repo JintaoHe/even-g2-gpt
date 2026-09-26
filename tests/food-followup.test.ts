@@ -47,11 +47,12 @@ test('follow-up performs three bounded cuisine searches, preserves location and 
     {decision:'respond',locationAction:'nearby_search',routeDestination:'fried chicken sushi Chinese food',nearby:{mode:'recommend',taskAction:'continue',delegated:false,patch:{excludeNames:['IHOP'],cuisineTypes:['chicken_restaurant','sushi_restaurant','chinese_restaurant']}}},
     {decision:'respond',locationAction:'nearby_search',routeDestination:'sushi',nearby:{mode:'recommend',taskAction:'continue',delegated:false,patch:{cuisineTypes:['sushi_restaurant']}}}];
   let turn=0;
-  const base:DialogueModel={decide:async()=> 'respond',plan:async()=>plans[turn++],reply:async()=>{throw Error('unexpected generic reply');}};
+  const base:DialogueModel={decide:async()=> 'respond',plan:async()=>plans[turn++],reply:async(_h,_s,delta,_u,_e,_m,workflows)=>{
+    assert.ok(workflows?.some(w=>w.action==='restaurant_search')); delta('餐馆查询结果'); }};
   const provider:RouteProvider={discover:async request=>{
     calls.push(request);
     const type=request.nearbyPreferences?.cuisineTypes?.[0] ?? 'restaurant';
-    return {query:request.destination,candidates:[{placeId:type,name:type==='restaurant'?'IHOP':type,primaryType:type}]};
+    return {query:request.destination,candidates:[{placeId:type,name:type==='restaurant'?'IHOP':type,primaryType:type,address:'Test City, IA'}]};
   },route:async request=>({query:request.destination,candidates:request.candidates!.map(c=>({...c,durationSeconds:60,distanceMeters:100,quality:{reliable:false,risk:false}})),
     recommendedPlaceId:request.candidates![0].placeId,recommendationBasis:'fastest',mode:request.mode,trafficAware:false})};
   const broker=new LocationRequestBroker(()=>{},()=>crypto.randomUUID());
@@ -63,9 +64,34 @@ test('follow-up performs three bounded cuisine searches, preserves location and 
     assert.ok(answer); if(turn>1) assert.doesNotMatch(answer,/IHOP|哪个城市/);
     history.push({role:'assistant',content:answer});
   }
-  assert.deepEqual(calls.map(c=>c.destination),['restaurants','fried chicken restaurant','sushi restaurant','chinese restaurant','sushi restaurant']);
+  assert.deepEqual(calls.map(c=>c.destination),['restaurants','fried chicken restaurant','sushi restaurant','chinese restaurant','sushi']);
   assert.ok(calls.every(c=>c.origin.kind==='coordinates'));
   assert.deepEqual(calls.at(-1).nearbyPreferences.excludeNames,['IHOP']);
+});
+
+test('AYCE query reaches Maps; brand switch drops cuisine; missing kitchen/closing does not block web reply',async()=>{
+  const calls:any[]=[], evidence:any[]=[]; let turn=0, verifies=0;
+  const base:DialogueModel={decide:async()=> 'respond',plan:async()=>({decision:'respond',locationAction:'nearby_search',
+    routeDestination:turn++===0?'all you can eat sushi':"McDonald's",nearby:{mode:'recommend',taskAction:turn===1?'continue':'replace',delegated:false,
+      patch:turn===1?{needsFood:true,cuisineTypes:['sushi_restaurant'],unhandledExclusions:false}:{needsFood:true}}}),
+    reply:async(h,_s,delta,_u,_e,_m,w)=>{
+      assert.ok(w?.some(x=>x.action==='restaurant_search'));
+      assert.doesNotMatch(h.at(-1)!.content,/41\.57|-93\.711/);
+      evidence.push(JSON.parse(h.at(-1)!.content.split('\n').at(-1)!));delta('地图评分已查；AYCE 另查菜单。'); }};
+  const routes:RouteProvider={discover:async r=>{calls.push(r);return {query:r.destination,candidates:[{
+    placeId:'branch',name:r.destination,address:'Test City, IA',rating:4.3,userRatingCount:230,
+    hours:{openNow:true,checkedAt:Date.now(),source:'google'},primaryType:turn===1?'sushi_restaurant':'fast_food_restaurant'}]};},
+    verifyPlace:async c=>{verifies++;return c;},route:async r=>({query:r.destination,candidates:r.candidates!.map(c=>({...c,
+      durationSeconds:120,distanceMeters:800,quality:{reliable:true,risk:false}})),recommendedPlaceId:'branch',mode:r.mode,trafficAware:false,recommendationBasis:'fastest'})};
+  const broker=new LocationRequestBroker(()=>{},()=>crypto.randomUUID()),d=new LocationDialogue(base,broker,routes);
+  for(const text of ['附近 all you can eat 寿司','不吃寿司了，吃麦当劳']) {
+    const at=Date.now();broker.prime({location:{latitude:41.57,longitude:-93.711,accuracyM:10,observedAt:at,receivedAt:at}} as any);
+    const s=new AbortController().signal;await d.plan([],text,true,s);let answer='';await d.reply([{role:'user',content:text}],s,t=>answer+=t);assert.ok(answer);
+  }
+  assert.deepEqual(calls.map(c=>c.destination),['all you can eat sushi',"McDonald's"]);
+  assert.equal(calls[1].nearbyPreferences.cuisineTypes,undefined);assert.equal(verifies,0);
+  assert.equal(evidence[1].places[0].rating,4.3);assert.equal(evidence[1].places[0].hours.openNow,true);
+  assert.equal(evidence[1].places[0].hours.closesAt,undefined);
 });
 
 test('unsupported, unavailable and empty evidence have distinct truthful responses',async()=>{
