@@ -2,8 +2,8 @@ import type { RouteTravelMode } from './conversation.js';
 import type { EphemeralLocation } from './location.js';
 import type { CostLedger, GoogleSku } from './cost-ledger.js';
 import type { ProviderMetricObserver, NearbyMetricObserver } from './runtime-metrics.js';
-import type { NearbyPreferences } from './nearby-intent.js';
-import { freshHours, parseGoogleHours, publicWebsite, type PlaceHours } from './place-availability.js';
+import { cuisineTypes, type NearbyPreferences } from './nearby-intent.js';
+import { freshHours, parseGoogleHours, publicWebsite, secureWebsiteHint, type PlaceHours } from './place-availability.js';
 import { resolveSearchArea, type SearchArea } from './search-area.js';
 
 export type RouteOrigin = { kind: 'coordinates'; location: EphemeralLocation } | { kind: 'address'; address: string };
@@ -51,7 +51,7 @@ export type RouteRequest = {
   candidates?: PlaceCandidate[];
   nearbyPreferences?: NearbyPreferences;
 };
-export type NearbyExclusion = { placeId: string; name: string; address?: string; reason: 'closed' | 'closing' | 'price' | 'type' };
+export type NearbyExclusion = { placeId: string; name: string; address?: string; reason: 'closed' | 'closing' | 'price' | 'type' | 'name' | 'cuisine' };
 export type RouteDiscovery = { query: string; candidates: PlaceCandidate[]; excluded?: NearbyExclusion[] };
 
 export interface RouteProvider {
@@ -119,13 +119,16 @@ function sanitizeCandidate(value: any): PlaceCandidate | undefined {
 }
 
 export function prefilterNearby(candidates: PlaceCandidate[], prefs: NearbyPreferences = {}) {
+  const nameWords = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   const excluded: NearbyExclusion[] = [], kept: PlaceCandidate[] = [];
   for (const candidate of candidates) {
     const reason: NearbyExclusion['reason'] | undefined = candidate.businessStatus === 'CLOSED_PERMANENTLY'
       || ((prefs.visitTime ?? 'now') === 'now' && (candidate.openNow === false
         || candidate.businessStatus === 'CLOSED_TEMPORARILY' || candidate.businessStatus === 'FUTURE_OPENING')) ? 'closed'
       : prefs.priceCeiling && candidate.priceLevel && priceLevels.indexOf(candidate.priceLevel) > priceLevels.indexOf(prefs.priceCeiling) ? 'price'
-      : [candidate.primaryType, ...(candidate.types ?? [])].some(type => type && prefs.excludeTypes?.includes(type)) ? 'type' : undefined;
+      : prefs.excludeNames?.some(name => (` ${nameWords(candidate.name)} `).includes(` ${nameWords(name)} `)) ? 'name'
+      : [candidate.primaryType, ...(candidate.types ?? [])].some(type => type && prefs.excludeTypes?.includes(type)) ? 'type'
+      : prefs.cuisineTypes?.length && ![candidate.primaryType, ...(candidate.types ?? [])].some(type => type && prefs.cuisineTypes!.includes(type)) ? 'cuisine' : undefined;
     if (reason) excluded.push({ placeId: candidate.placeId, name: candidate.name, ...(candidate.address ? { address: candidate.address } : {}), reason }); else kept.push(candidate);
   }
   return { candidates: kept, excluded };
@@ -252,12 +255,15 @@ export class GoogleRoutesProvider implements RouteProvider {
           businessStatus: c.businessStatus === 'CLOSED_PERMANENTLY' ? c.businessStatus : undefined } : c);
     }
     const nearby = request.kind === 'nearby';
+    const cuisine = nearby && request.nearbyPreferences?.cuisineTypes?.length === 1
+      ? request.nearbyPreferences.cuisineTypes[0] : undefined;
     const textQuery = nearby && request.origin.kind === 'address' ? `${destination} near ${boundedText(request.origin.address, 240)}` : destination;
     const search = async (radius: number | undefined) => {
       const bias = radius !== undefined && request.origin.kind === 'coordinates' ? { locationBias: { circle: { center: {
         latitude: request.origin.location.latitude, longitude: request.origin.location.longitude
       }, radius } } } : {};
       const places = await this.post('places', this.placesEndpoint, { textQuery, pageSize: PLACE_SEARCH_CANDIDATES,
+        ...(cuisine && (cuisineTypes as readonly string[]).includes(cuisine) ? {includedType:cuisine,strictTypeFiltering:true} : {}),
         ...(nearby ? { rankPreference: 'DISTANCE' } : {}), ...bias },
       'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryType,places.types'
         + ',places.location,places.currentOpeningHours.openNow,places.currentOpeningHours.nextCloseTime,places.priceLevel,places.businessStatus', signal,
@@ -317,7 +323,7 @@ export class GoogleRoutesProvider implements RouteProvider {
     const updated = sanitizeCandidate(raw);
     if (!updated) throw new RouteError('ROUTE_INVALID');
     const hours = parseGoogleHours(raw, Date.now());
-    return { ...candidate, ...updated, openNow: hours.openNow, hours, website: publicWebsite(raw.websiteUri),
+    return { ...candidate, ...updated, openNow: hours.openNow, hours, website: secureWebsiteHint(raw.websiteUri),
       ...(typeof raw.timeZone?.id === 'string' ? { timeZone: raw.timeZone.id } : {}) };
   }
 

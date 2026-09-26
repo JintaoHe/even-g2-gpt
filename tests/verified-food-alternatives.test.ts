@@ -32,18 +32,45 @@ test('closing is exclusive and DST clock changes are not guessed',()=>{
 });
 test('structured evidence must cite retrieved official source, exact branch and explicit service periods',()=>{
   assert.deepEqual(parseAlternativeBranches({branches:[{name:branch.name,address:branch.address,source_url:url}]},[]),[]);
-  const raw={branch_matches:true,exceptions_conflict:false,source_url:url,kind:'takeout',periods:[{day:4,open_minute:600,close_minute:1680}]};
+  const raw={branch_matches:true,exceptions_conflict:false,source_url:url,kind:'takeout',schedule_label:'Pickup Hours',periods:[{day:4,open_minute:600,close_minute:1680}]};
   assert.deepEqual(parseFoodService(raw,[url],url),service);
   for(const change of [{branch_matches:false},{exceptions_conflict:true},{kind:'store'},{periods:[]},{periods:[{day:7,open_minute:0,close_minute:20}]},
     {periods:[{day:4,open_minute:1320,close_minute:180}]},{source_url:'https://other.example/a'}])
     assert.equal(parseFoodService({...raw,...change},[url],url),undefined);
 });
 test('branch matching requires street, city, state and name, not just chain',()=>{
+  assert.equal(sameBranch({...branch,name:'Sushi & Hibachi'},{...place,name:'Sushi and Hibachi'}),true);
+  assert.equal(sameBranch({...branch,name:'Sushi & Hibachi'},{...place,name:'Sushi and Hibachi',address:'11 Test Street, Test City, IA 12345'}),false);
   assert.equal(sameBranch(branch,{...place,address:'10 Test St, Test City, IA 12345, USA'}),true);
   assert.equal(sameBranch({...branch,name:'Test Kitchen — 10 Test Street'},place),true);
   assert.equal(sameBranch({...branch,name:'Test Kitchen — 11 Test Street'},place),false);
   for(const change of [{address:'11 Test Street, Test City, IA 12345'},{address:'10 Test Street, Other City, IA 12345'},
     {address:'10 Test Street, Test City, IL 12345'},{name:'Other Kitchen'}]) assert.equal(sameBranch(branch,{...place,...change}),false);
+});
+test('generic restaurant hours cannot be upgraded to kitchen evidence by the model',()=>{
+  const raw={branch_matches:true,exceptions_conflict:false,source_url:url,kind:'kitchen',schedule_label:'Business Hours',
+    periods:[{day:4,open_minute:600,close_minute:1680}]};
+  assert.equal(parseFoodService(raw,[url],url),undefined);
+  assert.equal(parseFoodService({...raw,schedule_label:null},[url],url),undefined);
+  assert.equal(parseFoodService({...raw,kind:'restaurant_hours'},[url],url)?.kind,'restaurant_hours');
+  assert.equal(parseFoodService({...raw,schedule_label:'Kitchen Hours'},[url],url)?.kind,'kitchen');
+  assert.equal(parseFoodService({...raw,kind:'restaurant_hours'},[url],'https://www.food.example/branch')?.kind,'restaurant_hours');
+  for(const website of ['https://food.example.evil.com/','https://unrelated.example/','https://other.food.example/'])
+    assert.equal(parseFoodService({...raw,kind:'restaurant_hours'},[url],website),undefined);
+  assert.equal(parseFoodService({...raw,kind:'restaurant_hours',exceptions_conflict:true},[url],url),undefined);
+});
+test('opening-hours candidates are labeled honestly and restricted to restaurant primary types',async()=>{
+  const m={...model,verifyFoodService:async()=>({...service,kind:'restaurant_hours' as const})};
+  for(const primaryType of ['bar','gas_station','store',undefined]) {
+    assert.equal((await run(m,{...routes,verifyPlace:async()=>({...place,primaryType,types:['restaurant']})})).length,0);
+  }
+  const result=await run(m,{...routes,verifyPlace:async()=>({...place,primaryType:'sushi_restaurant'})});
+  assert.equal(result.length,1);
+  const text=foodAlternativeText(result,area,'drive');
+  assert.match(text,/厨房截止时间未单独确认/);
+  assert.match(text,/不是已确认供餐/);
+  assert.doesNotMatch(text,/官网厨房时段相符/);
+  assert.equal((await run(m,{...routes,verifyPlace:async()=>({...place,primaryType:'restaurant',hours:{...place.hours!,foodOpenNow:false}})})).length,0);
 });
 test('verified alternative requires Google hours, measured arrival and independent service schedule',async()=>{
   const result=await run(); assert.equal(result.length,1); assert.match(foodAlternativeText(result,area,'drive'),/驾车约10分钟/);
@@ -66,7 +93,7 @@ test('two candidate cap, duplicates and user cancellation never leak late data',
 });
 test('food extraction uses structured search, no conversation, returns only validated evidence',async()=>{
   const calls:any[]=[];
-  const raw={branch_matches:true,exceptions_conflict:false,kind:'takeout',source_url:url,periods:[{day:4,open_minute:600,close_minute:1680}]};
+  const raw={branch_matches:true,exceptions_conflict:false,kind:'takeout',schedule_label:'Pickup Hours',source_url:url,periods:[{day:4,open_minute:600,close_minute:1680}]};
   const m=new OpenAIDialogue('fake','test',undefined,true,2,'America/Chicago',undefined,{fetcher:(async(_url,init)=>{
     calls.push(JSON.parse(String(init?.body)));return Response.json({status:'completed',output:[
       {type:'web_search_call',action:{sources:[{url}]}},{type:'message',content:[{type:'output_text',text:JSON.stringify(raw)}]}]});}) as typeof fetch});
@@ -75,6 +102,16 @@ test('food extraction uses structured search, no conversation, returns only vali
   assert.equal(calls[0].text.format.strict,true);
   assert.deepEqual(calls[0].tools[0].filters.allowed_domains,['food.example']);
   assert.doesNotMatch(calls[0].input,/latitude|longitude|history|placeId/);
+});
+
+test('official page opened by the tool is evidence without search sources; claimed URLs are not',async()=>{
+  const raw={branch_matches:true,exceptions_conflict:false,kind:'takeout',schedule_label:'Pickup Hours',source_url:url,periods:[{day:4,open_minute:600,close_minute:1680}]};
+  for (const [action,accepted] of [[{type:'open_page',url},true],[{type:'search',url},false],
+    [{type:'open_page',url:'https://other.example/'},false]] as const) {
+    const m=new OpenAIDialogue('fake','test',undefined,true,2,'UTC',undefined,{fetcher:(async()=>Response.json({status:'completed',output:[
+      {type:'web_search_call',action},{type:'message',content:[{type:'output_text',text:JSON.stringify(raw)}]}]})) as typeof fetch});
+    assert.deepEqual(await m.verifyFoodService(place,at,signal()),accepted ? service : undefined);
+  }
 });
 
 test('partial search quota limits the actual request; disabled/failed quota sends nothing',async()=>{
@@ -116,4 +153,25 @@ test('failed candidate triggers one bounded different-candidate search, never an
   finds=0;
   assert.equal((await run({...model,findFoodAlternatives:async()=>{finds++;return [bad];}})).length,0);
   assert.equal(finds,2);
+});
+
+test('known Google branches are verified first without rediscovering identity on the web',async()=>{
+  let finds=0, discovers=0;
+  const m={...model,findFoodAlternatives:async()=>{finds++;return [branch];}};
+  const r={...routes,discover:async()=>{discovers++;return {query:'food',candidates:[place]};}};
+  const report={outcome:'unverified' as const,candidates:0,checked:0,failures:{}};
+  const result=await verifiedFoodAlternatives('food',area,{kind:'address',address:'Test City'},'drive',{},m,r,signal(),()=>at,report,[place]);
+  assert.equal(result.length,1);assert.equal(finds,0);assert.equal(discovers,0);
+  assert.equal(report.outcome,'verified');assert.equal(report.checked,1);
+});
+
+test('seeded branches still respect rejection, cuisine, closing and service evidence',async()=>{
+  let serviceCalls=0;
+  const m={...model,findFoodAlternatives:async()=>[],verifyFoodService:async()=>{serviceCalls++;return service;}};
+  for(const prefs of [{excludeNames:[place.name]},{cuisineTypes:['sushi_restaurant']}]) {
+    assert.equal((await verifiedFoodAlternatives('food',area,{kind:'address',address:'Test City'},'drive',prefs,m,routes,signal(),()=>at,undefined,[place])).length,0);
+  }
+  assert.equal(serviceCalls,0);
+  assert.equal((await verifiedFoodAlternatives('food',area,{kind:'address',address:'Test City'},'drive',{},
+    {...m,verifyFoodService:async()=>undefined},routes,signal(),()=>at,undefined,[place])).length,0);
 });

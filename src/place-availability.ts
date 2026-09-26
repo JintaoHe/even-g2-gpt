@@ -56,6 +56,17 @@ export function publicWebsite(value: unknown): string | undefined {
     return u.href; } catch { return; }
 }
 
+/** A Maps website is a lookup hint, never evidence. Legacy HTTP listings may be
+ * tried over HTTPS; never fetch HTTP or downgrade TLS if HTTPS is unavailable. */
+export function secureWebsiteHint(value: unknown): string | undefined {
+  if (typeof value !== 'string') return;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'http:' && !url.username && !url.password && !url.port) url.protocol = 'https:';
+    return publicWebsite(url.href);
+  } catch { return; }
+}
+
 /** Bound even a non-cooperative test adapter; late results never mutate the selected candidates. */
 async function bounded<T>(run: () => Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
